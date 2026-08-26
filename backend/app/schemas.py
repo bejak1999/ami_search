@@ -189,6 +189,9 @@ class ItemOut(ItemBase):
     tracked: bool = False
     watch_count: int = 0
     in_collection: str | None = None
+    #: Set when the item is in the caller's collection, so the UI can remove it
+    #: again without a second lookup.
+    collection_entry_id: int | None = None
     mfc_id: int | None = None
     mfc_url: str | None = None
     mfc_matched_by: str | None = None

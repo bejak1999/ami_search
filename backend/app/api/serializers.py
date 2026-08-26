@@ -169,6 +169,7 @@ def item_out(
             )
         ).scalar_one_or_none()
         payload.in_collection = entry.status.value if entry else None
+        payload.collection_entry_id = entry.id if entry else None
     return payload
 
 

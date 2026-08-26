@@ -9,6 +9,7 @@ import { LandedTooltip } from '@/components/ItemCard'
 import { Badge, Card, SegmentedControl, Skeleton, Spinner, Tooltip } from '@/components/ui'
 import { dateTime, grams, money, percent, relativeTime, tidyName } from '@/lib/format'
 import { useToast } from '@/lib/toast'
+import { useWishlistToggle } from '@/lib/useWishlist'
 import clsx from 'clsx'
 
 const RANGES = [
@@ -61,15 +62,7 @@ export function ItemDetailPage() {
     onError: (error) => toast.error('Lookup failed', (error as Error).message),
   })
 
-  const wishlist = useMutation({
-    mutationFn: (status: 'wishlist' | 'owned') => api.collection.add({ item_id: id, status }),
-    onSuccess: () => {
-      toast.success('Saved to your collection')
-      void queryClient.invalidateQueries({ queryKey: ['item', id] })
-      void queryClient.invalidateQueries({ queryKey: ['collection'] })
-    },
-    onError: (error) => toast.error('Could not save', (error as Error).message),
-  })
+  const wishlist = useWishlistToggle()
 
   if (history.isLoading) {
     return (
@@ -215,11 +208,20 @@ export function ItemDetailPage() {
                   Track price
                 </button>
                 <button
-                  onClick={() => wishlist.mutate('wishlist')}
-                  className={clsx('btn-ghost', item.in_collection && 'border-accent/50 text-accent')}
+                  onClick={() => wishlist.mutate(item)}
+                  disabled={wishlist.isPending}
+                  aria-pressed={Boolean(item.in_collection)}
+                  className={clsx(
+                    'btn-ghost',
+                    item.in_collection && 'border-accent bg-accent/12 text-accent',
+                  )}
                 >
-                  <Icon name="heart" />
-                  {item.in_collection === 'wishlist' ? 'On wishlist' : 'Wishlist'}
+                  <Icon name="heart" className={clsx(item.in_collection && 'fill-current')} />
+                  {item.in_collection === 'wishlist'
+                    ? 'On wishlist'
+                    : item.in_collection
+                      ? `In collection (${item.in_collection})`
+                      : 'Wishlist'}
                 </button>
                 <button
                   onClick={() => refresh.mutate()}

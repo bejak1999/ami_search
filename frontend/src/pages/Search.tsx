@@ -8,6 +8,7 @@ import { ItemCard, ItemCardSkeleton } from '@/components/ItemCard'
 import { WatchEditor } from '@/components/WatchEditor'
 import { Badge, Card, EmptyState, Field, SegmentedControl, Spinner, Toggle } from '@/components/ui'
 import { useToast } from '@/lib/toast'
+import { useWishlistToggle } from '@/lib/useWishlist'
 import clsx from 'clsx'
 
 interface Filters {
@@ -89,15 +90,7 @@ export function SearchPage() {
       toast.error('Could not open that link', error instanceof ApiError ? error.message : undefined),
   })
 
-  const wishlist = useMutation({
-    mutationFn: (item: Item) => api.collection.add({ item_id: item.id!, status: 'wishlist' }),
-    onSuccess: () => {
-      toast.success('Added to your wishlist')
-      void queryClient.invalidateQueries({ queryKey: ['search'] })
-      void queryClient.invalidateQueries({ queryKey: ['collection'] })
-    },
-    onError: (error) => toast.error('Could not add that', (error as Error).message),
-  })
+  const wishlist = useWishlistToggle()
 
   function submit(event?: React.FormEvent) {
     event?.preventDefault()

@@ -96,6 +96,7 @@ export interface Item {
   tracked: boolean
   watch_count: number
   in_collection: CollectionStatus | null
+  collection_entry_id: number | null
   mfc_id: number | null
   mfc_url: string | null
   mfc_matched_by: string | null

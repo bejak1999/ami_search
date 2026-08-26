@@ -8,6 +8,7 @@ import { ItemCard, ItemCardSkeleton } from '@/components/ItemCard'
 import { WatchEditor } from '@/components/WatchEditor'
 import { Badge, Card, EmptyState, SegmentedControl, Spinner, Toggle } from '@/components/ui'
 import { useToast } from '@/lib/toast'
+import { useWishlistToggle } from '@/lib/useWishlist'
 import clsx from 'clsx'
 
 const KIND_LABELS: Record<string, string> = {
@@ -152,13 +153,7 @@ export function DiscoverPage() {
     onError: (error) => toast.error('MyFigureCollection lookup failed', (error as Error).message),
   })
 
-  const wishlist = useMutation({
-    mutationFn: (item: Item) => api.collection.add({ item_id: item.id!, status: 'wishlist' }),
-    onSuccess: () => {
-      toast.success('Added to your wishlist')
-      void queryClient.invalidateQueries({ queryKey: ['discover'] })
-    },
-  })
+  const wishlist = useWishlistToggle()
 
   const enrichNow = useMutation({
     mutationFn: () => api.discover.runEnrichment(20),
@@ -261,14 +256,24 @@ export function DiscoverPage() {
             ) : (
               <>
                 <Toggle checked={figuresOnly} onChange={setFiguresOnly} label="Figures only" />
-                <button
-                  onClick={() => viaMfc.mutate()}
-                  disabled={selected.length === 0 || viaMfc.isPending}
-                  className="btn-primary ml-auto"
-                >
-                  {viaMfc.isPending ? <Spinner /> : <Icon name="search" />}
-                  Search
-                </button>
+                <div className="ml-auto flex items-center gap-3">
+                  {selected.length === 0 && (
+                    <span className="text-xs text-faint">Pick a tag first</span>
+                  )}
+                  <button
+                    onClick={() => viaMfc.mutate()}
+                    disabled={selected.length === 0 || viaMfc.isPending}
+                    title={
+                      selected.length === 0
+                        ? 'Select at least one tag on the left'
+                        : `Search MyFigureCollection for ${selected.length} tag(s)`
+                    }
+                    className="btn-primary"
+                  >
+                    {viaMfc.isPending ? <Spinner /> : <Icon name="search" />}
+                    Search
+                  </button>
+                </div>
               </>
             )}
           </div>

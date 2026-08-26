@@ -117,13 +117,20 @@ export function ItemCard({ item, onOpen, onWatch, onWishlist, compact }: ItemCar
                   event.stopPropagation()
                   onWishlist(item)
                 }}
-                aria-label="Add to wishlist"
+                aria-pressed={Boolean(item.in_collection)}
+                title={item.in_collection ? 'Remove from your wishlist' : 'Add to your wishlist'}
+                aria-label={item.in_collection ? 'Remove from wishlist' : 'Add to wishlist'}
                 className={clsx(
-                  'btn bg-surface/95 px-2.5 py-1.5 backdrop-blur hover:bg-surface',
-                  item.in_collection && 'text-accent',
+                  'btn px-2.5 py-1.5 backdrop-blur',
+                  item.in_collection
+                    ? 'bg-accent text-accent-ink hover:brightness-110'
+                    : 'bg-surface/95 hover:bg-surface',
                 )}
               >
-                <Icon name="heart" className="h-3.5 w-3.5" />
+                <Icon
+                  name="heart"
+                  className={clsx('h-3.5 w-3.5', item.in_collection && 'fill-current')}
+                />
               </button>
             )}
           </div>

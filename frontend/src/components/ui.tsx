@@ -113,6 +113,13 @@ export function Skeleton({ className }: { className?: string }) {
   return <div className={clsx('skeleton rounded-lg', className)} />
 }
 
+// Switch geometry, in pixels. Kept together so the knob's travel is always
+// consistent with the track it moves in.
+const TRACK_WIDTH = 40
+const TRACK_HEIGHT = 20
+const KNOB_SIZE = 16
+const KNOB_INSET = 2
+
 export function Toggle({
   checked,
   onChange,
@@ -139,16 +146,28 @@ export function Toggle({
         aria-checked={checked}
         disabled={disabled}
         onClick={() => onChange(!checked)}
+        style={{ width: TRACK_WIDTH, height: TRACK_HEIGHT }}
         className={clsx(
-          'relative mt-0.5 h-5 w-9 shrink-0 rounded-full transition-colors duration-200',
+          'relative mt-0.5 shrink-0 rounded-full transition-colors duration-200',
           checked ? 'bg-accent' : 'bg-line',
         )}
       >
+        {/* The knob is positioned with explicit inline geometry rather than
+            utility classes. Two reasons: a button centres its content, so an
+            absolutely positioned child with no horizontal anchor starts
+            mid-track and slides out of the right-hand edge; and the generated
+            translate utilities did not reliably win the cascade here, which
+            left the knob pinned at its off position while aria-checked
+            flipped underneath it. Inline styles are unambiguous. */}
         <span
-          className={clsx(
-            'absolute top-0.5 h-4 w-4 rounded-full bg-white shadow transition-transform duration-200',
-            checked ? 'translate-x-4' : 'translate-x-0.5',
-          )}
+          aria-hidden="true"
+          className="absolute rounded-full bg-white shadow-sm transition-[left] duration-200 ease-out"
+          style={{
+            width: KNOB_SIZE,
+            height: KNOB_SIZE,
+            top: KNOB_INSET,
+            left: checked ? TRACK_WIDTH - KNOB_SIZE - KNOB_INSET : KNOB_INSET,
+          }}
         />
       </button>
       <span className="min-w-0">
