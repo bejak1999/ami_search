@@ -363,6 +363,17 @@ export function ItemDetailPage() {
                     </>
                   )}
                 </p>
+
+                {item.mfc_restricted && (
+                  <p className="mb-3 flex items-start gap-2 rounded-control border border-warning/30 bg-warning/10 px-3 py-2 text-xs leading-relaxed text-warning">
+                    <Icon name="info" className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+                    <span>
+                      MyFigureCollection hides this entry from signed-out visitors, so no tags
+                      could be imported. The link above is still correct — the barcode search
+                      resolved to it before the page was withheld.
+                    </span>
+                  </p>
+                )}
                 <div className="flex flex-wrap gap-1.5">
                   {(tags.data ?? []).map((tag) => (
                     <button
@@ -377,7 +388,7 @@ export function ItemDetailPage() {
                       {tag.name}
                     </button>
                   ))}
-                  {tags.data?.length === 0 && (
+                  {tags.data?.length === 0 && !item.mfc_restricted && (
                     <p className="text-xs text-faint">No tags on the linked entry.</p>
                   )}
                 </div>

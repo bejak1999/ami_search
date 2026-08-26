@@ -49,6 +49,38 @@ class Settings(BaseSettings):
     )
     amiami_api_key: str = "amiami_dev"
 
+    # ---- Catalogue ingest --------------------------------------------------
+    crawler_enabled: bool = True
+    """Walk the shop catalogue in the background so discovery has a corpus."""
+    crawler_requests_per_minute: float = 8.0
+    """The crawler's own budget. It also passes through the shared provider
+    limiter, and it yields entirely whenever a watch is due, so alerts always
+    win the race for the request budget."""
+    crawler_max_seconds_per_run: int = 240
+    crawler_run_interval_minutes: int = 5
+    crawler_jitter_sigma: float = 0.55
+    crawler_break_probability: float = 0.07
+    crawler_quiet_hours_start: int = 1
+    crawler_quiet_hours_end: int = 7
+    crawler_quiet_slowdown: float = 2.5
+
+    # ---- MyFigureCollection ------------------------------------------------
+    mfc_enabled: bool = True
+    mfc_requests_per_minute: float = 10.0
+    mfc_batch_size: int = 8
+    mfc_run_interval_minutes: int = 5
+    mfc_session_cookie: str = ""
+    """Optional PHPSESSID from a signed-in MyFigureCollection browser session.
+
+    Without it MFC serves a bare 404 for entries it restricts to signed-in
+    members, chiefly adult ones, so those items can be identified by barcode
+    but never tagged. Supplying a session makes them readable.
+
+    A cookie is taken rather than a username and password on purpose: it never
+    puts the account password in this database, and signing out on
+    MyFigureCollection revokes it immediately.
+    """
+
     # ---- FX ---------------------------------------------------------------
     fx_refresh_hours: int = 6
     fx_base_currency: str = "JPY"

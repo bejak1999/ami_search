@@ -34,7 +34,7 @@ from .db import init_db, session_scope
 from .events import bus
 from .providers import close_all
 from .scheduler.engine import engine
-from .services import fx
+from .services import crawler, fx
 
 logging.basicConfig(
     level=getattr(logging, settings.log_level.upper(), logging.INFO),
@@ -56,6 +56,13 @@ async def lifespan(_app: FastAPI):
             fx.ensure_fresh(db)
     except Exception:  # noqa: BLE001 - never block startup on a rate provider
         log.warning("Could not load exchange rates at startup", exc_info=True)
+
+    try:
+        with session_scope() as db:
+            crawler.ensure_scopes(db)
+            system.load_mfc_session(db)
+    except Exception:  # noqa: BLE001
+        log.warning("Could not prepare the catalogue crawler", exc_info=True)
 
     engine.start()
     try:

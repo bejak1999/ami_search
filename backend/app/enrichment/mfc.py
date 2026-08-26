@@ -27,6 +27,7 @@ from urllib.parse import quote, unquote
 
 from curl_cffi import requests as curl_requests
 
+from ..config import settings
 from ..providers.ratelimit import CircuitBreaker, TokenBucket
 
 log = logging.getLogger(__name__)
@@ -89,6 +90,9 @@ class MfcItem:
     id: int
     url: str
     title: str
+    #: True when the entry exists and the id is certain, but the page itself
+    #: is withheld from signed-out visitors, so no tags could be read.
+    restricted: bool = False
     image_url: str | None = None
     jan: str | None = None
     category: str | None = None
@@ -141,6 +145,25 @@ class MfcClient:
         self._cache: dict[str, tuple[float, str]] = {}
         self.cache_ttl = 3600.0
         self.requests_made = 0
+        #: Overrides the configured session at runtime, so the admin view can
+        #: change it without a restart.
+        self._session_cookie: str | None = None
+
+    @property
+    def session_cookie(self) -> str:
+        if self._session_cookie is not None:
+            return self._session_cookie
+        return settings.mfc_session_cookie or ""
+
+    def set_session_cookie(self, value: str | None) -> None:
+        """Swap the signed-in session and drop every pooled connection."""
+        self._session_cookie = (value or "").strip() or None
+        self._cache.clear()
+        self.close()
+
+    @property
+    def authenticated(self) -> bool:
+        return bool(self.session_cookie)
 
     @property
     def session(self) -> curl_requests.Session:
@@ -155,6 +178,9 @@ class MfcClient:
                     "Accept-Language": "en-US,en;q=0.9",
                 },
             )
+            cookie = self.session_cookie
+            if cookie:
+                session.cookies.set("PHPSESSID", cookie, domain=".myfigurecollection.net")
             self._local.session = session
             with self._lock:
                 self._sessions.append(session)
@@ -170,12 +196,18 @@ class MfcClient:
                 pass
         self._local = threading.local()
 
-    def _get(self, path: str) -> tuple[str, str]:
-        """Fetch a page. Returns (final_url, html)."""
+    def _get(self, path: str, allow_missing: bool = False) -> tuple[str, str, int]:
+        """Fetch a page. Returns (final_url, html, status).
+
+        With ``allow_missing`` a 404 comes back as a normal result instead of
+        raising, which matters for barcode lookups: MyFigureCollection hides
+        adult entries from signed-out visitors behind a plain 404, but it still
+        redirects to the right item first, and that redirect is worth keeping.
+        """
         url = path if path.startswith("http") else BASE + path
         cached = self._cache.get(url)
         if cached and time.monotonic() - cached[0] < self.cache_ttl:
-            return url, cached[1]
+            return url, cached[1], 200
 
         self.breaker.check()
         self.bucket.acquire(timeout=60.0)
@@ -188,7 +220,9 @@ class MfcClient:
         self.requests_made += 1
         if response.status_code == 404:
             self.breaker.record_success()
-            raise MfcNotFound("MyFigureCollection has no such page")
+            if not allow_missing:
+                raise MfcNotFound("MyFigureCollection has no such page")
+            return str(response.url), response.text, 404
         if response.status_code >= 400:
             self.breaker.record_failure()
             raise MfcError(f"MyFigureCollection returned {response.status_code}")
@@ -196,7 +230,7 @@ class MfcClient:
         self.breaker.record_success()
         final_url = str(response.url)
         self._cache[url] = (time.monotonic(), response.text)
-        return final_url, response.text
+        return final_url, response.text, response.status_code
 
     # -- lookup -----------------------------------------------------------
     def find_by_jan(self, jan: str) -> MfcItem | None:
@@ -204,15 +238,37 @@ class MfcClient:
         jan = (jan or "").strip()
         if not jan.isdigit() or len(jan) < 8:
             return None
-        final_url, html = self._get(f"/?keywords={quote(jan)}&_tb=item")
+
+        final_url, html, status = self._get(
+            f"/?keywords={quote(jan)}&_tb=item", allow_missing=True
+        )
         match = _ITEM_ID_RE.search(final_url)
         if not match:
             # More than one hit, or none. Only accept an unambiguous redirect.
             return None
-        return self._parse_item(int(match.group(1)), final_url, html)
+
+        mfc_id = int(match.group(1))
+        if status == 404:
+            # The redirect proves which entry the barcode belongs to, but the
+            # page is withheld. Adult entries do this to signed-out visitors,
+            # and the 404 carries no explanation. Keep the identification and
+            # be honest that the tags are missing rather than discarding a
+            # correct match.
+            log.info("MFC entry %s is withheld from guests; linking without tags", mfc_id)
+            return MfcItem(
+                id=mfc_id,
+                url=f"{BASE}/item/{mfc_id}",
+                title="",
+                restricted=True,
+            )
+        return self._parse_item(mfc_id, final_url, html)
 
     def get_item(self, mfc_id: int) -> MfcItem:
-        final_url, html = self._get(f"/item/{mfc_id}")
+        final_url, html, status = self._get(f"/item/{mfc_id}", allow_missing=True)
+        if status == 404:
+            return MfcItem(
+                id=mfc_id, url=f"{BASE}/item/{mfc_id}", title="", restricted=True
+            )
         return self._parse_item(mfc_id, final_url, html)
 
     def search(self, keywords: str, root: int | None = ROOT_FIGURES) -> list[MfcListing]:
@@ -223,7 +279,7 @@ class MfcClient:
         path = f"/item/browse/figure/?keywords={quote(keywords)}"
         if root is None:
             path = f"/?_tb=item&keywords={quote(keywords)}"
-        final_url, html = self._get(path)
+        final_url, html, _status = self._get(path)
 
         # A single strong hit redirects straight to the item page.
         direct = _ITEM_ID_RE.search(final_url)
@@ -255,7 +311,7 @@ class MfcClient:
         path = f"/?_tb=item{params}&page={max(1, page)}"
         if root:
             path += f"&rootId={root}"
-        _final_url, html = self._get(path)
+        _final_url, html, _status = self._get(path)
 
         pages_match = _PAGES_RE.search(html)
         total_pages = int(pages_match.group(2)) if pages_match else 1
@@ -369,12 +425,67 @@ class MfcClient:
                 item.characters.append(MfcEntry(id=0, name=parts[1], kind="character"))
         return item
 
+    #: Fetched to prove a session works. A restricted entry is the only
+    #: reliable test, because everything else is visible to guests too.
+    PROBE_RESTRICTED_ITEM = 166442
+
+    def check_session(self) -> dict:
+        """Report whether a signed-in session is configured and working."""
+        if not self.authenticated:
+            return {
+                "configured": False,
+                "valid": False,
+                "username": None,
+                "detail": "No session cookie set. Restricted entries stay unreadable.",
+            }
+
+        try:
+            _url, html, status = self._get("/", allow_missing=True)
+        except MfcError as exc:
+            return {"configured": True, "valid": False, "username": None, "detail": str(exc)}
+
+        # A signed-in page carries a link to the member's own profile.
+        match = re.search(r'href="/profile/([^"/]+)/?"', html)
+        username = match.group(1) if match else None
+        signed_in = bool(username) or "/session/signout" in html
+
+        detail = (
+            f"Signed in as {username}." if username
+            else "Signed in." if signed_in
+            else "The cookie was not accepted. Copy a fresh PHPSESSID from a signed-in browser."
+        )
+
+        result = {
+            "configured": True,
+            "valid": signed_in,
+            "username": username,
+            "detail": detail,
+        }
+
+        if signed_in:
+            # Confirm the session actually lifts the restriction, since being
+            # signed in is not the same as being allowed to see adult entries.
+            try:
+                _u, _h, probe_status = self._get(
+                    f"/item/{self.PROBE_RESTRICTED_ITEM}", allow_missing=True
+                )
+                result["restricted_entries_visible"] = probe_status == 200
+                if probe_status != 200:
+                    result["detail"] += (
+                        " Restricted entries are still hidden; enable adult content in your"
+                        " MyFigureCollection account settings."
+                    )
+            except MfcError:
+                result["restricted_entries_visible"] = None
+        return result
+
     def status(self) -> dict:
         return {
             "requests_made": self.requests_made,
             "rate_per_minute": self.bucket.rate_per_minute,
             "circuit": self.breaker.snapshot(),
             "cached_pages": len(self._cache),
+            "authenticated": self.authenticated,
         }
 
 

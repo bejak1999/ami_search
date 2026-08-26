@@ -196,6 +196,7 @@ class ItemOut(ItemBase):
     mfc_url: str | None = None
     mfc_matched_by: str | None = None
     mfc_confidence: float | None = None
+    mfc_restricted: bool = False
     tags: list[dict] = []
 
 

@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import time
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
@@ -201,6 +201,152 @@ def delete_user(
     db.delete(target)
     db.commit()
     return MessageResponse(message="User and all their data deleted")
+
+
+@admin.get("/catalog", response_model=MessageResponse)
+def catalog_progress(
+    provider: str = "amiami",
+    db: Session = Depends(get_db),
+    _admin: User = Depends(admin_user),
+) -> MessageResponse:
+    """How far the background catalogue build and MFC linking have got."""
+    from ..services import crawler, enrich
+
+    detail = crawler.progress(db, provider)
+    detail["mfc"] = enrich.tag_stats(db)
+    detail["mfc"]["enabled"] = settings.mfc_enabled
+    detail["mfc"]["requests_per_minute"] = settings.mfc_requests_per_minute
+    detail["mfc"]["eta_seconds"] = enrich.eta_seconds(db)
+    return MessageResponse(message="ok", detail=detail)
+
+
+@admin.post("/catalog/run", response_model=MessageResponse)
+def run_catalog_crawl(
+    seconds: int = Query(default=30, ge=5, le=120),
+    provider: str = "amiami",
+    db: Session = Depends(get_db),
+    _admin: User = Depends(admin_user),
+) -> MessageResponse:
+    """Crawl for a few seconds right now, so progress is visible immediately."""
+    from ..services import crawler
+
+    outcome = crawler.run_once(db, provider, budget_seconds=seconds)
+    return MessageResponse(
+        message=(
+            f"{outcome.pages} page(s), {outcome.items} item(s), "
+            f"{outcome.new_items} new. Stopped: {outcome.stopped_because or 'budget spent'}"
+        ),
+        detail=outcome.as_dict(),
+    )
+
+
+@admin.patch("/catalog/{scope}", response_model=MessageResponse)
+def update_catalog_slice(
+    scope: str,
+    payload: dict,
+    provider: str = "amiami",
+    db: Session = Depends(get_db),
+    _admin: User = Depends(admin_user),
+) -> MessageResponse:
+    """Enable, disable or rewind one slice of the catalogue build."""
+    from ..models import CatalogCrawl, CrawlState
+
+    crawl = db.execute(
+        select(CatalogCrawl).where(
+            CatalogCrawl.provider == provider, CatalogCrawl.scope == scope
+        )
+    ).scalar_one_or_none()
+    if crawl is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Unknown slice")
+
+    if "enabled" in payload:
+        crawl.enabled = bool(payload["enabled"])
+    if payload.get("restart"):
+        crawl.cursor_page = 1
+        crawl.state = CrawlState.idle
+        crawl.consecutive_errors = 0
+        crawl.last_error = None
+    db.commit()
+    return MessageResponse(message=f"Slice {scope} updated")
+
+
+#: Key under which the runtime MyFigureCollection session is stored, so it can
+#: be changed without a restart. It is never echoed back to the browser.
+MFC_SESSION_SETTING = "mfc_session"
+
+
+def load_mfc_session(db: Session) -> None:
+    """Apply a stored session cookie to the client at start-up."""
+    from ..enrichment.mfc import client
+    from ..models import AppSetting
+
+    row = db.get(AppSetting, MFC_SESSION_SETTING)
+    if row and (row.value or {}).get("cookie"):
+        client.set_session_cookie(row.value["cookie"])
+
+
+@admin.get("/mfc/session", response_model=MessageResponse)
+def mfc_session_status(_admin: User = Depends(admin_user)) -> MessageResponse:
+    """Whether a signed-in MyFigureCollection session is configured and working."""
+    from ..enrichment.mfc import client
+
+    return MessageResponse(message="ok", detail=client.check_session())
+
+
+@admin.put("/mfc/session", response_model=MessageResponse)
+def set_mfc_session(
+    payload: dict, db: Session = Depends(get_db), _admin: User = Depends(admin_user)
+) -> MessageResponse:
+    """Store a PHPSESSID copied from a signed-in browser.
+
+    A cookie rather than a password: the account password never reaches this
+    database, and signing out on MyFigureCollection revokes access at once.
+    """
+    from ..enrichment.mfc import client
+    from ..models import AppSetting
+
+    cookie = str(payload.get("cookie") or "").strip()
+    row = db.get(AppSetting, MFC_SESSION_SETTING)
+    if row is None:
+        row = AppSetting(key=MFC_SESSION_SETTING, value={})
+        db.add(row)
+    row.value = {"cookie": cookie}
+    db.commit()
+
+    client.set_session_cookie(cookie)
+    if not cookie:
+        return MessageResponse(message="Session cleared. Restricted entries stay unreadable.")
+
+    result = client.check_session()
+    return MessageResponse(
+        ok=bool(result.get("valid")),
+        message=result.get("detail", ""),
+        detail=result,
+    )
+
+
+@admin.post("/mfc/recheck-restricted", response_model=MessageResponse)
+def recheck_restricted(
+    limit: int = Query(default=25, ge=1, le=200),
+    db: Session = Depends(get_db),
+    _admin: User = Depends(admin_user),
+) -> MessageResponse:
+    """Re-read entries that were withheld before a session was configured."""
+    from ..models import Item
+    from ..services import enrich
+
+    items = list(
+        db.execute(
+            select(Item).where(Item.mfc_restricted.is_(True)).limit(limit)
+        )
+        .scalars()
+        .all()
+    )
+    linked = sum(1 for item in items if enrich.enrich_item(db, item, force=True))
+    return MessageResponse(
+        message=f"Re-read {len(items)} withheld entr(ies), {linked} now carry tags",
+        detail={"checked": len(items), "tagged": linked},
+    )
 
 
 @admin.get("/settings", response_model=MessageResponse)

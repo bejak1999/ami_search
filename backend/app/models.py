@@ -264,6 +264,9 @@ class Item(Base):
     mfc_confidence: Mapped[float | None] = mapped_column(Float)
     mfc_fetched_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
     mfc_attempts: Mapped[int] = mapped_column(Integer, default=0)
+    # The entry was identified, but MyFigureCollection withholds the page from
+    # signed-out visitors, so no tags could be imported for it.
+    mfc_restricted: Mapped[bool] = mapped_column(Boolean, default=False)
 
     prices: Mapped[list["PricePoint"]] = relationship(
         back_populates="item", cascade="all, delete-orphan", passive_deletes=True
@@ -626,3 +629,70 @@ class DiscoverySeed(Base):
     )
     lookup_state: Mapped[str] = mapped_column(String(16), default="pending")
     fetched_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+# ---------------------------------------------------------------------------
+# Catalogue ingest
+# ---------------------------------------------------------------------------
+
+
+class CrawlState(str, enum.Enum):
+    idle = "idle"
+    running = "running"
+    paused = "paused"
+    completed = "completed"
+    failed = "failed"
+
+
+class CatalogCrawl(Base):
+    """A resumable sweep of a shop's catalogue.
+
+    Discovery is only as good as the corpus behind it, and a corpus made only
+    of things the user happened to search for is not a corpus. This walks the
+    shop page by page in the background and records every item and its price,
+    so the local catalogue reflects the shop rather than the search history.
+
+    Each row keeps its own cursor, so a restart resumes where it left off
+    instead of starting the sweep again.
+    """
+
+    __tablename__ = "catalog_crawls"
+    __table_args__ = (UniqueConstraint("provider", "scope", name="uq_crawl_provider_scope"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    provider: Mapped[str] = mapped_column(String(32), default="amiami", index=True)
+    #: Which slice of the shop this sweep covers, e.g. figures_preowned.
+    scope: Mapped[str] = mapped_column(String(64))
+    label: Mapped[str] = mapped_column(String(120), default="")
+    #: Provider-specific query for the slice, stored so scopes stay data.
+    query: Mapped[dict] = mapped_column(JSON, default=dict)
+
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    #: Lower runs first, so the interesting slices fill in before the long tail.
+    priority: Mapped[int] = mapped_column(Integer, default=100)
+    state: Mapped[CrawlState] = mapped_column(Enum(CrawlState), default=CrawlState.idle)
+
+    #: Next page to fetch. 1-based, matching the upstream API.
+    cursor_page: Mapped[int] = mapped_column(Integer, default=1)
+    per_page: Mapped[int] = mapped_column(Integer, default=50)
+    total_results: Mapped[int] = mapped_column(Integer, default=0)
+    pages_total: Mapped[int] = mapped_column(Integer, default=0)
+
+    #: After a first full sweep, later cycles only re-read the newest pages,
+    #: because the shop lists newest first and the tail rarely changes.
+    head_pages: Mapped[int] = mapped_column(Integer, default=20)
+    full_sweep_interval_days: Mapped[int] = mapped_column(Integer, default=7)
+    last_full_sweep_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    cycles_completed: Mapped[int] = mapped_column(Integer, default=0)
+
+    pages_fetched: Mapped[int] = mapped_column(Integer, default=0)
+    items_seen: Mapped[int] = mapped_column(Integer, default=0)
+    items_new: Mapped[int] = mapped_column(Integer, default=0)
+    items_changed: Mapped[int] = mapped_column(Integer, default=0)
+
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_run_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_error: Mapped[str | None] = mapped_column(Text)
+    consecutive_errors: Mapped[int] = mapped_column(Integer, default=0)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)

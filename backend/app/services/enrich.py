@@ -109,6 +109,13 @@ def apply_mfc_item(db: Session, item: Item, mfc: MfcItem, matched_by: str, confi
     item.mfc_matched_by = matched_by
     item.mfc_confidence = round(confidence, 3)
     item.mfc_fetched_at = utcnow()
+    item.mfc_restricted = mfc.restricted
+
+    if mfc.restricted:
+        # The barcode redirect identified the entry, but its page is hidden,
+        # so there is nothing to import beyond the link itself.
+        db.commit()
+        return 0
 
     added = 0
     for attribute, kind in _ENTRY_KINDS:
@@ -259,3 +266,33 @@ def tag_stats(db: Session) -> dict:
         "pending_items": pending,
         "client": client.status(),
     }
+
+
+def eta_seconds(db: Session) -> int | None:
+    """Roughly how long until every known item has been looked up.
+
+    Honest about the duty cycle: the job only runs for a moment every few
+    minutes, so the figure is dominated by the waiting, not the requests.
+    """
+    from ..config import settings
+
+    pending = int(
+        db.execute(
+            select(func.count(Item.id)).where(
+                Item.mfc_id.is_(None), Item.mfc_attempts < MAX_ATTEMPTS
+            )
+        ).scalar_one()
+        or 0
+    )
+    if pending <= 0:
+        return None
+
+    batch = max(1, settings.mfc_batch_size)
+    interval = max(1, settings.mfc_run_interval_minutes) * 60
+    # Each item costs one request when the barcode hits, two when it falls
+    # back to a title search, so assume something in between.
+    requests_per_item = 1.4
+    seconds_per_batch = max(
+        interval, batch * requests_per_item * (60.0 / max(0.1, settings.mfc_requests_per_minute))
+    )
+    return int(pending / batch * seconds_per_batch)

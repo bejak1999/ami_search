@@ -101,6 +101,7 @@ export interface Item {
   mfc_url: string | null
   mfc_matched_by: string | null
   mfc_confidence: number | null
+  mfc_restricted: boolean
   tags: TagRef[]
 }
 

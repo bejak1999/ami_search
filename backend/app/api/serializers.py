@@ -148,6 +148,7 @@ def item_out(
     payload.mfc_url = item.mfc_url
     payload.mfc_matched_by = item.mfc_matched_by
     payload.mfc_confidence = item.mfc_confidence
+    payload.mfc_restricted = bool(item.mfc_restricted)
 
     if with_context and user is not None:
         payload.tags = [

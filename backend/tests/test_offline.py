@@ -719,6 +719,126 @@ def test_rate_limiting() -> None:
     check("success closes it again", not breaker.is_open)
 
 
+def test_pacing() -> None:
+    print()
+    print("== Human-like request pacing ==")
+    import statistics
+    from datetime import datetime as dt
+
+    from app.services.pacing import HumanPacer
+
+    daytime = dt(2026, 6, 1, 14, 0)
+    pacer = HumanPacer(requests_per_minute=12)
+    delays = [pacer.next_delay(daytime) for _ in range(6000)]
+
+    achieved = 60 / statistics.mean(delays)
+    check("the configured rate is actually achieved", 10.5 <= achieved <= 13.5, achieved)
+    check("no delay falls below the floor", min(delays) >= pacer.minimum_delay)
+
+    # The whole point is that the gaps are irregular.
+    spread = statistics.pstdev(delays) / statistics.mean(delays)
+    check("gaps vary rather than tick", spread > 0.5, spread)
+    distinct = len({round(d, 1) for d in delays[:300]})
+    check("consecutive gaps are rarely equal", distinct > 80, distinct)
+    check("long breaks do occur", max(delays) > statistics.mean(delays) * 4, max(delays))
+
+    # And it eases off overnight.
+    night = [pacer.next_delay(dt(2026, 6, 1, 3, 0)) for _ in range(2000)]
+    check(
+        "the small hours are slower",
+        statistics.mean(night) > statistics.mean(delays) * 1.5,
+        (statistics.mean(night), statistics.mean(delays)),
+    )
+    check("daytime is not slowed", not HumanPacer()._diurnal_factor(daytime) > 1.0)
+
+
+def test_crawler_cycles() -> None:
+    print()
+    print("== Catalogue crawl scheduling ==")
+    from datetime import datetime as dt
+    from datetime import timedelta as td
+
+    from app.models import CatalogCrawl
+    from app.services.crawler import _eta_seconds, _page_limit
+
+    fresh = CatalogCrawl(provider="amiami", scope="s", pages_total=0)
+    check("an unmeasured slice is unbounded", _page_limit(fresh) > 1000)
+
+    first = CatalogCrawl(provider="amiami", scope="s", pages_total=200, cycles_completed=0)
+    check("the first pass reads everything", _page_limit(first) == 200)
+
+    later = CatalogCrawl(
+        provider="amiami",
+        scope="s",
+        pages_total=200,
+        cycles_completed=1,
+        head_pages=20,
+        last_full_sweep_at=datetime.now(timezone.utc),
+    )
+    check("later passes only re-read the newest pages", _page_limit(later) == 20, _page_limit(later))
+
+    stale = CatalogCrawl(
+        provider="amiami",
+        scope="s",
+        pages_total=200,
+        cycles_completed=5,
+        head_pages=20,
+        full_sweep_interval_days=7,
+        last_full_sweep_at=datetime.now(timezone.utc) - td(days=8),
+    )
+    check("a full sweep comes round again", _page_limit(stale) == 200, _page_limit(stale))
+
+    check("nothing left means no estimate", _eta_seconds(0) is None)
+    check("an estimate is produced when work remains", (_eta_seconds(100) or 0) > 0)
+    check(
+        "more pages take longer",
+        (_eta_seconds(200) or 0) > (_eta_seconds(100) or 0),
+    )
+
+
+def test_crawler_yields_to_watches() -> None:
+    print()
+    print("== The crawl stands aside for watches ==")
+    from app.db import SessionLocal, init_db
+    from app.models import User, Watch
+    from app.security import hash_password
+    from app.services.crawler import ensure_scopes, watches_are_due
+
+    init_db()
+    db = SessionLocal()
+    try:
+        check("nothing due on an empty instance", not watches_are_due(db))
+
+        user = User(
+            email="crawl@example.com",
+            username="crawluser",
+            password_hash=hash_password("Crawler-Test-2026"),
+        )
+        db.add(user)
+        db.commit()
+
+        # A watch that has never run is due immediately.
+        watch = Watch(user_id=user.id, query="test", enabled=True, next_run_at=None)
+        db.add(watch)
+        db.commit()
+        check("a never-run watch counts as due", watches_are_due(db))
+
+        watch.next_run_at = datetime.now(timezone.utc) + timedelta(hours=1)
+        db.commit()
+        check("a scheduled watch does not", not watches_are_due(db))
+
+        watch.enabled = False
+        watch.next_run_at = None
+        db.commit()
+        check("a paused watch never blocks the crawl", not watches_are_due(db))
+
+        created = ensure_scopes(db)
+        check("default slices are registered", created >= 4, created)
+        check("registering twice adds nothing", ensure_scopes(db) == 0)
+    finally:
+        db.close()
+
+
 def test_settings() -> None:
     print("\n== Configuration ==")
     from app.config import Settings
@@ -753,6 +873,9 @@ def main() -> int:
     test_normalisation()
     test_local_filters()
     test_rate_limiting()
+    test_pacing()
+    test_crawler_cycles()
+    test_crawler_yields_to_watches()
     test_settings()
 
     print(f"\n{'=' * 46}\n  {PASS} passed, {FAIL} failed\n{'=' * 46}")

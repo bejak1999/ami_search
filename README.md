@@ -54,6 +54,13 @@ It also answers the question the shop price does not: **what will this actually 
 - Lowest / highest / average ever seen, and how long an item has been tracked
 - **Deal radar** flags anything unusually cheap against its own history, no watch required
 
+### 🗂️ The catalogue builds itself
+- A background crawler walks the shop **slice by slice** — pre-owned figures first, then in-stock, pre-orders and the long tail — recording every listing and its price
+- **Irregular by design.** Gaps are drawn from a log-normal distribution with occasional long breaks and an overnight slowdown, because a request every six seconds on the dot is the most recognisable thing a crawler can do
+- **Alerts always win.** The crawl stops the instant one of your watches is due
+- Resumable cursors, so a restart continues instead of starting over. After the first pass only the newest pages are re-read, with a full sweep every so often
+- Progress, rates and estimates are all visible in **Administration**
+
 ### 🏷️ Discovery by MyFigureCollection tag
 - Items are cross-referenced with MyFigureCollection **by barcode**, which is exact
 - Browse AmiAmi by MFC tags: character, series, pose, outfit, sculptor, material
@@ -283,7 +290,7 @@ Then add it in `backend/app/providers/registry.py`. The database already keys ev
 ```bash
 cd backend
 
-python tests/test_offline.py       # 135 assertions, no network
+python tests/test_offline.py       # 155 assertions, no network
 python tests/test_migration.py     # 15 assertions: upgrading an old database
 python tests/smoke_e2e.py          # 68 assertions against the live AmiAmi API
 python tests/smoke_discovery.py    # 25 assertions across AmiAmi and MFC
@@ -319,6 +326,15 @@ every push.
 **Notification secrets** — bot tokens, webhook URLs, push subscriptions — are
 stored in the database and never sent back to the browser; the edit form shows
 only a masked hint, and leaving a secret field empty keeps the stored value.
+
+**The optional MyFigureCollection session** takes a `PHPSESSID` copied from a
+signed-in browser, never a password. MFC hides some entries — chiefly adult
+ones — behind a bare 404 for signed-out visitors; those items can still be
+identified by barcode, but no tags can be read for them. Supplying a session
+makes them readable. It is off by default, the cookie is never sent back to
+the browser, and signing out on MyFigureCollection revokes it immediately.
+Bear in mind that requests then carry your identity, so the deliberately slow
+rate matters more rather than less.
 
 ---
 

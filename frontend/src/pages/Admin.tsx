@@ -1,5 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { api } from '@/api/client'
+import { CatalogPanel } from '@/components/CatalogPanel'
 import { Icon } from '@/components/Icon'
 import { Badge, Card, SectionTitle, Spinner, Stat } from '@/components/ui'
 import { dateTime, duration, relativeTime } from '@/lib/format'
@@ -75,6 +76,8 @@ export function AdminPage() {
           icon="chart"
         />
       </div>
+
+      <CatalogPanel />
 
       <section>
         <SectionTitle title="Shops" icon="link" subtitle="Upstream health and rate limits" />

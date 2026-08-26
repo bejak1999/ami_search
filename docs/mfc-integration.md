@@ -73,3 +73,44 @@ The "search MyFigureCollection" mode is the slower path that reaches figures
 nobody on the instance has looked for yet. It looks up a bounded number of
 shop matches per call and caches the seeds, so paging through results does
 not re-fetch.
+
+## Entries MFC withholds
+
+Some entries are visible only to signed-in members, chiefly adult ones. For a
+signed-out visitor MFC does not say so: it serves a plain **404 Not Found**
+with no explanation. The "18+" marker only renders for members who have
+enabled adult content.
+
+This matters because the barcode search still redirects correctly first:
+
+```
+GET /?keywords=4562177700078&_tb=item
+  -> 302 to /item/166442
+  -> 404
+```
+
+The redirect target is authoritative even though the page is withheld, so the
+identification is kept rather than thrown away. Such items are linked with
+`mfc_restricted = true`, get their MFC link in the UI, and carry no tags. The
+item page says why instead of looking broken.
+
+### Using a signed-in session
+
+Supplying a `PHPSESSID` from a signed-in browser makes those entries readable.
+Set `MFC_SESSION_COOKIE`, or paste it in **Administration** where it takes
+effect without a restart.
+
+A cookie is taken rather than a username and password deliberately:
+
+* the account password never reaches this database
+* signing out on MyFigureCollection revokes it immediately
+* no login flow has to be replayed against a CSRF-protected form, which would
+  be fragile and would look far more like automation than a normal session
+
+`GET /api/admin/mfc/session` reports whether the cookie is accepted, and
+separately whether restricted entries are actually visible — being signed in
+is not the same as having adult content enabled on the account. Once a session
+is configured, **Re-read entries that were withheld earlier** goes back over
+the items that were linked without tags.
+
+Requests then carry your identity, so the low rate matters more, not less.

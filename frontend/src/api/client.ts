@@ -197,5 +197,17 @@ export const api = {
     deleteUser: (id: number) => del<MessageResponse>(`/admin/users/${id}`),
     settings: () => get<MessageResponse>('/admin/settings'),
     generateVapid: () => post<MessageResponse>('/admin/vapid/generate'),
+    catalog: () => get<MessageResponse>('/admin/catalog'),
+    runCatalogCrawl: (seconds = 30) =>
+      post<MessageResponse>(`/admin/catalog/run${qs({ seconds })}`),
+    updateCatalogSlice: (scope: string, body: Record<string, unknown>) =>
+      patch<MessageResponse>(`/admin/catalog/${encodeURIComponent(scope)}`, body),
+    mfcSession: () => get<MessageResponse>('/admin/mfc/session'),
+    setMfcSession: (cookie: string) => request<MessageResponse>('/admin/mfc/session', {
+      method: 'PUT',
+      body: JSON.stringify({ cookie }),
+    }),
+    recheckRestricted: (limit = 50) =>
+      post<MessageResponse>(`/admin/mfc/recheck-restricted${qs({ limit })}`),
   },
 }

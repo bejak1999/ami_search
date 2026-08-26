@@ -19,7 +19,7 @@ from sqlalchemy import or_, select
 from ..config import settings
 from ..db import session_scope
 from ..models import Watch
-from ..services import catalog, dealradar, digest, enrich, fx, matcher
+from ..services import catalog, crawler, dealradar, digest, enrich, fx, matcher
 
 log = logging.getLogger(__name__)
 
@@ -40,6 +40,10 @@ class PollingEngine:
         self.runs_total = 0
         self.alerts_total = 0
         self.errors_total = 0
+        self.crawl_pages_total = 0
+        self.crawl_items_total = 0
+        self.last_crawl: dict | None = None
+        self.last_enrichment: dict | None = None
 
     # -- lifecycle --------------------------------------------------------
     def start(self) -> None:
@@ -65,16 +69,32 @@ class PollingEngine:
         self.scheduler.add_job(
             self.run_deal_radar, "interval", hours=6, id="deal_radar", max_instances=1
         )
+        # Build the local catalogue in the background. Discovery is only as
+        # good as the corpus behind it, and a corpus made of whatever the user
+        # happened to search for is not one.
+        if settings.crawler_enabled:
+            self.scheduler.add_job(
+                self.run_crawler,
+                "interval",
+                minutes=max(1, settings.crawler_run_interval_minutes),
+                id="catalog_crawl",
+                max_instances=1,
+                coalesce=True,
+                next_run_time=datetime.now(timezone.utc) + timedelta(seconds=30),
+            )
+
         # MyFigureCollection is scraped slowly and steadily in the background,
         # so the tag index fills in without ever bursting on that site.
-        self.scheduler.add_job(
-            self.run_enrichment,
-            "interval",
-            minutes=5,
-            id="mfc_enrich",
-            max_instances=1,
-            next_run_time=datetime.now(timezone.utc) + timedelta(minutes=1),
-        )
+        if settings.mfc_enabled:
+            self.scheduler.add_job(
+                self.run_enrichment,
+                "interval",
+                minutes=max(1, settings.mfc_run_interval_minutes),
+                id="mfc_enrich",
+                max_instances=1,
+                coalesce=True,
+                next_run_time=datetime.now(timezone.utc) + timedelta(minutes=1),
+            )
         self.scheduler.add_job(
             self.housekeeping, "cron", hour=4, minute=17, id="housekeeping", max_instances=1
         )
@@ -183,10 +203,22 @@ class PollingEngine:
         except Exception:  # noqa: BLE001
             log.exception("Deal radar failed")
 
+    def run_crawler(self) -> None:
+        try:
+            with session_scope() as db:
+                outcome = crawler.run_once(db)
+            if outcome.pages:
+                self.crawl_pages_total += outcome.pages
+                self.crawl_items_total += outcome.items
+            self.last_crawl = outcome.as_dict()
+        except Exception:  # noqa: BLE001
+            log.exception("Catalogue crawl failed")
+
     def run_enrichment(self) -> None:
         try:
             with session_scope() as db:
-                enrich.run_batch(db, limit=8)
+                outcome = enrich.run_batch(db, limit=settings.mfc_batch_size)
+            self.last_enrichment = outcome
         except Exception:  # noqa: BLE001
             log.exception("MFC enrichment batch failed")
 
@@ -220,6 +252,11 @@ class PollingEngine:
             "errors_total": self.errors_total,
             "adaptive": settings.adaptive_polling,
             "min_interval_seconds": settings.min_poll_interval_seconds,
+            "crawler_enabled": settings.crawler_enabled,
+            "crawl_pages_total": self.crawl_pages_total,
+            "crawl_items_total": self.crawl_items_total,
+            "last_crawl": self.last_crawl,
+            "last_enrichment": self.last_enrichment,
         }
 
 
