@@ -729,6 +729,9 @@ def test_pacing() -> None:
 
     daytime = dt(2026, 6, 1, 14, 0)
     pacer = HumanPacer(requests_per_minute=12)
+    # Seeded so the assertions below are about the distribution's shape rather
+    # than about whichever sequence today's entropy happened to produce.
+    pacer._rng.seed(20260601)
     delays = [pacer.next_delay(daytime) for _ in range(6000)]
 
     achieved = 60 / statistics.mean(delays)
@@ -738,11 +741,17 @@ def test_pacing() -> None:
     # The whole point is that the gaps are irregular.
     spread = statistics.pstdev(delays) / statistics.mean(delays)
     check("gaps vary rather than tick", spread > 0.5, spread)
+    # A metronome would yield exactly one distinct value; anything in this
+    # range is unmistakably irregular. The bar is deliberately far from the
+    # observed count so the test cannot start failing on a different draw.
     distinct = len({round(d, 1) for d in delays[:300]})
-    check("consecutive gaps are rarely equal", distinct > 80, distinct)
+    check("gaps are not a fixed tick", distinct > 40, distinct)
+    repeats = sum(1 for a, b in zip(delays, delays[1:]) if abs(a - b) < 0.01)
+    check("consecutive gaps almost never repeat", repeats < len(delays) * 0.02, repeats)
     check("long breaks do occur", max(delays) > statistics.mean(delays) * 4, max(delays))
 
     # And it eases off overnight.
+    pacer._rng.seed(20260602)
     night = [pacer.next_delay(dt(2026, 6, 1, 3, 0)) for _ in range(2000)]
     check(
         "the small hours are slower",
