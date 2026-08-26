@@ -1,0 +1,13 @@
+{
+  "name": "AmiSearch",
+  "short_name": "AmiSearch",
+  "description": "Price tracking and restock alerts for Japanese hobby shops.",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#090b11",
+  "theme_color": "#090b11",
+  "icons": [
+    { "src": "/icons/icon-192.png", "sizes": "192x192", "type": "image/png" },
+    { "src": "/icons/icon-512.png", "sizes": "512x512", "type": "image/png" }
+  ]
+}

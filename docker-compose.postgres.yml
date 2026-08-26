@@ -1,0 +1,29 @@
+# Optional Postgres setup. SQLite is the default and is perfectly adequate for
+# a household; reach for this only if you already run Postgres or expect many
+# users on one instance.
+#
+#   docker compose -f docker-compose.yml -f docker-compose.postgres.yml up -d
+
+services:
+  amisearch:
+    environment:
+      DATABASE_URL: postgresql+psycopg://amisearch:amisearch@db:5432/amisearch
+    depends_on:
+      db:
+        condition: service_healthy
+
+  db:
+    image: postgres:16-alpine
+    container_name: amisearch-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: amisearch
+      POSTGRES_PASSWORD: amisearch
+      POSTGRES_DB: amisearch
+    volumes:
+      - ./data/postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U amisearch"]
+      interval: 10s
+      timeout: 5s
+      retries: 5

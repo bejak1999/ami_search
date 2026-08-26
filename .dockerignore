@@ -1,0 +1,14 @@
+**/.git
+**/.venv
+**/node_modules
+**/__pycache__
+**/*.pyc
+**/dist
+backend/app/static
+backend/tests
+data/
+beispiele/
+docs/
+*.md
+!README.md
+.env*

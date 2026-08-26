@@ -1,0 +1,70 @@
+# AmiSearch - self-hosted price tracking for AmiAmi
+#
+#   docker compose up -d
+#
+# Then open http://<host>:8080 and create the first account, which becomes the
+# administrator.
+
+services:
+  amisearch:
+    image: ghcr.io/bejak1999/ami_search:latest
+    container_name: amisearch
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    volumes:
+      # Holds the SQLite database, the generated secret key and price history.
+      - ./data:/data
+    environment:
+      # ---- Core ----------------------------------------------------------
+      TZ: Europe/Berlin
+      # Public URL of this instance. Used for deep links in notifications and
+      # to decide whether the session cookie is marked Secure.
+      BASE_URL: http://localhost:8080
+      # Leave unset to have a persistent key generated into /data on first run.
+      # SECRET_KEY: change-me
+
+      # ---- Accounts ------------------------------------------------------
+      # Set to false once everyone who needs an account has one.
+      ALLOW_REGISTRATION: "true"
+
+      # ---- Polling -------------------------------------------------------
+      # Hard floor for every watch, whatever a user configures.
+      MIN_POLL_INTERVAL_SECONDS: "15"
+      DEFAULT_POLL_INTERVAL_SECONDS: "300"
+      ADAPTIVE_POLLING: "true"
+      WORKER_CONCURRENCY: "4"
+
+      # ---- Upstream rate limiting ---------------------------------------
+      # Shared across every watch. Raising this makes alerts faster and a block
+      # more likely; 40/min is comfortable.
+      PROVIDER_REQUESTS_PER_MINUTE: "40"
+      PROVIDER_MAX_CONCURRENCY: "3"
+
+      # ---- Display -------------------------------------------------------
+      DISPLAY_CURRENCY: EUR
+      FX_REFRESH_HOURS: "6"
+
+      # ---- Web Push (optional) -------------------------------------------
+      # Generate a pair from Administration, then paste them here and restart.
+      # VAPID_PUBLIC_KEY: ""
+      # VAPID_PRIVATE_KEY: ""
+      # VAPID_SUBJECT: mailto:you@example.com
+
+      # ---- E-mail (optional) ---------------------------------------------
+      # SMTP_HOST: smtp.example.com
+      # SMTP_PORT: "587"
+      # SMTP_USER: you@example.com
+      # SMTP_PASSWORD: app-password
+      # SMTP_FROM: AmiSearch <you@example.com>
+      # SMTP_STARTTLS: "true"
+
+      # ---- Retention -----------------------------------------------------
+      PRICE_HISTORY_RETENTION_DAYS: "1095"
+      ALERT_RETENTION_DAYS: "365"
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8080/api/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s

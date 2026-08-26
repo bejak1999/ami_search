@@ -1,0 +1,616 @@
+"""SQLAlchemy ORM models.
+
+Design notes
+------------
+* Everything shop-specific hangs off ``provider`` (a short string id such as
+  ``amiami``) so a second marketplace can be added without a schema change.
+* ``Item`` is the canonical, deduplicated product row. ``PricePoint`` rows are
+  only written when something actually changed, which keeps the history table
+  small and makes the step chart in the UI honest.
+"""
+from __future__ import annotations
+
+import enum
+from datetime import datetime, timezone
+
+from sqlalchemy import (
+    JSON,
+    Boolean,
+    DateTime,
+    Enum,
+    Float,
+    ForeignKey,
+    Index,
+    Integer,
+    String,
+    Text,
+    UniqueConstraint,
+)
+from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
+
+
+def utcnow() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+class Base(DeclarativeBase):
+    type_annotation_map = {dict: JSON, list: JSON}
+
+
+# ---------------------------------------------------------------------------
+# Enums
+# ---------------------------------------------------------------------------
+
+
+class UserRole(str, enum.Enum):
+    admin = "admin"
+    user = "user"
+
+
+class WatchKind(str, enum.Enum):
+    search = "search"
+    item = "item"
+
+
+class PriceBasis(str, enum.Enum):
+    listed = "listed"
+    landed = "landed"
+
+
+class Condition(str, enum.Enum):
+    any = "any"
+    new = "new"
+    preowned = "preowned"
+
+
+class StockFilter(str, enum.Enum):
+    any = "any"
+    in_stock = "in_stock"
+    preorder = "preorder"
+    backorder = "backorder"
+
+
+class TriggerType(str, enum.Enum):
+    price_below = "price_below"
+    back_in_stock = "back_in_stock"
+    new_match = "new_match"
+    price_drop = "price_drop"
+    restock_preowned = "restock_preowned"
+    deal_radar = "deal_radar"
+
+
+class ChannelType(str, enum.Enum):
+    telegram = "telegram"
+    webpush = "webpush"
+    email = "email"
+    discord = "discord"
+    ntfy = "ntfy"
+    gotify = "gotify"
+    webhook = "webhook"
+
+
+class CollectionStatus(str, enum.Enum):
+    wishlist = "wishlist"
+    ordered = "ordered"
+    owned = "owned"
+    sold = "sold"
+
+
+class DeliveryStatus(str, enum.Enum):
+    pending = "pending"
+    sent = "sent"
+    failed = "failed"
+    skipped = "skipped"
+
+
+# ---------------------------------------------------------------------------
+# Accounts
+# ---------------------------------------------------------------------------
+
+
+class User(Base):
+    __tablename__ = "users"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    email: Mapped[str] = mapped_column(String(320), unique=True, index=True)
+    username: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    password_hash: Mapped[str] = mapped_column(String(255))
+    role: Mapped[UserRole] = mapped_column(Enum(UserRole), default=UserRole.user)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    last_login_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+    # Presentation and landed-cost preferences live on the user so a shared
+    # instance can serve people in different countries.
+    display_currency: Mapped[str] = mapped_column(String(3), default="EUR")
+    theme: Mapped[str] = mapped_column(String(32), default="midnight")
+    color_mode: Mapped[str] = mapped_column(String(16), default="dark")
+    timezone: Mapped[str] = mapped_column(String(64), default="Europe/Berlin")
+    prefs: Mapped[dict] = mapped_column(JSON, default=dict)
+
+    watches: Mapped[list["Watch"]] = relationship(
+        back_populates="user", cascade="all, delete-orphan"
+    )
+    channels: Mapped[list["NotificationChannel"]] = relationship(
+        back_populates="user", cascade="all, delete-orphan"
+    )
+    collection: Mapped[list["CollectionEntry"]] = relationship(
+        back_populates="user", cascade="all, delete-orphan"
+    )
+    cost_profile: Mapped["CostProfile"] = relationship(
+        back_populates="user", cascade="all, delete-orphan", uselist=False
+    )
+
+
+class CostProfile(Base):
+    """Per-user shipping and customs assumptions for landed-cost estimates."""
+
+    __tablename__ = "cost_profiles"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), unique=True, index=True
+    )
+
+    country: Mapped[str] = mapped_column(String(2), default="DE")
+    vat_rate: Mapped[float] = mapped_column(Float, default=0.19)
+    # Toys and figures (TARIC 9503) land around 4.7 percent into the EU.
+    duty_rate: Mapped[float] = mapped_column(Float, default=0.047)
+    # Below this goods value the EU waives customs duty (VAT still applies).
+    duty_free_threshold: Mapped[float] = mapped_column(Float, default=150.0)
+    vat_free_threshold: Mapped[float] = mapped_column(Float, default=0.0)
+    # Flat carrier presentation fee, DHL charges about 6 EUR.
+    customs_handling_fee: Mapped[float] = mapped_column(Float, default=6.0)
+
+    # table = weight based lookup, flat = one number, none = skip shipping
+    shipping_mode: Mapped[str] = mapped_column(String(32), default="table")
+    shipping_flat: Mapped[float] = mapped_column(Float, default=25.0)
+    shipping_table: Mapped[list] = mapped_column(JSON, default=list)
+    default_weight_grams: Mapped[int] = mapped_column(Integer, default=900)
+    category_weights: Mapped[dict] = mapped_column(JSON, default=dict)
+    consolidate_shipping: Mapped[bool] = mapped_column(Boolean, default=False)
+    # Payment provider FX spread, added on top of the mid-market rate.
+    fx_markup: Mapped[float] = mapped_column(Float, default=0.015)
+
+    user: Mapped[User] = relationship(back_populates="cost_profile")
+
+
+class AuthSession(Base):
+    """Issued tokens, kept so sessions can be revoked from the UI."""
+
+    __tablename__ = "auth_sessions"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    token_id: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    user_agent: Mapped[str] = mapped_column(String(255), default="")
+    ip: Mapped[str] = mapped_column(String(64), default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    revoked: Mapped[bool] = mapped_column(Boolean, default=False)
+
+
+# ---------------------------------------------------------------------------
+# Catalogue
+# ---------------------------------------------------------------------------
+
+
+class Item(Base):
+    __tablename__ = "items"
+    __table_args__ = (
+        UniqueConstraint("provider", "code", name="uq_item_provider_code"),
+        Index("ix_item_provider_updated", "provider", "last_seen_at"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    provider: Mapped[str] = mapped_column(String(32), index=True, default="amiami")
+    # Shop product code, for example FIGURE-153570-R
+    code: Mapped[str] = mapped_column(String(64), index=True)
+
+    name: Mapped[str] = mapped_column(Text)
+    name_jp: Mapped[str | None] = mapped_column(Text)
+    maker: Mapped[str | None] = mapped_column(String(255), index=True)
+    series: Mapped[str | None] = mapped_column(String(255), index=True)
+    character: Mapped[str | None] = mapped_column(String(255), index=True)
+    category: Mapped[str | None] = mapped_column(String(128))
+    scale: Mapped[str | None] = mapped_column(String(32))
+    jan_code: Mapped[str | None] = mapped_column(String(32), index=True)
+
+    image_url: Mapped[str | None] = mapped_column(Text)
+    images: Mapped[list] = mapped_column(JSON, default=list)
+    product_url: Mapped[str | None] = mapped_column(Text)
+
+    currency: Mapped[str] = mapped_column(String(3), default="JPY")
+    # MSRP including Japanese tax, used to compute the discount badge.
+    list_price: Mapped[float | None] = mapped_column(Float)
+    current_price: Mapped[float | None] = mapped_column(Float)
+    lowest_price: Mapped[float | None] = mapped_column(Float)
+    highest_price: Mapped[float | None] = mapped_column(Float)
+    average_price: Mapped[float | None] = mapped_column(Float)
+
+    condition: Mapped[Condition] = mapped_column(Enum(Condition), default=Condition.new)
+    # AmiAmi pre-owned grading, for example ITEM:B/BOX:B
+    condition_grade: Mapped[str | None] = mapped_column(String(32))
+    in_stock: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
+    is_preorder: Mapped[bool] = mapped_column(Boolean, default=False)
+    is_backorder: Mapped[bool] = mapped_column(Boolean, default=False)
+    order_closed: Mapped[bool] = mapped_column(Boolean, default=False)
+    sale_status: Mapped[str | None] = mapped_column(String(64))
+    release_date: Mapped[str | None] = mapped_column(String(32))
+    release_date_parsed: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+    spec: Mapped[str | None] = mapped_column(Text)
+    remarks: Mapped[str | None] = mapped_column(Text)
+    raw: Mapped[dict] = mapped_column(JSON, default=dict)
+
+    first_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    last_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    last_detail_fetch_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    detail_loaded: Mapped[bool] = mapped_column(Boolean, default=False)
+
+    # MyFigureCollection cross-reference. The JAN barcode gives an exact match;
+    # a title search is the fallback and is flagged as such so the UI can say
+    # so rather than pretending it is authoritative.
+    mfc_id: Mapped[int | None] = mapped_column(Integer, index=True)
+    mfc_matched_by: Mapped[str | None] = mapped_column(String(16))
+    mfc_url: Mapped[str | None] = mapped_column(Text)
+    mfc_confidence: Mapped[float | None] = mapped_column(Float)
+    mfc_fetched_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
+    mfc_attempts: Mapped[int] = mapped_column(Integer, default=0)
+
+    prices: Mapped[list["PricePoint"]] = relationship(
+        back_populates="item", cascade="all, delete-orphan", passive_deletes=True
+    )
+    tags: Mapped[list["Tag"]] = relationship(
+        secondary="item_tags", back_populates="items", lazy="selectin"
+    )
+
+
+class PricePoint(Base):
+    """One row per observed change, not per poll."""
+
+    __tablename__ = "price_points"
+    __table_args__ = (Index("ix_price_item_ts", "item_id", "recorded_at"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    item_id: Mapped[int] = mapped_column(ForeignKey("items.id", ondelete="CASCADE"), index=True)
+    recorded_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    price: Mapped[float | None] = mapped_column(Float)
+    currency: Mapped[str] = mapped_column(String(3), default="JPY")
+    in_stock: Mapped[bool] = mapped_column(Boolean, default=False)
+    sale_status: Mapped[str | None] = mapped_column(String(64))
+    condition_grade: Mapped[str | None] = mapped_column(String(32))
+
+    item: Mapped[Item] = relationship(back_populates="prices")
+
+
+# ---------------------------------------------------------------------------
+# Watches
+# ---------------------------------------------------------------------------
+
+
+class Watch(Base):
+    __tablename__ = "watches"
+    __table_args__ = (Index("ix_watch_due", "enabled", "next_run_at"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    provider: Mapped[str] = mapped_column(String(32), default="amiami")
+    kind: Mapped[WatchKind] = mapped_column(Enum(WatchKind), default=WatchKind.search)
+
+    label: Mapped[str] = mapped_column(String(200), default="")
+    query: Mapped[str] = mapped_column(Text, default="")
+    item_code: Mapped[str | None] = mapped_column(String(64), index=True)
+    # Provider-agnostic filter bag: category, maker_id, series_id, character_id,
+    # exclude_keywords, min_price, release_from, release_to, ...
+    filters: Mapped[dict] = mapped_column(JSON, default=dict)
+
+    condition: Mapped[Condition] = mapped_column(Enum(Condition), default=Condition.any)
+    stock_filter: Mapped[StockFilter] = mapped_column(Enum(StockFilter), default=StockFilter.any)
+
+    # Trigger configuration
+    target_price: Mapped[float | None] = mapped_column(Float)
+    price_basis: Mapped[PriceBasis] = mapped_column(Enum(PriceBasis), default=PriceBasis.listed)
+    target_currency: Mapped[str] = mapped_column(String(3), default="JPY")
+    notify_on_price_below: Mapped[bool] = mapped_column(Boolean, default=True)
+    notify_on_restock: Mapped[bool] = mapped_column(Boolean, default=True)
+    notify_on_new_match: Mapped[bool] = mapped_column(Boolean, default=True)
+    # Fire when the price falls by at least N percent versus the last seen price.
+    notify_on_price_drop_pct: Mapped[float | None] = mapped_column(Float)
+
+    # Scheduling. interval_seconds = None means follow the adaptive scheduler.
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    interval_seconds: Mapped[int | None] = mapped_column(Integer)
+    adaptive: Mapped[bool] = mapped_column(Boolean, default=True)
+    priority: Mapped[int] = mapped_column(Integer, default=0)
+    # {"enabled": true, "start": "23:00", "end": "07:00", "urgent_override": true}
+    quiet_hours: Mapped[dict] = mapped_column(JSON, default=dict)
+    # Per item and trigger debounce so one listing cannot spam you.
+    cooldown_seconds: Mapped[int] = mapped_column(Integer, default=1800)
+    max_alerts_per_day: Mapped[int] = mapped_column(Integer, default=50)
+
+    # Empty list means: use every enabled channel the user owns.
+    channel_ids: Mapped[list] = mapped_column(JSON, default=list)
+
+    next_run_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
+    last_run_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_success_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_error: Mapped[str | None] = mapped_column(Text)
+    consecutive_errors: Mapped[int] = mapped_column(Integer, default=0)
+    run_count: Mapped[int] = mapped_column(Integer, default=0)
+    alert_count: Mapped[int] = mapped_column(Integer, default=0)
+    last_result_hash: Mapped[str | None] = mapped_column(String(64))
+    # The first poll only records what already exists. Without this, creating a
+    # watch for a broad query would immediately fire one alert per result.
+    baselined: Mapped[bool] = mapped_column(Boolean, default=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+    user: Mapped[User] = relationship(back_populates="watches")
+    alerts: Mapped[list["Alert"]] = relationship(
+        back_populates="watch", cascade="all, delete-orphan", passive_deletes=True
+    )
+    seen: Mapped[list["WatchSeenItem"]] = relationship(
+        back_populates="watch", cascade="all, delete-orphan", passive_deletes=True
+    )
+
+
+class WatchSeenItem(Base):
+    """Per-watch memory of what was already matched, and at which price."""
+
+    __tablename__ = "watch_seen_items"
+    __table_args__ = (
+        UniqueConstraint("watch_id", "item_id", name="uq_watch_seen"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    watch_id: Mapped[int] = mapped_column(ForeignKey("watches.id", ondelete="CASCADE"), index=True)
+    item_id: Mapped[int] = mapped_column(ForeignKey("items.id", ondelete="CASCADE"), index=True)
+    first_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    last_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    last_price: Mapped[float | None] = mapped_column(Float)
+    # The same observation expressed in the watch's comparison basis, which
+    # may be a different currency and may include import costs. Target-price
+    # crossings must be judged against this, never against last_price.
+    last_compare_price: Mapped[float | None] = mapped_column(Float)
+    last_in_stock: Mapped[bool] = mapped_column(Boolean, default=False)
+    last_alert_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_trigger: Mapped[str | None] = mapped_column(String(32))
+
+    watch: Mapped[Watch] = relationship(back_populates="seen")
+
+
+class Alert(Base):
+    __tablename__ = "alerts"
+    __table_args__ = (Index("ix_alert_user_ts", "user_id", "created_at"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    watch_id: Mapped[int | None] = mapped_column(ForeignKey("watches.id", ondelete="CASCADE"))
+    item_id: Mapped[int | None] = mapped_column(ForeignKey("items.id", ondelete="SET NULL"))
+
+    trigger: Mapped[TriggerType] = mapped_column(Enum(TriggerType))
+    title: Mapped[str] = mapped_column(Text)
+    body: Mapped[str] = mapped_column(Text, default="")
+    price: Mapped[float | None] = mapped_column(Float)
+    currency: Mapped[str] = mapped_column(String(3), default="JPY")
+    landed_price: Mapped[float | None] = mapped_column(Float)
+    landed_currency: Mapped[str] = mapped_column(String(3), default="EUR")
+    previous_price: Mapped[float | None] = mapped_column(Float)
+    url: Mapped[str | None] = mapped_column(Text)
+    image_url: Mapped[str | None] = mapped_column(Text)
+    extra: Mapped[dict] = mapped_column(JSON, default=dict)
+
+    read_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, index=True
+    )
+
+    watch: Mapped[Watch | None] = relationship(back_populates="alerts")
+    item: Mapped[Item | None] = relationship()
+    deliveries: Mapped[list["AlertDelivery"]] = relationship(
+        back_populates="alert", cascade="all, delete-orphan", passive_deletes=True
+    )
+
+
+class AlertDelivery(Base):
+    __tablename__ = "alert_deliveries"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    alert_id: Mapped[int] = mapped_column(ForeignKey("alerts.id", ondelete="CASCADE"), index=True)
+    channel_id: Mapped[int | None] = mapped_column(
+        ForeignKey("notification_channels.id", ondelete="SET NULL")
+    )
+    channel_type: Mapped[ChannelType] = mapped_column(Enum(ChannelType))
+    status: Mapped[DeliveryStatus] = mapped_column(
+        Enum(DeliveryStatus), default=DeliveryStatus.pending
+    )
+    error: Mapped[str | None] = mapped_column(Text)
+    attempts: Mapped[int] = mapped_column(Integer, default=0)
+    sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+    alert: Mapped[Alert] = relationship(back_populates="deliveries")
+
+
+# ---------------------------------------------------------------------------
+# Notification channels
+# ---------------------------------------------------------------------------
+
+
+class NotificationChannel(Base):
+    __tablename__ = "notification_channels"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    type: Mapped[ChannelType] = mapped_column(Enum(ChannelType))
+    name: Mapped[str] = mapped_column(String(120), default="")
+    # Secrets live here: bot_token, chat_id, webhook url, push subscription, ...
+    config: Mapped[dict] = mapped_column(JSON, default=dict)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    is_default: Mapped[bool] = mapped_column(Boolean, default=True)
+    send_digest: Mapped[bool] = mapped_column(Boolean, default=False)
+    last_used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_error: Mapped[str | None] = mapped_column(Text)
+    failure_count: Mapped[int] = mapped_column(Integer, default=0)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+    user: Mapped[User] = relationship(back_populates="channels")
+
+
+# ---------------------------------------------------------------------------
+# Wishlist and collection
+# ---------------------------------------------------------------------------
+
+
+class CollectionEntry(Base):
+    __tablename__ = "collection_entries"
+    __table_args__ = (UniqueConstraint("user_id", "item_id", name="uq_collection_user_item"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    item_id: Mapped[int] = mapped_column(ForeignKey("items.id", ondelete="CASCADE"), index=True)
+    status: Mapped[CollectionStatus] = mapped_column(
+        Enum(CollectionStatus), default=CollectionStatus.wishlist
+    )
+    # 1 = grail, 2 = normal, 3 = maybe
+    priority: Mapped[int] = mapped_column(Integer, default=2)
+    notes: Mapped[str] = mapped_column(Text, default="")
+    tags: Mapped[list] = mapped_column(JSON, default=list)
+    paid_price: Mapped[float | None] = mapped_column(Float)
+    paid_currency: Mapped[str] = mapped_column(String(3), default="JPY")
+    purchased_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    quantity: Mapped[int] = mapped_column(Integer, default=1)
+    mfc_url: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, onupdate=utcnow
+    )
+
+    user: Mapped[User] = relationship(back_populates="collection")
+    item: Mapped[Item] = relationship()
+
+
+# ---------------------------------------------------------------------------
+# Infrastructure
+# ---------------------------------------------------------------------------
+
+
+class FxRate(Base):
+    __tablename__ = "fx_rates"
+    __table_args__ = (UniqueConstraint("base", "quote", name="uq_fx_pair"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    base: Mapped[str] = mapped_column(String(3))
+    quote: Mapped[str] = mapped_column(String(3))
+    rate: Mapped[float] = mapped_column(Float)
+    source: Mapped[str] = mapped_column(String(64), default="")
+    fetched_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class AppSetting(Base):
+    __tablename__ = "app_settings"
+
+    key: Mapped[str] = mapped_column(String(64), primary_key=True)
+    value: Mapped[dict] = mapped_column(JSON, default=dict)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, onupdate=utcnow
+    )
+
+
+class ProviderStat(Base):
+    """Rolling health counters shown on the status page."""
+
+    __tablename__ = "provider_stats"
+    __table_args__ = (UniqueConstraint("provider", "day", name="uq_provider_day"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    provider: Mapped[str] = mapped_column(String(32), index=True)
+    day: Mapped[str] = mapped_column(String(10), index=True)
+    requests: Mapped[int] = mapped_column(Integer, default=0)
+    errors: Mapped[int] = mapped_column(Integer, default=0)
+    rate_limited: Mapped[int] = mapped_column(Integer, default=0)
+    avg_latency_ms: Mapped[float] = mapped_column(Float, default=0.0)
+    items_seen: Mapped[int] = mapped_column(Integer, default=0)
+    last_error: Mapped[str | None] = mapped_column(Text)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, onupdate=utcnow
+    )
+
+
+# ---------------------------------------------------------------------------
+# MyFigureCollection tag index
+# ---------------------------------------------------------------------------
+
+
+class TagKind(str, enum.Enum):
+    tag = "tag"
+    origin = "origin"
+    character = "character"
+    company = "company"
+    artist = "artist"
+    material = "material"
+    classification = "classification"
+
+
+class Tag(Base):
+    """A MyFigureCollection tag or entry, mirrored locally.
+
+    Keeping our own copy is what makes the discovery page fast: once an item
+    has been enriched, filtering by tag is a local join instead of a scrape.
+    """
+
+    __tablename__ = "tags"
+    __table_args__ = (
+        UniqueConstraint("kind", "slug", name="uq_tag_kind_slug"),
+        Index("ix_tag_usage", "kind", "usage_count"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    kind: Mapped[TagKind] = mapped_column(Enum(TagKind), default=TagKind.tag, index=True)
+    slug: Mapped[str] = mapped_column(String(160), index=True)
+    name: Mapped[str] = mapped_column(String(200))
+    mfc_id: Mapped[int | None] = mapped_column(Integer, index=True)
+    #: How many local items carry this tag. Drives ranking in the tag picker.
+    usage_count: Mapped[int] = mapped_column(Integer, default=0)
+    is_auto: Mapped[bool] = mapped_column(Boolean, default=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+    items: Mapped[list["Item"]] = relationship(secondary="item_tags", back_populates="tags")
+
+
+class ItemTag(Base):
+    __tablename__ = "item_tags"
+    __table_args__ = (UniqueConstraint("item_id", "tag_id", name="uq_item_tag"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    item_id: Mapped[int] = mapped_column(ForeignKey("items.id", ondelete="CASCADE"), index=True)
+    tag_id: Mapped[int] = mapped_column(ForeignKey("tags.id", ondelete="CASCADE"), index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class DiscoverySeed(Base):
+    """Cache of MFC tag browse results.
+
+    A tag page on MFC is a scrape, so results are cached and reused. Each row
+    is one MFC listing we saw for a tag combination, with the AmiAmi lookup
+    result attached once we have tried to find it.
+    """
+
+    __tablename__ = "discovery_seeds"
+    __table_args__ = (
+        UniqueConstraint("tag_key", "mfc_id", name="uq_seed_tag_item"),
+        Index("ix_seed_tagkey", "tag_key", "rank"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    tag_key: Mapped[str] = mapped_column(String(255), index=True)
+    mfc_id: Mapped[int] = mapped_column(Integer, index=True)
+    title: Mapped[str] = mapped_column(Text, default="")
+    image_url: Mapped[str | None] = mapped_column(Text)
+    category: Mapped[str | None] = mapped_column(String(64))
+    rank: Mapped[int] = mapped_column(Integer, default=0)
+    matched_item_id: Mapped[int | None] = mapped_column(
+        ForeignKey("items.id", ondelete="SET NULL")
+    )
+    lookup_state: Mapped[str] = mapped_column(String(16), default="pending")
+    fetched_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)

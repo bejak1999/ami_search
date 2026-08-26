@@ -1,0 +1,257 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* ==========================================================================
+   Themes
+
+   Two skins, each with a light and a dark mode. Colours are stored as raw
+   "R G B" triples so Tailwind can apply its own alpha channel to them.
+
+   midnight - deep blue-grey, one warm accent, quiet and dense. Built for
+              looking at a lot of product images without the chrome shouting.
+   sakura   - pink/violet gradients, softer surfaces, more personality.
+   ========================================================================== */
+
+:root {
+  --r-card: 16px;
+  --r-control: 10px;
+  --shadow-card: 0 1px 2px rgb(0 0 0 / 0.06), 0 8px 24px -12px rgb(0 0 0 / 0.25);
+  --shadow-pop: 0 12px 40px -12px rgb(0 0 0 / 0.45);
+  --shadow-glow: 0 0 0 1px rgb(var(--c-accent) / 0.3), 0 8px 30px -8px rgb(var(--c-accent) / 0.45);
+  --gradient-accent: linear-gradient(
+    135deg,
+    rgb(var(--c-accent)) 0%,
+    rgb(var(--c-accent-soft)) 100%
+  );
+  --gradient-hero: radial-gradient(
+    120% 120% at 15% 0%,
+    rgb(var(--c-accent) / 0.16) 0%,
+    transparent 55%
+  );
+}
+
+/* ---------- midnight / dark (default) ---------- */
+[data-theme='midnight'][data-mode='dark'] {
+  --c-canvas: 9 11 17;
+  --c-surface: 16 19 28;
+  --c-raised: 23 27 38;
+  --c-line: 38 44 60;
+  --c-ink: 233 237 245;
+  --c-muted: 148 158 179;
+  --c-faint: 100 110 130;
+  --c-accent: 249 115 22;
+  --c-accent-soft: 251 146 60;
+  --c-accent-ink: 255 255 255;
+  --c-positive: 52 199 123;
+  --c-warning: 245 179 66;
+  --c-danger: 244 92 92;
+  --c-info: 96 152 255;
+}
+
+/* ---------- midnight / light ---------- */
+[data-theme='midnight'][data-mode='light'] {
+  --c-canvas: 246 247 250;
+  --c-surface: 255 255 255;
+  --c-raised: 249 250 252;
+  --c-line: 224 228 236;
+  --c-ink: 22 27 38;
+  --c-muted: 96 106 125;
+  --c-faint: 142 152 170;
+  --c-accent: 234 88 12;
+  --c-accent-soft: 249 115 22;
+  --c-accent-ink: 255 255 255;
+  --c-positive: 22 148 87;
+  --c-warning: 202 138 24;
+  --c-danger: 208 56 56;
+  --c-info: 42 108 226;
+  --shadow-card: 0 1px 2px rgb(16 24 40 / 0.05), 0 8px 24px -14px rgb(16 24 40 / 0.18);
+  --shadow-pop: 0 16px 44px -16px rgb(16 24 40 / 0.28);
+}
+
+/* ---------- sakura / dark ---------- */
+[data-theme='sakura'][data-mode='dark'] {
+  --c-canvas: 17 12 24;
+  --c-surface: 27 20 38;
+  --c-raised: 37 27 52;
+  --c-line: 58 43 79;
+  --c-ink: 245 236 252;
+  --c-muted: 189 168 210;
+  --c-faint: 141 121 163;
+  --c-accent: 244 114 182;
+  --c-accent-soft: 167 139 250;
+  --c-accent-ink: 26 12 34;
+  --c-positive: 74 222 153;
+  --c-warning: 251 191 96;
+  --c-danger: 251 113 133;
+  --c-info: 129 172 255;
+  --r-card: 22px;
+  --r-control: 14px;
+  --gradient-accent: linear-gradient(135deg, #f472b6 0%, #a78bfa 55%, #60a5fa 100%);
+  --gradient-hero: radial-gradient(
+      110% 110% at 8% -10%,
+      rgb(244 114 182 / 0.26) 0%,
+      transparent 55%
+    ),
+    radial-gradient(90% 90% at 100% 0%, rgb(167 139 250 / 0.22) 0%, transparent 60%);
+  --shadow-glow: 0 0 0 1px rgb(244 114 182 / 0.35), 0 10px 40px -10px rgb(167 139 250 / 0.6);
+}
+
+/* ---------- sakura / light ---------- */
+[data-theme='sakura'][data-mode='light'] {
+  --c-canvas: 253 246 251;
+  --c-surface: 255 255 255;
+  --c-raised: 252 244 250;
+  --c-line: 240 219 235;
+  --c-ink: 44 22 46;
+  --c-muted: 124 92 128;
+  --c-faint: 168 138 172;
+  --c-accent: 219 39 119;
+  --c-accent-soft: 139 92 246;
+  --c-accent-ink: 255 255 255;
+  --c-positive: 15 157 106;
+  --c-warning: 202 138 24;
+  --c-danger: 225 63 92;
+  --c-info: 59 130 246;
+  --r-card: 22px;
+  --r-control: 14px;
+  --gradient-accent: linear-gradient(135deg, #db2777 0%, #8b5cf6 55%, #3b82f6 100%);
+  --gradient-hero: radial-gradient(110% 110% at 8% -10%, rgb(219 39 119 / 0.12) 0%, transparent 55%),
+    radial-gradient(90% 90% at 100% 0%, rgb(139 92 246 / 0.12) 0%, transparent 60%);
+  --shadow-card: 0 1px 2px rgb(80 20 60 / 0.05), 0 10px 28px -16px rgb(80 20 60 / 0.22);
+  --shadow-pop: 0 18px 46px -18px rgb(80 20 60 / 0.3);
+}
+
+@layer base {
+  * {
+    @apply border-line;
+  }
+
+  html {
+    -webkit-text-size-adjust: 100%;
+    scroll-behavior: smooth;
+  }
+
+  body {
+    @apply bg-canvas text-ink font-sans antialiased;
+    font-feature-settings: 'cv02', 'cv03', 'cv04', 'ss01';
+    min-height: 100dvh;
+  }
+
+  ::selection {
+    background: rgb(var(--c-accent) / 0.3);
+  }
+
+  /* A slim scrollbar keeps dense grids from looking cluttered. */
+  ::-webkit-scrollbar {
+    width: 11px;
+    height: 11px;
+  }
+  ::-webkit-scrollbar-track {
+    background: transparent;
+  }
+  ::-webkit-scrollbar-thumb {
+    background: rgb(var(--c-line));
+    border-radius: 99px;
+    border: 3px solid transparent;
+    background-clip: content-box;
+  }
+  ::-webkit-scrollbar-thumb:hover {
+    background: rgb(var(--c-faint));
+    background-clip: content-box;
+  }
+
+  :focus-visible {
+    @apply outline-none ring-2 ring-accent/60 ring-offset-2;
+    --tw-ring-offset-color: rgb(var(--c-canvas));
+  }
+
+  input[type='number']::-webkit-outer-spin-button,
+  input[type='number']::-webkit-inner-spin-button {
+    -webkit-appearance: none;
+    margin: 0;
+  }
+}
+
+@layer components {
+  .card {
+    @apply rounded-card border border-line bg-surface shadow-card;
+  }
+
+  .card-hover {
+    @apply transition-all duration-200 hover:-translate-y-0.5 hover:border-accent/40 hover:shadow-pop;
+  }
+
+  .field {
+    @apply w-full rounded-control border border-line bg-raised px-3 py-2 text-sm text-ink
+      placeholder:text-faint transition-colors focus:border-accent/60 focus:bg-surface;
+  }
+
+  .label {
+    @apply mb-1.5 block text-xs font-medium uppercase tracking-wide text-muted;
+  }
+
+  .btn {
+    @apply inline-flex select-none items-center justify-center gap-2 rounded-control px-3.5 py-2
+      text-sm font-medium transition-all duration-150 disabled:pointer-events-none
+      disabled:opacity-45;
+  }
+
+  .btn-primary {
+    @apply btn bg-accent-gradient text-accent-ink shadow-sm hover:brightness-110 active:scale-[0.98];
+  }
+
+  .btn-ghost {
+    @apply btn border border-line bg-surface text-ink hover:border-accent/50 hover:bg-raised;
+  }
+
+  .btn-quiet {
+    @apply btn text-muted hover:bg-raised hover:text-ink;
+  }
+
+  .btn-danger {
+    @apply btn border border-danger/40 bg-danger/10 text-danger hover:bg-danger/20;
+  }
+
+  .chip {
+    @apply inline-flex items-center gap-1.5 rounded-full border border-line bg-raised px-2.5 py-1
+      text-xs font-medium text-muted;
+  }
+
+  .chip-active {
+    @apply border-accent/50 bg-accent/15 text-accent;
+  }
+
+  .skeleton {
+    @apply relative overflow-hidden bg-raised;
+  }
+
+  .skeleton::after {
+    @apply absolute inset-0 -translate-x-full animate-shimmer bg-gradient-to-r
+      from-transparent via-white/10 to-transparent content-[''];
+  }
+
+  .scroll-x {
+    @apply overflow-x-auto;
+    scrollbar-width: thin;
+  }
+}
+
+@layer utilities {
+  .text-balance {
+    text-wrap: balance;
+  }
+
+  .grid-cards {
+    @apply grid gap-4;
+    grid-template-columns: repeat(auto-fill, minmax(min(100%, 216px), 1fr));
+  }
+
+  .hero-wash {
+    background-image: var(--gradient-hero);
+  }
+
+  .no-scrollbar::-webkit-scrollbar {
+    display: none;
+  }
+}

@@ -1,0 +1,36 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Node
+node_modules/
+dist/
+.vite/
+*.tsbuildinfo
+
+# Frontend build output. The Dockerfile builds this itself, and FastAPI
+# falls back to an API-only response when it is absent.
+backend/app/static/
+
+# App data
+data/
+*.db
+*.db-wal
+*.db-shm
+.env
+.env.local
+
+# Editors / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Local reference material (not part of the project)
+beispiele/
