@@ -12,9 +12,14 @@ import os
 import shutil
 import sys
 import tempfile
+from pathlib import Path
 from datetime import datetime, timedelta, timezone
 
 sys.stdout.reconfigure(encoding="utf-8")
+
+# Make "app" importable however this file is invoked, so the suites run with a
+# plain "python tests/<name>.py" and do not depend on PYTHONPATH being set.
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 TMP = tempfile.mkdtemp(prefix="amisearch-unit-")
 os.environ["DATA_DIR"] = TMP

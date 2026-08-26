@@ -13,8 +13,13 @@ import shutil
 import sqlite3
 import sys
 import tempfile
+from pathlib import Path
 
 sys.stdout.reconfigure(encoding="utf-8")
+
+# Make "app" importable however this file is invoked, so the suites run with a
+# plain "python tests/<name>.py" and do not depend on PYTHONPATH being set.
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 TMP = tempfile.mkdtemp(prefix="amisearch-migration-")
 os.environ["DATA_DIR"] = TMP
