@@ -59,6 +59,9 @@ export const ICONS = {
 
 export type IconName = keyof typeof ICONS
 
+/** Does this class list already say how big the icon should be? */
+const HAS_SIZE = /(?:^|\s)-?(?:h|w|size)-/
+
 export function Icon({
   name,
   className,
@@ -68,10 +71,17 @@ export function Icon({
   className?: string
   strokeWidth?: number
 }) {
+  // An SVG with no width or height renders at its intrinsic size, which is
+  // enormous next to body text. Falling back only on undefined was not enough:
+  // clsx(false) yields an empty string, and a caller passing purely cosmetic
+  // classes leaves the icon unsized too. So the default is applied whenever
+  // nothing in the class list actually sets a size.
+  const sized = className && HAS_SIZE.test(className) ? className : clsx('h-4 w-4', className)
+
   return (
     <svg
       viewBox="0 0 24 24"
-      className={clsx('shrink-0', className ?? 'h-4 w-4')}
+      className={clsx('shrink-0', sized)}
       fill="none"
       stroke="currentColor"
       strokeWidth={strokeWidth}

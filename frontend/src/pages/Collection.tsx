@@ -4,7 +4,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { api } from '@/api/client'
 import type { CollectionStatus } from '@/api/types'
 import { Icon } from '@/components/Icon'
-import { Badge, Card, EmptyState, SegmentedControl, Skeleton, Stat } from '@/components/ui'
+import { Badge, Card, EmptyState, Field, Modal, SegmentedControl, Skeleton, Spinner, Stat } from '@/components/ui'
 import { money, relativeTime, tidyName } from '@/lib/format'
 import { useToast } from '@/lib/toast'
 import clsx from 'clsx'
@@ -24,6 +24,9 @@ export function CollectionPage() {
   const toast = useToast()
   const queryClient = useQueryClient()
   const [status, setStatus] = useState<CollectionStatus | 'all'>('all')
+  const [adding, setAdding] = useState(false)
+  const [addInput, setAddInput] = useState('')
+  const [addStatus, setAddStatus] = useState<CollectionStatus>('owned')
 
   const entries = useQuery({
     queryKey: ['collection', status],
@@ -44,6 +47,18 @@ export function CollectionPage() {
     },
   })
 
+  const add = useMutation({
+    mutationFn: () =>
+      api.collection.add({ item_code: addInput.trim(), status: addStatus }),
+    onSuccess: (entry) => {
+      toast.success(`Added ${entry.item.name.slice(0, 50)}`)
+      setAdding(false)
+      setAddInput('')
+      void queryClient.invalidateQueries({ queryKey: ['collection'] })
+    },
+    onError: (error) => toast.error('Could not add that', (error as Error).message),
+  })
+
   const detail = summary.data?.detail
 
   return (
@@ -55,10 +70,16 @@ export function CollectionPage() {
             What you want, what you ordered, and what is already on the shelf.
           </p>
         </div>
-        <a href="/api/collection/export?fmt=csv" className="btn-ghost" download>
-          <Icon name="download" />
-          Export CSV
-        </a>
+        <div className="flex gap-2">
+          <button onClick={() => setAdding(true)} className="btn-primary">
+            <Icon name="plus" />
+            Add an item
+          </button>
+          <a href="/api/collection/export?fmt=csv" className="btn-ghost" download>
+            <Icon name="download" />
+            Export CSV
+          </a>
+        </div>
       </header>
 
       {detail && (
@@ -213,9 +234,65 @@ export function CollectionPage() {
         <EmptyState
           icon="heart"
           title="Nothing here yet"
-          body="Add items from search or an item page. Wishlist entries feed the deal radar, which tells you when something is unusually cheap compared to its own history."
+          body="Add a figure by pasting its AmiAmi link below, or use the heart on any search result. Wishlist entries feed the deal radar, which tells you when something is unusually cheap against its own history."
+          action={
+            <button onClick={() => setAdding(true)} className="btn-primary">
+              <Icon name="plus" />
+              Add an item
+            </button>
+          }
         />
       )}
+
+      <Modal
+        open={adding}
+        onClose={() => setAdding(false)}
+        title="Add to your collection"
+        subtitle="Paste an AmiAmi link or a product code."
+        footer={
+          <>
+            <button onClick={() => setAdding(false)} className="btn-ghost">
+              Cancel
+            </button>
+            <button
+              onClick={() => add.mutate()}
+              disabled={!addInput.trim() || add.isPending}
+              className="btn-primary"
+            >
+              {add.isPending && <Spinner className="h-4 w-4" />}
+              Add
+            </button>
+          </>
+        }
+      >
+        <div className="space-y-4">
+          <Field
+            label="Link or product code"
+            hint="The figure is looked up on the shop, so its price is tracked from now on."
+          >
+            <input
+              value={addInput}
+              onChange={(e) => setAddInput(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter' && addInput.trim()) add.mutate()
+              }}
+              placeholder="https://www.amiami.com/eng/detail/?gcode=FIGURE-153570-R"
+              className="field"
+              autoFocus
+            />
+          </Field>
+          <Field label="Status">
+            <SegmentedControl
+              value={addStatus}
+              onChange={setAddStatus}
+              options={STATUSES.filter((s) => s.value !== 'all').map((s) => ({
+                value: s.value as CollectionStatus,
+                label: s.label,
+              }))}
+            />
+          </Field>
+        </div>
+      </Modal>
     </div>
   )
 }

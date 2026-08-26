@@ -198,6 +198,10 @@ class ItemOut(ItemBase):
     mfc_confidence: float | None = None
     mfc_restricted: bool = False
     tags: list[dict] = []
+    #: The same figure listed under the other condition, when it exists. A
+    #: product is often sold pre-owned while the new listing is still open, so
+    #: the two price histories are worth comparing side by side.
+    counterpart: dict | None = None
 
 
 class PricePointOut(ORMModel):

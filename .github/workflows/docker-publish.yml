@@ -76,6 +76,12 @@ jobs:
         working-directory: frontend
         run: npm run build
 
+      # Tailwind silently ignores a class name it does not recognise, so an
+      # invented one like h-4.5 ships icons at their intrinsic size with no
+      # warning anywhere. This catches that before it reaches a screen.
+      - name: Check for class names that generate no CSS
+        run: python scripts/check_tailwind_classes.py
+
   publish:
     name: Publish image
     runs-on: ubuntu-latest

@@ -270,6 +270,49 @@ def update_catalog_slice(
     return MessageResponse(message=f"Slice {scope} updated")
 
 
+@admin.get("/health", response_model=MessageResponse)
+def health_report(
+    db: Session = Depends(get_db), _admin: User = Depends(admin_user)
+) -> MessageResponse:
+    """What is currently wrong with the background machinery, if anything."""
+    from ..services import health
+
+    # Read-only: looking at the page must not fire notifications.
+    report = health.check(db, notify_enabled=False)
+    return MessageResponse(
+        ok=report["healthy"],
+        message="Everything is working" if report["healthy"] else
+        f"{len(report['issues'])} problem(s) need attention",
+        detail=report,
+    )
+
+
+@admin.post("/health/test", response_model=MessageResponse)
+def health_test(
+    db: Session = Depends(get_db), _admin: User = Depends(admin_user)
+) -> MessageResponse:
+    """Send a sample health alert, to prove the warning path works.
+
+    Worth doing once: an alert about the notifications being broken is only
+    useful if it can actually get out.
+    """
+    from ..services.health import Issue, _deliver
+
+    sample = Issue(
+        key="test",
+        title="Test alert from AmiSearch",
+        detail="This is what a problem with the background scraping would look like.",
+        hint="If you can read this, health alerts will reach you.",
+    )
+    delivered = _deliver(db, sample, resolved=False)
+    if not delivered:
+        return MessageResponse(
+            ok=False,
+            message="No usable channel. Add one under Settings, Notifications first.",
+        )
+    return MessageResponse(message=f"Sent to {delivered} channel(s)")
+
+
 #: Key under which the runtime MyFigureCollection session is stored, so it can
 #: be changed without a restart. It is never echoed back to the browser.
 MFC_SESSION_SETTING = "mfc_session"

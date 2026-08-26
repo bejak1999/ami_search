@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import logging
 import threading
+import time
 from concurrent.futures import Future, ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 
@@ -19,7 +20,7 @@ from sqlalchemy import or_, select
 from ..config import settings
 from ..db import session_scope
 from ..models import Watch
-from ..services import catalog, crawler, dealradar, digest, enrich, fx, matcher
+from ..services import catalog, crawler, dealradar, digest, enrich, fx, health, matcher
 
 log = logging.getLogger(__name__)
 
@@ -44,6 +45,9 @@ class PollingEngine:
         self.crawl_items_total = 0
         self.last_crawl: dict | None = None
         self.last_enrichment: dict | None = None
+        self.last_health: dict | None = None
+        #: Set on shutdown so long-running work can bail at a safe boundary.
+        self.stopping = False
 
     # -- lifecycle --------------------------------------------------------
     def start(self) -> None:
@@ -98,6 +102,17 @@ class PollingEngine:
         self.scheduler.add_job(
             self.housekeeping, "cron", hour=4, minute=17, id="housekeeping", max_instances=1
         )
+        # Watch the machinery itself. A tracker that silently stops working is
+        # worse than one that never worked, because you carry on trusting it.
+        self.scheduler.add_job(
+            self.run_health_check,
+            "interval",
+            minutes=max(5, settings.health_check_interval_minutes),
+            id="health",
+            max_instances=1,
+            coalesce=True,
+            next_run_time=datetime.now(timezone.utc) + timedelta(minutes=3),
+        )
         self.scheduler.add_job(
             self.run_digests, "cron", minute=0, id="digests", max_instances=1
         )
@@ -110,11 +125,37 @@ class PollingEngine:
             settings.provider_requests_per_minute,
         )
 
-    def shutdown(self) -> None:
+    def shutdown(self, timeout: float = 20.0) -> None:
+        """Stop accepting work, then give what is running a chance to finish.
+
+        A container update sends SIGTERM mid-flight. Python cannot interrupt a
+        running thread, so tearing the pool down without waiting would let a
+        half-finished poll keep going while the interpreter shuts down around
+        it. Everything commits incrementally, so nothing is corrupted either
+        way, but waiting means a watch that already fetched its results still
+        gets to record them instead of repeating the request after the
+        restart.
+        """
+        self.stopping = True
         if self._started:
+            # Stop firing new jobs first; existing ones are left to finish.
             self.scheduler.shutdown(wait=False)
             self._started = False
+
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            with self._lock:
+                if not self._inflight:
+                    break
+            time.sleep(0.2)
+
+        with self._lock:
+            stragglers = len(self._inflight)
+        if stragglers:
+            log.warning("Shutting down with %s check(s) still running", stragglers)
+
         self.pool.shutdown(wait=False, cancel_futures=True)
+        log.info("Polling engine stopped")
 
     # -- ticking ----------------------------------------------------------
     def due_watch_ids(self, limit: int = MAX_BATCH) -> list[int]:
@@ -222,6 +263,13 @@ class PollingEngine:
         except Exception:  # noqa: BLE001
             log.exception("MFC enrichment batch failed")
 
+    def run_health_check(self) -> None:
+        try:
+            with session_scope() as db:
+                self.last_health = health.check(db, notify_enabled=settings.health_alerts_enabled)
+        except Exception:  # noqa: BLE001
+            log.exception("Health check failed")
+
     def run_digests(self) -> None:
         try:
             with session_scope() as db:
@@ -257,6 +305,7 @@ class PollingEngine:
             "crawl_items_total": self.crawl_items_total,
             "last_crawl": self.last_crawl,
             "last_enrichment": self.last_enrichment,
+            "last_health": self.last_health,
         }
 
 

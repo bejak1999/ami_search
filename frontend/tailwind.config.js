@@ -25,6 +25,15 @@ export default {
         sans: ['Inter var', 'Inter', 'system-ui', '-apple-system', 'Segoe UI', 'sans-serif'],
         mono: ['JetBrains Mono', 'SFMono-Regular', 'Consolas', 'monospace'],
       },
+      // Tailwind's spacing scale jumps 4 -> 5, i.e. 16px -> 20px. The icon
+      // size the design wants sits between them, and writing h-4.5 without
+      // this generates no rule at all, so the SVG renders at its intrinsic
+      // size. That failure is silent, which is how it shipped.
+      spacing: {
+        '4.5': '1.125rem',
+        '5.5': '1.375rem',
+        '13': '3.25rem',
+      },
       borderRadius: {
         card: 'var(--r-card)',
         control: 'var(--r-control)',

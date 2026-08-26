@@ -874,6 +874,99 @@ def test_mfc_cookie_parsing() -> None:
     check("and are still kept", len(consent_only) == 2, consent_only)
 
 
+def test_health_detection() -> None:
+    print()
+    print("== Noticing when the machinery breaks ==")
+    from app.db import SessionLocal, init_db
+    from app.models import (
+        CatalogCrawl,
+        ChannelType,
+        NotificationChannel,
+        User,
+        UserRole,
+        Watch,
+    )
+    from app.security import hash_password
+    from app.services import health
+
+    init_db()
+    db = SessionLocal()
+    try:
+        admin = User(
+            email="health-admin@example.com",
+            username="healthadmin",
+            password_hash=hash_password("Health-Admin-2026"),
+            role=UserRole.admin,
+        )
+        db.add(admin)
+        db.commit()
+
+        check("a quiet instance reports nothing", not health.collect_issues(db))
+
+        # A channel that keeps rejecting messages is the worst failure there
+        # is: alerts are raised and then thrown away.
+        channel = NotificationChannel(
+            user_id=admin.id,
+            type=ChannelType.telegram,
+            name="Phone",
+            config={"bot_token": "x", "chat_id": "1"},
+            failure_count=7,
+            last_error="401 Unauthorized",
+        )
+        db.add(channel)
+        db.commit()
+        keys = {i.key for i in health.collect_issues(db)}
+        check("a failing channel is noticed", f"channel:{channel.id}" in keys, keys)
+
+        issue = next(i for i in health.collect_issues(db) if i.key.startswith("channel:"))
+        check("the alert is marked urgent", issue.urgent)
+        check("and carries the upstream error", "401" in issue.detail, issue.detail)
+
+        # Watches that fail repeatedly.
+        watch = Watch(user_id=admin.id, query="broken", enabled=True, consecutive_errors=9)
+        db.add(watch)
+        db.commit()
+        keys = {i.key for i in health.collect_issues(db)}
+        check("repeatedly failing watches are noticed", "watches:failing" in keys, keys)
+
+        # A stalled catalogue slice.
+        db.add(
+            CatalogCrawl(
+                provider="amiami",
+                scope="figures_test",
+                label="Test slice",
+                enabled=True,
+                consecutive_errors=6,
+                last_error="upstream returned 403",
+            )
+        )
+        db.commit()
+        keys = {i.key for i in health.collect_issues(db)}
+        check("a stalled crawl slice is noticed", "crawler:stalled" in keys, keys)
+
+        # Reporting must be once-per-problem, not once-per-check, or people
+        # learn to ignore it.
+        first = health.check(db, notify_enabled=False)
+        check("the report lists every problem", len(first["issues"]) >= 3, first["issues"])
+        check("the instance is not called healthy", not first["healthy"])
+
+        # Clear them and confirm the resolution is tracked.
+        db.delete(channel)
+        watch.consecutive_errors = 0
+        for crawl in db.query(CatalogCrawl).all():
+            crawl.consecutive_errors = 0
+        db.commit()
+
+        second = health.check(db, notify_enabled=False)
+        check("clearing the faults clears the report", second["healthy"], second["issues"])
+        check("and the resolution is recorded", len(second["resolved"]) >= 3, second["resolved"])
+
+        third = health.check(db, notify_enabled=False)
+        check("nothing is resolved twice", third["resolved"] == [], third["resolved"])
+    finally:
+        db.close()
+
+
 def test_settings() -> None:
     print("\n== Configuration ==")
     from app.config import Settings
@@ -912,6 +1005,7 @@ def main() -> int:
     test_crawler_cycles()
     test_crawler_yields_to_watches()
     test_mfc_cookie_parsing()
+    test_health_detection()
     test_settings()
 
     print(f"\n{'=' * 46}\n  {PASS} passed, {FAIL} failed\n{'=' * 46}")

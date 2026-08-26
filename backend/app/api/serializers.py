@@ -85,12 +85,22 @@ def item_from_normalized(
     )
 
 
+def counterpart_code(code: str) -> str:
+    """The other condition's product code for the same figure.
+
+    AmiAmi lists a pre-owned copy under the new code with an ``-R`` suffix, so
+    the relationship is purely mechanical.
+    """
+    return code[:-2] if code.endswith("-R") else code + "-R"
+
+
 def item_out(
     db: Session,
     item: Item,
     user: User | None = None,
     profile: CostProfile | None = None,
     with_context: bool = False,
+    with_counterpart: bool = False,
 ) -> ItemOut:
     display_currency = (user.display_currency if user else "EUR") or "EUR"
     landed = None
@@ -149,6 +159,22 @@ def item_out(
     payload.mfc_matched_by = item.mfc_matched_by
     payload.mfc_confidence = item.mfc_confidence
     payload.mfc_restricted = bool(item.mfc_restricted)
+
+    if with_counterpart:
+        other = db.execute(
+            select(Item).where(
+                Item.provider == item.provider, Item.code == counterpart_code(item.code)
+            )
+        ).scalar_one_or_none()
+        if other is not None:
+            payload.counterpart = {
+                "id": other.id,
+                "code": other.code,
+                "condition": other.condition.value,
+                "price": other.current_price,
+                "currency": other.currency,
+                "in_stock": other.in_stock,
+            }
 
     if with_context and user is not None:
         payload.tags = [

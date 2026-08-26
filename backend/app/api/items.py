@@ -65,7 +65,14 @@ def get_item(
     user: User = Depends(current_user),
     profile: CostProfile = Depends(user_cost_profile),
 ) -> ItemOut:
-    return item_out(db, _get_or_404(db, item_id), user=user, profile=profile, with_context=True)
+    return item_out(
+        db,
+        _get_or_404(db, item_id),
+        user=user,
+        profile=profile,
+        with_context=True,
+        with_counterpart=True,
+    )
 
 
 @router.get("/{item_id}/history", response_model=ItemHistoryOut)
@@ -79,7 +86,9 @@ def get_history(
     item = _get_or_404(db, item_id)
     points = catalog.history(db, item_id, days=days)
     return ItemHistoryOut(
-        item=item_out(db, item, user=user, profile=profile, with_context=True),
+        item=item_out(
+            db, item, user=user, profile=profile, with_context=True, with_counterpart=True
+        ),
         points=[PricePointOut.model_validate(p) for p in points],
         stats=catalog.price_stats(db, item_id),
     )
@@ -111,6 +120,46 @@ def get_landed(
             detail="No price or no exchange rate available for this item yet",
         )
     return CostBreakdownOut(**breakdown.as_dict())
+
+
+@router.post("/{item_id}/counterpart", response_model=ItemOut)
+def fetch_counterpart(
+    item_id: int,
+    db: Session = Depends(get_db),
+    user: User = Depends(current_user),
+    profile: CostProfile = Depends(user_cost_profile),
+) -> ItemOut:
+    """Pull in the same figure's other-condition listing from the shop.
+
+    A figure is frequently sold pre-owned while its new listing is still open,
+    so comparing the two price histories is the question people actually have.
+    This fetches the counterpart on demand rather than guessing that it exists.
+    """
+    item = _get_or_404(db, item_id)
+    from .serializers import counterpart_code
+
+    code = counterpart_code(item.code)
+    existing = catalog.get_item(db, item.provider, code)
+    if existing is not None:
+        return item_out(
+            db, existing, user=user, profile=profile, with_context=True, with_counterpart=True
+        )
+
+    provider = get_provider(item.provider)
+    try:
+        normalized = provider.get_item(code)
+    except ItemNotFound as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"{provider.name} has no {code} listing for this figure",
+        ) from exc
+    except ProviderError as exc:
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc
+
+    stored, _ = catalog.upsert_item(db, normalized)
+    return item_out(
+        db, stored, user=user, profile=profile, with_context=True, with_counterpart=True
+    )
 
 
 @router.post("/{item_id}/refresh", response_model=ItemOut)

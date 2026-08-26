@@ -126,6 +126,7 @@ export const api = {
     landed: (id: number, quantity = 1) =>
       get<CostBreakdown>(`/items/${id}/landed${qs({ quantity })}`),
     refresh: (id: number) => post<Item>(`/items/${id}/refresh`),
+    counterpart: (id: number) => post<Item>(`/items/${id}/counterpart`),
   },
 
   watches: {

@@ -3,13 +3,13 @@ import { useNavigate, useParams } from 'react-router-dom'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { api } from '@/api/client'
 import { Icon } from '@/components/Icon'
+import { CollectionButton } from '@/components/CollectionButton'
 import { PriceChart } from '@/components/PriceChart'
 import { WatchEditor } from '@/components/WatchEditor'
 import { LandedTooltip } from '@/components/ItemCard'
 import { Badge, Card, SegmentedControl, Skeleton, Spinner, Tooltip } from '@/components/ui'
 import { dateTime, grams, money, percent, relativeTime, tidyName } from '@/lib/format'
 import { useToast } from '@/lib/toast'
-import { useWishlistToggle } from '@/lib/useWishlist'
 import clsx from 'clsx'
 
 const RANGES = [
@@ -28,6 +28,10 @@ export function ItemDetailPage() {
   const [range, setRange] = useState('365')
   const [activeImage, setActiveImage] = useState(0)
   const [watchOpen, setWatchOpen] = useState(false)
+  // Which listing's history the chart is showing. A figure is often sold
+  // pre-owned while its new listing is still open, so the two are worth
+  // comparing rather than picking one.
+  const [chartItemId, setChartItemId] = useState<number | null>(null)
 
   const history = useQuery({
     queryKey: ['item', id, 'history', range],
@@ -42,6 +46,24 @@ export function ItemDetailPage() {
 
   const item = history.data?.item
   const stats = history.data?.stats
+  const counterpart = item?.counterpart ?? null
+
+  // The chart may be showing the counterpart's history instead of this item's.
+  const chartTargetId = chartItemId ?? id
+  const chartHistory = useQuery({
+    queryKey: ['item', chartTargetId, 'history', range],
+    queryFn: () => api.items.history(chartTargetId, Number(range)),
+    enabled: Number.isFinite(chartTargetId),
+  })
+
+  const loadCounterpart = useMutation({
+    mutationFn: () => api.items.counterpart(id),
+    onSuccess: (other) => {
+      toast.success(`Found the ${other.condition === 'preowned' ? 'pre-owned' : 'new'} listing`)
+      void queryClient.invalidateQueries({ queryKey: ['item', id] })
+    },
+    onError: (error) => toast.error('No counterpart listing', (error as Error).message),
+  })
 
   const refresh = useMutation({
     mutationFn: () => api.items.refresh(id),
@@ -62,7 +84,6 @@ export function ItemDetailPage() {
     onError: (error) => toast.error('Lookup failed', (error as Error).message),
   })
 
-  const wishlist = useWishlistToggle()
 
   if (history.isLoading) {
     return (
@@ -207,22 +228,7 @@ export function ItemDetailPage() {
                   <Icon name="bell" />
                   Track price
                 </button>
-                <button
-                  onClick={() => wishlist.mutate(item)}
-                  disabled={wishlist.isPending}
-                  aria-pressed={Boolean(item.in_collection)}
-                  className={clsx(
-                    'btn-ghost',
-                    item.in_collection && 'border-accent bg-accent/12 text-accent',
-                  )}
-                >
-                  <Icon name="heart" className={clsx(item.in_collection && 'fill-current')} />
-                  {item.in_collection === 'wishlist'
-                    ? 'On wishlist'
-                    : item.in_collection
-                      ? `In collection (${item.in_collection})`
-                      : 'Wishlist'}
-                </button>
+                <CollectionButton item={item} />
                 <button
                   onClick={() => refresh.mutate()}
                   disabled={refresh.isPending}
@@ -303,21 +309,71 @@ export function ItemDetailPage() {
           )}
 
           <Card className="p-4">
-            <div className="mb-3 flex items-center justify-between gap-3">
+            <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
               <h2 className="flex items-center gap-2 text-sm font-semibold">
                 <Icon name="chart" className="h-4 w-4 text-accent" />
                 Price history
                 <span className="font-normal text-faint">
-                  ({stats?.points ?? 0} recorded changes)
+                  ({chartHistory.data?.stats?.points ?? stats?.points ?? 0} recorded changes)
                 </span>
               </h2>
-              <SegmentedControl size="sm" value={range} onChange={setRange} options={RANGES} />
+              <div className="flex flex-wrap items-center gap-2">
+                {counterpart && (
+                  <SegmentedControl
+                    size="sm"
+                    value={String(chartTargetId)}
+                    onChange={(value) => setChartItemId(Number(value))}
+                    options={[
+                      {
+                        value: String(id),
+                        label: item.condition === 'preowned' ? 'Pre-owned' : 'New',
+                      },
+                      {
+                        value: String(counterpart.id),
+                        label: counterpart.condition === 'preowned' ? 'Pre-owned' : 'New',
+                      },
+                    ]}
+                  />
+                )}
+                <SegmentedControl size="sm" value={range} onChange={setRange} options={RANGES} />
+              </div>
             </div>
+
             <PriceChart
-              points={history.data?.points ?? []}
+              points={chartHistory.data?.points ?? []}
               currency={item.currency}
               height={280}
             />
+
+            {counterpart ? (
+              <p className="mt-3 flex flex-wrap items-center gap-x-2 gap-y-1 border-t border-line pt-3 text-xs text-muted">
+                <Icon name="link" className="h-3.5 w-3.5 text-accent" />
+                Also listed {counterpart.condition === 'preowned' ? 'pre-owned' : 'new'} at{' '}
+                <span className="font-medium tabular-nums text-ink">
+                  {money(counterpart.price, counterpart.currency)}
+                </span>
+                {counterpart.in_stock && <Badge tone="positive">in stock</Badge>}
+                <button
+                  onClick={() => navigate(`/item/${counterpart.id}`)}
+                  className="font-medium text-accent hover:underline"
+                >
+                  open that listing
+                </button>
+              </p>
+            ) : (
+              <p className="mt-3 flex flex-wrap items-center gap-2 border-t border-line pt-3 text-xs text-faint">
+                <Icon name="info" className="h-3.5 w-3.5" />
+                A figure is often sold {item.condition === 'preowned' ? 'new' : 'pre-owned'} at the
+                same time.
+                <button
+                  onClick={() => loadCounterpart.mutate()}
+                  disabled={loadCounterpart.isPending}
+                  className="font-medium text-accent hover:underline disabled:opacity-50"
+                >
+                  {loadCounterpart.isPending ? 'Checking…' : 'Check the shop'}
+                </button>
+              </p>
+            )}
           </Card>
 
           <Card className="p-4">

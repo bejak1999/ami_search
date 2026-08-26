@@ -48,7 +48,14 @@ It also answers the question the shop price does not: **what will this actually 
 - A watch can demand **"Item:A or better"**, and the target price then applies to the cheapest copy that actually qualifies
 - Alerts name the exact listing and its grade, because a price without a condition means nothing
 
+### 🩺 It tells you when it breaks
+- A tracker that silently stops working is worse than one that never worked, because you carry on trusting it
+- The instance watches itself and reports through **your own notification channels**: a shop refusing requests, an expired MyFigureCollection session, a notification channel that stopped accepting messages, watches failing repeatedly, stale exchange rates
+- Each problem is announced **once when it starts and once when it clears**, never on repeat
+- A channel that is itself failing is skipped, since it cannot carry the news that it is broken
+
 ### 📈 Real price history
+- **New and pre-owned side by side.** A figure is often sold pre-owned while its new listing is still open, so the chart switches between the two histories
 - Every price and stock change is recorded — one row per *change*, not per poll
 - **Step charts**, because a price is a fact that holds until it changes
 - Lowest / highest / average ever seen, and how long an item has been tracked
@@ -290,11 +297,17 @@ Then add it in `backend/app/providers/registry.py`. The database already keys ev
 ```bash
 cd backend
 
-python tests/test_offline.py       # 155 assertions, no network
+python tests/test_offline.py       # 175 assertions, no network
 python tests/test_migration.py     # 15 assertions: upgrading an old database
 python tests/smoke_e2e.py          # 68 assertions against the live AmiAmi API
 python tests/smoke_discovery.py    # 25 assertions across AmiAmi and MFC
 ```
+
+CI also runs `scripts/check_tailwind_classes.py`, which fails the build on a
+class name that generates no CSS. Tailwind ignores names it does not
+recognise, so `h-4.5` looks plausible, sits between two real steps of the
+spacing scale, and silently renders every icon written that way at the SVG's
+intrinsic size.
 
 The first two are what CI runs. They cover the parts where a silent mistake would be expensive: the landed-cost arithmetic, the rules that decide whether you get woken up, the condition-grade logic, and the promise that an upgrade never costs you data.
 
@@ -312,6 +325,13 @@ other session.
 
 Sessions are JWTs in an httpOnly cookie, each backed by a revocable row, so
 you can sign out a specific device from **Settings → Account**.
+
+**Container updates are safe mid-flight.** On SIGTERM the scheduler stops
+handing out work and waits for what is already running, the crawler stops at a
+page boundary, and every cursor is committed as it advances. A restart resumes
+where it left off rather than repeating the pass. Measured: a stop during an
+active crawl completed in one second, and the cursor picked up at the next
+page.
 
 **Upgrades never destroy the database.** On every start the schema is compared
 against the models and any missing column is added; nothing is ever dropped,

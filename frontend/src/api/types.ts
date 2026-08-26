@@ -102,6 +102,15 @@ export interface Item {
   mfc_matched_by: string | null
   mfc_confidence: number | null
   mfc_restricted: boolean
+  /** The same figure listed under the other condition, when known. */
+  counterpart: {
+    id: number
+    code: string
+    condition: string
+    price: number | null
+    currency: string
+    in_stock: boolean
+  } | null
   tags: TagRef[]
 }
 

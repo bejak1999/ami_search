@@ -99,6 +99,14 @@ class Settings(BaseSettings):
     smtp_starttls: bool = True
     smtp_ssl: bool = False
 
+    # ---- Self-monitoring ---------------------------------------------------
+    health_alerts_enabled: bool = True
+    """Tell administrators, on their own notification channels, when the
+    scraping machinery breaks: a shop refusing requests, an expired
+    MyFigureCollection session, a notification channel that stopped
+    accepting messages."""
+    health_check_interval_minutes: int = 15
+
     # ---- Retention --------------------------------------------------------
     price_history_retention_days: int = 1095
     alert_retention_days: int = 365

@@ -233,8 +233,16 @@ def run_once(db: Session, provider_id: str = "amiami", budget_seconds: int | Non
     crawl.last_run_at = utcnow()
     db.commit()
 
+    from ..scheduler.engine import engine
+
     first_request = True
     while True:
+        if getattr(engine, "stopping", False):
+            # A container update is in progress. The cursor is already
+            # committed, so stopping here means the next start resumes at the
+            # very next page rather than repeating this one.
+            run.stopped_because = "shutting down"
+            break
         if time.monotonic() >= deadline:
             run.stopped_because = "time budget reached"
             break
