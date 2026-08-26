@@ -48,6 +48,13 @@ It also answers the question the shop price does not: **what will this actually 
 - A watch can demand **"Item:A or better"**, and the target price then applies to the cheapest copy that actually qualifies
 - Alerts name the exact listing and its grade, because a price without a condition means nothing
 
+### 🖼️ Photos that outlive the listing
+- AmiAmi removes a pre-owned listing's pictures the moment it sells, so every other fact about the figure would survive here next to a broken frame
+- Both sizes are kept on disk: a **4 KB thumbnail** for grids and alerts, an **80 KB full image** for the item page
+- Cached on first view, then filled in by a background job that does wishlists and watched items first
+- Content-addressed and sharded, with an LRU budget; photos of items you actually track are never evicted
+- When the figure is listed pre-owned again, the row is already here and only its price changes — the picture is still there too
+
 ### 🩺 It tells you when it breaks
 - A tracker that silently stops working is worse than one that never worked, because you carry on trusting it
 - The instance watches itself and reports through **your own notification channels**: a shop refusing requests, an expired MyFigureCollection session, a notification channel that stopped accepting messages, watches failing repeatedly, stale exchange rates
@@ -200,6 +207,9 @@ Everything is optional; the defaults are sensible.
 | `VAPID_PUBLIC_KEY` / `VAPID_PRIVATE_KEY` | — | Required for browser push. Generate a pair from **Administration** |
 | `VAPID_SUBJECT` | `mailto:admin@example.com` | Contact address sent with push messages |
 | `SMTP_HOST` / `SMTP_PORT` / `SMTP_USER` / `SMTP_PASSWORD` / `SMTP_FROM` | — | Required for e-mail |
+| `IMAGE_CACHE_ENABLED` | `true` | Keep product photos on disk so they outlive the listing |
+| `IMAGE_CACHE_MAX_GB` | `12` | Soft budget. Least recently shown photos are dropped past this |
+| `IMAGE_CACHE_FULL_IMAGES` | `true` | Cache the large detail photo too, not just the thumbnail |
 | `PRICE_HISTORY_RETENTION_DAYS` | `1095` | Three years of history |
 | `ALERT_RETENTION_DAYS` | `365` | Alerts older than this are pruned nightly |
 
@@ -219,6 +229,32 @@ See [`.env.example`](.env.example) for the full list.
 3. **Settings → Notifications → Browser push**, allow the permission prompt
 
 Push needs HTTPS unless you are on `localhost`.
+
+---
+
+## 💾 Storage
+
+Measured against a real catalogue, not estimated:
+
+| Per item | Size |
+|---|---|
+| Catalogue row | 978 B |
+| + full detail | 4.0 KB |
+| + MyFigureCollection tags (37 of them) | 3.4 KB |
+| + both photos (4 KB thumbnail, 80 KB full) | 81 KB |
+| each recorded price change | 95 B |
+
+For the whole figure catalogue of about 68,000 items:
+
+| | Database | Photos |
+|---|---|---|
+| Catalogue only | 63 MB | 0.2 GB (thumbnails) |
+| Everything detail-loaded | 323 MB | 5.3 GB (both sizes) |
+| Fully cross-referenced with MFC | 543 MB | 5.3 GB |
+
+Price history adds roughly **12–23 MB a year** for the ~13,000 actively traded
+listings. Plan for about **6 GB** for a complete catalogue with photos, or
+**under 1 GB** with `IMAGE_CACHE_FULL_IMAGES=false`.
 
 ---
 
@@ -297,7 +333,7 @@ Then add it in `backend/app/providers/registry.py`. The database already keys ev
 ```bash
 cd backend
 
-python tests/test_offline.py       # 175 assertions, no network
+python tests/test_offline.py       # 196 assertions, no network
 python tests/test_migration.py     # 15 assertions: upgrading an old database
 python tests/smoke_e2e.py          # 68 assertions against the live AmiAmi API
 python tests/smoke_discovery.py    # 25 assertions across AmiAmi and MFC

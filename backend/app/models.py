@@ -696,3 +696,48 @@ class CatalogCrawl(Base):
     last_error: Mapped[str | None] = mapped_column(Text)
     consecutive_errors: Mapped[int] = mapped_column(Integer, default=0)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+# ---------------------------------------------------------------------------
+# Image cache
+# ---------------------------------------------------------------------------
+
+
+class CachedImage(Base):
+    """A product photo kept on disk.
+
+    AmiAmi deletes a pre-owned listing the moment it sells, and its images go
+    with it. Everything else about the item survives here, so without a local
+    copy the record of a figure that sold is a row with a broken picture, at
+    exactly the moment the history becomes worth keeping.
+
+    Files are content-addressed by a hash of the source URL, so the same photo
+    is never stored twice and the path can be derived without a lookup.
+    """
+
+    __tablename__ = "cached_images"
+    __table_args__ = (Index("ix_image_lru", "last_used_at"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    #: Hash of the source URL. Also the filename and the public route.
+    key: Mapped[str] = mapped_column(String(40), unique=True, index=True)
+    source_url: Mapped[str] = mapped_column(Text)
+    #: main or thumb. Thumbnails are tiny and cached for everything; full
+    #: images are much larger and fetched on demand.
+    kind: Mapped[str] = mapped_column(String(16), default="thumb", index=True)
+
+    content_type: Mapped[str] = mapped_column(String(64), default="image/jpeg")
+    bytes: Mapped[int] = mapped_column(Integer, default=0)
+    width: Mapped[int | None] = mapped_column(Integer)
+    height: Mapped[int | None] = mapped_column(Integer)
+
+    fetched_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_used_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    use_count: Mapped[int] = mapped_column(Integer, default=0)
+
+    #: Set when the origin no longer serves it, so we stop retrying and the UI
+    #: can say the picture is gone rather than showing a broken frame.
+    gone: Mapped[bool] = mapped_column(Boolean, default=False)
+    attempts: Mapped[int] = mapped_column(Integer, default=0)
+    last_error: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)

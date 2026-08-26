@@ -199,6 +199,10 @@ export const api = {
     settings: () => get<MessageResponse>('/admin/settings'),
     generateVapid: () => post<MessageResponse>('/admin/vapid/generate'),
     catalog: () => get<MessageResponse>('/admin/catalog'),
+    images: () => get<MessageResponse>('/admin/images'),
+    prefetchImages: (limit = 40) =>
+      post<MessageResponse>(`/admin/images/prefetch${qs({ limit })}`),
+    pruneImages: () => post<MessageResponse>('/admin/images/prune'),
     runCatalogCrawl: (seconds = 30) =>
       post<MessageResponse>(`/admin/catalog/run${qs({ seconds })}`),
     updateCatalogSlice: (scope: string, body: Record<string, unknown>) =>

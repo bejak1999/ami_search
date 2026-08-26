@@ -99,6 +99,23 @@ class Settings(BaseSettings):
     smtp_starttls: bool = True
     smtp_ssl: bool = False
 
+    # ---- Image cache --------------------------------------------------------
+    image_cache_enabled: bool = True
+    """Keep product photos on disk.
+
+    AmiAmi deletes a pre-owned listing as soon as it sells and its images go
+    with it, so without a local copy the record of a figure that sold shows a
+    broken frame at exactly the point the history becomes interesting.
+    """
+    image_cache_max_gb: float = 12.0
+    """Soft budget. The least recently shown images are dropped past this."""
+    image_cache_full_images: bool = True
+    """Cache the large detail photo as well as the grid thumbnail. Thumbnails
+    are about 4 KB each; full images are around 80 KB."""
+    image_cache_requests_per_minute: float = 60.0
+    image_prefetch_batch: int = 40
+    image_prefetch_interval_minutes: int = 5
+
     # ---- Self-monitoring ---------------------------------------------------
     health_alerts_enabled: bool = True
     """Tell administrators, on their own notification channels, when the

@@ -270,6 +270,49 @@ def update_catalog_slice(
     return MessageResponse(message=f"Slice {scope} updated")
 
 
+@admin.get("/images", response_model=MessageResponse)
+def image_cache_status(
+    db: Session = Depends(get_db), _admin: User = Depends(admin_user)
+) -> MessageResponse:
+    """How much disk the cached product photos take, and how far they reach."""
+    from ..services import images as image_cache
+
+    return MessageResponse(message="ok", detail=image_cache.stats(db))
+
+
+@admin.post("/images/prefetch", response_model=MessageResponse)
+def prefetch_images(
+    limit: int = Query(default=40, ge=1, le=500),
+    db: Session = Depends(get_db),
+    _admin: User = Depends(admin_user),
+) -> MessageResponse:
+    """Cache another batch now rather than waiting for the background job."""
+    from ..services import images as image_cache
+
+    outcome = image_cache.prefetch(db, limit=limit)
+    return MessageResponse(
+        message=f"Cached {outcome.get('fetched', 0)} photo(s), {outcome.get('failed', 0)} unavailable",
+        detail=outcome,
+    )
+
+
+@admin.post("/images/prune", response_model=MessageResponse)
+def prune_images(
+    db: Session = Depends(get_db), _admin: User = Depends(admin_user)
+) -> MessageResponse:
+    """Drop the least recently shown photos back under the budget."""
+    from ..services import images as image_cache
+
+    outcome = image_cache.prune(db)
+    return MessageResponse(
+        message=(
+            f"Removed {outcome['pruned']} photo(s), freeing "
+            f"{outcome['freed_bytes'] / 1024 / 1024:.0f} MB"
+        ),
+        detail=outcome,
+    )
+
+
 @admin.get("/health", response_model=MessageResponse)
 def health_report(
     db: Session = Depends(get_db), _admin: User = Depends(admin_user)

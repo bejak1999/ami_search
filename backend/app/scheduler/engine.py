@@ -20,7 +20,17 @@ from sqlalchemy import or_, select
 from ..config import settings
 from ..db import session_scope
 from ..models import Watch
-from ..services import catalog, crawler, dealradar, digest, enrich, fx, health, matcher
+from ..services import (
+    catalog,
+    crawler,
+    dealradar,
+    digest,
+    enrich,
+    fx,
+    health,
+    images,
+    matcher,
+)
 
 log = logging.getLogger(__name__)
 
@@ -46,6 +56,7 @@ class PollingEngine:
         self.last_crawl: dict | None = None
         self.last_enrichment: dict | None = None
         self.last_health: dict | None = None
+        self.last_image_prefetch: dict | None = None
         #: Set on shutdown so long-running work can bail at a safe boundary.
         self.stopping = False
 
@@ -85,6 +96,19 @@ class PollingEngine:
                 max_instances=1,
                 coalesce=True,
                 next_run_time=datetime.now(timezone.utc) + timedelta(seconds=30),
+            )
+
+        # Keep product photos locally. A sold pre-owned listing takes its
+        # images with it, and by then this instance holds the only record.
+        if settings.image_cache_enabled:
+            self.scheduler.add_job(
+                self.run_image_prefetch,
+                "interval",
+                minutes=max(1, settings.image_prefetch_interval_minutes),
+                id="image_prefetch",
+                max_instances=1,
+                coalesce=True,
+                next_run_time=datetime.now(timezone.utc) + timedelta(minutes=2),
             )
 
         # MyFigureCollection is scraped slowly and steadily in the background,
@@ -263,6 +287,14 @@ class PollingEngine:
         except Exception:  # noqa: BLE001
             log.exception("MFC enrichment batch failed")
 
+    def run_image_prefetch(self) -> None:
+        try:
+            with session_scope() as db:
+                self.last_image_prefetch = images.prefetch(db)
+                images.prune(db)
+        except Exception:  # noqa: BLE001
+            log.exception("Image prefetch failed")
+
     def run_health_check(self) -> None:
         try:
             with session_scope() as db:
@@ -306,6 +338,7 @@ class PollingEngine:
             "last_crawl": self.last_crawl,
             "last_enrichment": self.last_enrichment,
             "last_health": self.last_health,
+            "last_image_prefetch": self.last_image_prefetch,
         }
 
 

@@ -366,7 +366,136 @@ export function CatalogPanel() {
         </Card>
       </div>
 
+      <ImageCache />
       <MfcSession />
     </section>
+  )
+}
+
+function bytes(value: number | null | undefined): string {
+  if (!value) return '0 B'
+  const units = ['B', 'KB', 'MB', 'GB', 'TB']
+  let n = value
+  let i = 0
+  while (n >= 1024 && i < units.length - 1) {
+    n /= 1024
+    i += 1
+  }
+  return `${n.toFixed(n >= 100 || i === 0 ? 0 : 1)} ${units[i]}`
+}
+
+function ImageCache() {
+  const toast = useToast()
+  const queryClient = useQueryClient()
+
+  const cache = useQuery({
+    queryKey: ['admin', 'images'],
+    queryFn: () => api.admin.images(),
+    refetchInterval: 30_000,
+  })
+
+  const prefetch = useMutation({
+    mutationFn: () => api.admin.prefetchImages(60),
+    onSuccess: (result) => {
+      toast.success(result.message)
+      void queryClient.invalidateQueries({ queryKey: ['admin', 'images'] })
+    },
+  })
+  const prune = useMutation({
+    mutationFn: () => api.admin.pruneImages(),
+    onSuccess: (result) => {
+      toast.success(result.message)
+      void queryClient.invalidateQueries({ queryKey: ['admin', 'images'] })
+    },
+  })
+
+  const d = cache.data?.detail
+  if (!d) return null
+
+  return (
+    <Card className="p-4">
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div className="min-w-0">
+          <h3 className="flex items-center gap-2 text-sm font-semibold">
+            <Icon name="box" className="h-4 w-4 text-accent" />
+            Product photos on disk
+            {!d.enabled && <Badge tone="danger">Off</Badge>}
+          </h3>
+          <p className="mt-1 max-w-2xl text-xs leading-relaxed text-muted">
+            AmiAmi removes a pre-owned listing's pictures the moment it sells. Everything else
+            about the figure survives here, so a local copy is what stops the record becoming a
+            row with a broken frame.
+          </p>
+        </div>
+        <div className="flex shrink-0 gap-2">
+          <button
+            onClick={() => prefetch.mutate()}
+            disabled={prefetch.isPending}
+            className="btn-ghost text-xs"
+          >
+            {prefetch.isPending ? <Spinner className="h-3 w-3" /> : <Icon name="download" className="h-3 w-3" />}
+            Cache 60 more
+          </button>
+          <button
+            onClick={() => prune.mutate()}
+            disabled={prune.isPending}
+            className="btn-ghost text-xs"
+          >
+            <Icon name="trash" className="h-3 w-3" />
+            Prune
+          </button>
+        </div>
+      </div>
+
+      <div className="mt-4 grid gap-4 sm:grid-cols-2">
+        <div>
+          <p className="mb-1 flex items-baseline justify-between text-xs">
+            <span className="text-muted">Disk used</span>
+            <span className="font-medium tabular-nums">
+              {bytes(d.bytes)} of {bytes(d.budget_bytes)}
+            </span>
+          </p>
+          <Bar percent={d.percent_of_budget} tone={d.percent_of_budget > 90 ? 'accent' : 'positive'} />
+          <p className="mt-1.5 text-[11px] text-faint">
+            {d.count.toLocaleString()} photos, {bytes(d.average_bytes)} each on average
+          </p>
+        </div>
+
+        <div>
+          <p className="mb-1 flex items-baseline justify-between text-xs">
+            <span className="text-muted">Catalogue covered</span>
+            <span className="font-medium tabular-nums">
+              {d.count.toLocaleString()} / {d.expected_images.toLocaleString()}
+            </span>
+          </p>
+          <Bar percent={d.coverage_percent} />
+          <p className="mt-1.5 text-[11px] text-faint">
+            {d.full_images ? 'Thumbnail and full image' : 'Thumbnails only'} per item; the whole
+            catalogue would need about {bytes(d.projected_bytes)}
+          </p>
+        </div>
+      </div>
+
+      <dl className="mt-4 grid gap-x-6 gap-y-1.5 border-t border-line pt-3 text-xs sm:grid-cols-2">
+        {Object.entries(d.by_kind ?? {}).map(([kind, info]: [string, any]) => (
+          <div key={kind} className="flex justify-between gap-3">
+            <dt className="text-muted">{kind === 'thumb' ? 'Thumbnails' : 'Full images'}</dt>
+            <dd className="tabular-nums">
+              {info.count.toLocaleString()} · {bytes(info.bytes)}
+            </dd>
+          </div>
+        ))}
+        {d.gone_upstream > 0 && (
+          <div className="flex justify-between gap-3">
+            <dt className="text-muted">Gone from the shop</dt>
+            <dd className="tabular-nums text-warning">{d.gone_upstream.toLocaleString()}</dd>
+          </div>
+        )}
+        <div className="flex justify-between gap-3">
+          <dt className="text-muted">Stored in</dt>
+          <dd className="truncate font-mono text-[11px]">{d.path}</dd>
+        </div>
+      </dl>
+    </Card>
   )
 }

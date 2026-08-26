@@ -24,6 +24,7 @@ from .api import (
     collection,
     dashboard,
     discover,
+    images,
     items,
     search,
     system,
@@ -107,6 +108,7 @@ for router in (
     collection.router,
     dashboard.router,
     discover.router,
+    images.router,
     system.admin,
 ):
     app.include_router(router, prefix="/api")

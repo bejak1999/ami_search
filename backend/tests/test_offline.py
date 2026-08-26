@@ -967,6 +967,74 @@ def test_health_detection() -> None:
         db.close()
 
 
+def test_image_url_derivation() -> None:
+    print()
+    print("== Product photo URLs ==")
+    from app.services import images
+
+    main = "https://img.amiami.com/images/product/main/104/FIG-MOE-2210.jpg"
+    thumb = "https://img.amiami.com/images/product/thumb300/104/FIG-MOE-2210.jpg"
+
+    # Which size an item carries depends purely on where it was seen, so both
+    # directions have to work or grids pull 80 KB tiles.
+    check("a full image yields its thumbnail", images.thumbnail_of(main) == thumb)
+    check("a thumbnail yields its full image", images.full_of(thumb) == main)
+    check("a thumbnail is already a thumbnail", images.thumbnail_of(thumb) == thumb)
+    check("a full image is already full", images.full_of(main) == main)
+
+    other = "https://example.com/photo.jpg"
+    check("an unrecognised path has no thumbnail", images.thumbnail_of(other) is None)
+
+    check("size is read from the path", images.kind_for(main) == "main")
+    check("and for thumbnails too", images.kind_for(thumb) == "thumb")
+
+    # Content addressing: same URL, same key; different URL, different key.
+    check("keys are stable", images.key_for(main) == images.key_for(main))
+    check("keys are distinct", images.key_for(main) != images.key_for(thumb))
+    check("keys are short and safe", len(images.key_for(main)) == 32)
+
+    check(
+        "the public route points at this instance",
+        images.public_url(main) == "/api/images/" + images.key_for(main),
+    )
+    check("a missing URL stays missing", images.public_url(None) is None)
+
+    # Sharded storage, so no directory ends up with a hundred thousand files.
+    path = images.path_for(images.key_for(main), "image/jpeg")
+    check("files are sharded into subdirectories", len(path.relative_to(images.cache_root()).parts) == 3, path)
+    check("the extension follows the content type", path.suffix == ".jpg")
+    check(
+        "a png is stored as a png",
+        images.path_for("abc", "image/png").suffix == ".png",
+    )
+
+
+def test_image_selection() -> None:
+    print()
+    print("== Which photos are worth keeping ==")
+    from app.models import Item
+    from app.services import images
+
+    main = "https://img.amiami.com/images/product/main/104/X.jpg"
+    thumb = "https://img.amiami.com/images/product/thumb300/104/X.jpg"
+
+    # An item seen only in search results carries a thumbnail; one fetched in
+    # detail carries the full image. Either way both sizes should be kept.
+    from_search = Item(provider="amiami", code="X", name="X", image_url=thumb, images=[])
+    from_detail = Item(provider="amiami", code="X", name="X", image_url=main, images=[main])
+
+    for label, item in (("from search", from_search), ("from detail", from_detail)):
+        urls = images.urls_for_item(item, include_full=True)
+        check(f"{label}: both sizes selected", set(urls) == {thumb, main}, urls)
+        check(f"{label}: thumbnail comes first", urls[0] == thumb, urls)
+
+    lean = images.urls_for_item(from_detail, include_full=False)
+    check("thumbnails-only mode keeps just the small one", lean == [thumb], lean)
+
+    empty = Item(provider="amiami", code="Y", name="Y", image_url=None, images=[])
+    check("an item with no photo selects nothing", images.urls_for_item(empty) == [])
+
+
 def test_settings() -> None:
     print("\n== Configuration ==")
     from app.config import Settings
@@ -1006,6 +1074,8 @@ def main() -> int:
     test_crawler_yields_to_watches()
     test_mfc_cookie_parsing()
     test_health_detection()
+    test_image_url_derivation()
+    test_image_selection()
     test_settings()
 
     print(f"\n{'=' * 46}\n  {PASS} passed, {FAIL} failed\n{'=' * 46}")

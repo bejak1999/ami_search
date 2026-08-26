@@ -17,6 +17,20 @@ from ..models import (
 from ..providers import NormalizedItem
 from ..schemas import AlertOut, ItemOut
 from ..services import fx, landed_cost
+from ..services import images as image_cache
+
+
+def _thumb(url: str | None) -> str | None:
+    """Prefer the small version of a photo for list views.
+
+    Which size an item carries depends on where it was seen: search gives a
+    thumbnail, the detail endpoint gives the full image. Without this, a grid
+    of items that happen to have been detail-loaded pulls 80 KB per tile
+    instead of 4 KB.
+    """
+    if not url:
+        return url
+    return image_cache.thumbnail_of(url) or url
 
 
 def _discount(price: float | None, list_price: float | None) -> float | None:
@@ -57,8 +71,11 @@ def item_from_normalized(
         price_max=normalized.price_max,
         variants=normalized.variants,
         list_price=normalized.list_price,
-        image_url=normalized.image_url,
-        images=normalized.images,
+        # Point at the local copy: AmiAmi removes a pre-owned listing's photos
+        # when it sells, and by then this row is the only record left.
+        # Cards want the small version; the gallery keeps the large ones.
+        image_url=image_cache.public_url(_thumb(normalized.image_url)),
+        images=[image_cache.public_url(u) for u in normalized.images if u],
         maker=normalized.maker,
         series=normalized.series,
         character=normalized.character,
@@ -127,8 +144,8 @@ def item_out(
         price_max=item.price_max,
         variants=item.variants or [],
         list_price=item.list_price,
-        image_url=item.image_url,
-        images=item.images or [],
+        image_url=image_cache.public_url(_thumb(item.image_url)),
+        images=[image_cache.public_url(u) for u in (item.images or []) if u],
         maker=item.maker,
         series=item.series,
         character=item.character,
@@ -202,6 +219,10 @@ def item_out(
 
 def alert_out(db: Session, alert: Alert) -> AlertOut:
     payload = AlertOut.model_validate(alert)
+    # Alerts keep the origin URL so outbound notifications work even when the
+    # instance is not reachable from the internet, but the UI reads from the
+    # local copy, which outlives the listing.
+    payload.image_url = image_cache.public_url(alert.image_url)
     if alert.watch is not None:
         payload.watch_label = alert.watch.label or alert.watch.query or alert.watch.item_code
     rows = db.execute(
