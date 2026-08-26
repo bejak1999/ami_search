@@ -155,6 +155,39 @@ class MfcClient:
             return self._session_cookie
         return settings.mfc_session_cookie or ""
 
+    @staticmethod
+    def parse_cookies(value: str | None) -> dict[str, str]:
+        """Accept whatever the user managed to copy.
+
+        Three shapes all work, because asking someone to isolate exactly the
+        right line out of a cookie manager is a good way to have them paste
+        the consent string instead:
+
+          "abc123"                          a bare PHPSESSID value
+          "PHPSESSID=abc123"                one named pair
+          "PHPSESSID=abc123; other=x"       a whole cookie header
+
+        Everything named is kept, since a signed-in session may rest on more
+        than one cookie, and irrelevant extras do no harm.
+        """
+        raw = (value or "").strip().strip(";")
+        if not raw:
+            return {}
+        if "=" not in raw:
+            # A bare value is by far the most likely thing to be pasted.
+            return {"PHPSESSID": raw}
+
+        cookies: dict[str, str] = {}
+        for part in raw.split(";"):
+            part = part.strip()
+            if not part or "=" not in part:
+                continue
+            name, _, val = part.partition("=")
+            name, val = name.strip(), val.strip().strip('"')
+            if name and val:
+                cookies[name] = val
+        return cookies
+
     def set_session_cookie(self, value: str | None) -> None:
         """Swap the signed-in session and drop every pooled connection."""
         self._session_cookie = (value or "").strip() or None
@@ -178,9 +211,8 @@ class MfcClient:
                     "Accept-Language": "en-US,en;q=0.9",
                 },
             )
-            cookie = self.session_cookie
-            if cookie:
-                session.cookies.set("PHPSESSID", cookie, domain=".myfigurecollection.net")
+            for name, value in self.parse_cookies(self.session_cookie).items():
+                session.cookies.set(name, value, domain=".myfigurecollection.net")
             self._local.session = session
             with self._lock:
                 self._sessions.append(session)
@@ -436,7 +468,25 @@ class MfcClient:
                 "configured": False,
                 "valid": False,
                 "username": None,
+                "cookies": [],
                 "detail": "No session cookie set. Restricted entries stay unreadable.",
+            }
+
+        cookies = self.parse_cookies(self.session_cookie)
+        if "PHPSESSID" not in cookies:
+            # Consent and analytics cookies sit right next to the session in
+            # every cookie manager, and they are the ones people copy first.
+            return {
+                "configured": True,
+                "valid": False,
+                "username": None,
+                "cookies": sorted(cookies),
+                "detail": (
+                    "No PHPSESSID among the pasted cookies"
+                    + (f" (found: {', '.join(sorted(cookies))})" if cookies else "")
+                    + ". PHPSESSID is the one that carries the sign-in; addtl_consent "
+                    "and similar are cookie-banner leftovers."
+                ),
             }
 
         try:
@@ -459,6 +509,7 @@ class MfcClient:
             "configured": True,
             "valid": signed_in,
             "username": username,
+            "cookies": sorted(cookies),
             "detail": detail,
         }
 

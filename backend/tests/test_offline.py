@@ -848,6 +848,32 @@ def test_crawler_yields_to_watches() -> None:
         db.close()
 
 
+def test_mfc_cookie_parsing() -> None:
+    print()
+    print("== MyFigureCollection session cookies ==")
+    from app.enrichment.mfc import MfcClient
+
+    parse = MfcClient.parse_cookies
+
+    check("a bare value is taken as the session", parse("abc123") == {"PHPSESSID": "abc123"})
+    check("a named pair works", parse("PHPSESSID=abc123") == {"PHPSESSID": "abc123"})
+    check(
+        "a whole cookie header works",
+        parse("PHPSESSID=abc; addtl_consent=2~20; rzr_seg=z")
+        == {"PHPSESSID": "abc", "addtl_consent": "2~20", "rzr_seg": "z"},
+    )
+    check("whitespace and stray semicolons survive", parse("  PHPSESSID = abc ;; ") == {"PHPSESSID": "abc"})
+    check("quotes are stripped", parse('PHPSESSID="abc"') == {"PHPSESSID": "abc"})
+    check("empty input yields nothing", parse("") == {} and parse(None) == {})
+
+    # The consent cookie sits next to the session in every cookie manager and
+    # is the one people copy by mistake, so it must be called out rather than
+    # silently accepted as a login.
+    consent_only = parse("addtl_consent=2~20.43; euconsent-v2=CP")
+    check("consent cookies parse but carry no session", "PHPSESSID" not in consent_only)
+    check("and are still kept", len(consent_only) == 2, consent_only)
+
+
 def test_settings() -> None:
     print("\n== Configuration ==")
     from app.config import Settings
@@ -885,6 +911,7 @@ def main() -> int:
     test_pacing()
     test_crawler_cycles()
     test_crawler_yields_to_watches()
+    test_mfc_cookie_parsing()
     test_settings()
 
     print(f"\n{'=' * 46}\n  {PASS} passed, {FAIL} failed\n{'=' * 46}")

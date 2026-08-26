@@ -85,6 +85,12 @@ function MfcSession() {
         </button>
       </div>
 
+      {state.configured && !state.valid && state.cookies?.length ? (
+        <p className="mt-3 text-xs text-faint">
+          Cookies received: <span className="font-mono">{state.cookies.join(', ')}</span>
+        </p>
+      ) : null}
+
       {state.configured && state.restricted_entries_visible === false && (
         <p className="mt-3 flex items-start gap-2 rounded-control border border-warning/30 bg-warning/10 px-3 py-2 text-xs text-warning">
           <Icon name="alertTriangle" className="mt-0.5 h-3.5 w-3.5 shrink-0" />
@@ -95,14 +101,43 @@ function MfcSession() {
 
       {open && (
         <div className="mt-4 space-y-3 border-t border-line pt-4">
-          <ol className="list-decimal space-y-1 pl-4 text-xs leading-relaxed text-muted">
-            <li>Sign in to MyFigureCollection in your browser.</li>
+          <ol className="list-decimal space-y-2 pl-4 text-xs leading-relaxed text-muted">
             <li>
-              Open developer tools, go to <span className="font-mono">Application → Cookies</span>,
-              and copy the value of <span className="font-mono">PHPSESSID</span>.
+              Sign in to MyFigureCollection, and tick <em>remember me</em>. Without it the
+              session dies when you close the browser, and this stops working with it.
             </li>
-            <li>Paste it below.</li>
+            <li>
+              Turn on adult content under{' '}
+              <span className="font-mono">Settings → Account → Content</span> on
+              MyFigureCollection. Being signed in is not enough on its own; that switch is what
+              makes restricted entries visible.
+            </li>
+            <li>
+              Press <kbd className="rounded border border-line bg-raised px-1">F12</kbd>, open{' '}
+              <span className="font-mono">Storage</span> (Firefox) or{' '}
+              <span className="font-mono">Application</span> (Chrome), expand{' '}
+              <span className="font-mono">Cookies → https://myfigurecollection.net</span>, and
+              copy the <strong>Value</strong> of the row named{' '}
+              <span className="font-mono">PHPSESSID</span>.
+            </li>
+            <li>Paste it below. Just the value is fine; a whole cookie string works too.</li>
           </ol>
+
+          <p className="flex items-start gap-2 rounded-control border border-warning/30 bg-warning/10 px-3 py-2 text-xs leading-relaxed text-warning">
+            <Icon name="alertTriangle" className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+            <span>
+              If you run a cookie cleaner such as Cookie AutoDelete, allow-list
+              myfigurecollection.net first. Otherwise it removes the session on the browser side
+              and the value pasted here goes stale within hours.
+            </span>
+          </p>
+
+          <p className="text-xs leading-relaxed text-faint">
+            Careful which row you take: <span className="font-mono">addtl_consent</span>,{' '}
+            <span className="font-mono">euconsent-v2</span> and{' '}
+            <span className="font-mono">rzr_seg</span> sit right next to it and are cookie-banner
+            leftovers, not the sign-in.
+          </p>
 
           <Field
             label="PHPSESSID"

@@ -100,6 +100,37 @@ Supplying a `PHPSESSID` from a signed-in browser makes those entries readable.
 Set `MFC_SESSION_COOKIE`, or paste it in **Administration** where it takes
 effect without a restart.
 
+#### Getting the cookie
+
+1. **Sign in to MyFigureCollection and tick *remember me*.** Without it the
+   session is browser-session-scoped and dies when you close the browser,
+   taking the pasted value with it.
+2. **Enable adult content** under `Settings → Account → Content`. Being signed
+   in is not sufficient on its own; that switch is what lifts the restriction.
+   The admin view checks the two separately and will say so.
+3. **Open the cookie inspector.** `F12`, then `Storage` in Firefox or
+   `Application` in Chrome, then `Cookies → https://myfigurecollection.net`.
+4. **Copy the value of the row named `PHPSESSID`.** Not `addtl_consent`, not
+   `euconsent-v2`, not `rzr_seg` — those are cookie-banner leftovers that sit
+   immediately next to it.
+5. Paste it into Administration. A bare value, `PHPSESSID=…`, or an entire
+   `k=v; k=v` cookie header are all accepted, and any extra cookies are kept
+   in case the session ever rests on more than one.
+
+#### If you run a cookie cleaner
+
+Extensions such as Cookie AutoDelete remove cookies when a tab closes. Most of
+MyFigureCollection's cookies are session-scoped to begin with, so a cleaner
+will typically take the sign-in with them and the value stored here goes stale
+within hours. Allow-list `myfigurecollection.net` in the extension before
+extracting the cookie.
+
+#### When it stops working
+
+`GET /api/admin/mfc/session` reports the failure mode rather than a bare
+false: no `PHPSESSID` among the pasted cookies, a cookie that was not accepted,
+or a valid session whose account still has adult content switched off.
+
 A cookie is taken rather than a username and password deliberately:
 
 * the account password never reaches this database
