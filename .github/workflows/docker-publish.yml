@@ -44,6 +44,14 @@ jobs:
           SCHEDULER_ENABLED: 'false'
         run: python tests/test_offline.py
 
+      - name: Upgrade safety
+        working-directory: backend
+        env:
+          DATA_DIR: /tmp/amisearch-migration
+          SECRET_KEY: ci-secret
+          SCHEDULER_ENABLED: 'false'
+        run: python tests/test_migration.py
+
   frontend:
     name: Frontend build
     runs-on: ubuntu-latest

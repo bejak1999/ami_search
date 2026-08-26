@@ -136,6 +136,16 @@ class CostBreakdownOut(BaseModel):
 # ---------------------------------------------------------------------------
 
 
+class ItemVariant(BaseModel):
+    """One graded sub-listing under a product code."""
+
+    code: str
+    price: float
+    condition: str = ""
+    item_grade: str | None = None
+    box_grade: str | None = None
+
+
 class ItemBase(BaseModel):
     provider: str
     code: str
@@ -143,6 +153,8 @@ class ItemBase(BaseModel):
     url: str | None = None
     currency: str = "JPY"
     price: float | None = None
+    price_max: float | None = None
+    variants: list[ItemVariant] = []
     list_price: float | None = None
     image_url: str | None = None
     maker: str | None = None
@@ -257,6 +269,8 @@ class WatchBase(BaseModel):
     filters: dict = {}
     condition: Condition = Condition.any
     stock_filter: StockFilter = StockFilter.any
+    min_item_grade: Literal["S", "A", "B+", "B", "C", "D"] | None = None
+    min_box_grade: Literal["S", "A", "B+", "B", "C", "D"] | None = None
     target_price: float | None = Field(default=None, ge=0)
     price_basis: PriceBasis = PriceBasis.listed
     target_currency: str = "JPY"
@@ -284,6 +298,8 @@ class WatchUpdate(BaseModel):
     filters: dict | None = None
     condition: Condition | None = None
     stock_filter: StockFilter | None = None
+    min_item_grade: Literal["S", "A", "B+", "B", "C", "D"] | None = None
+    min_box_grade: Literal["S", "A", "B+", "B", "C", "D"] | None = None
     target_price: float | None = None
     price_basis: PriceBasis | None = None
     target_currency: str | None = None

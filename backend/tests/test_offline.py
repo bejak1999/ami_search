@@ -325,6 +325,132 @@ def test_trigger_switches() -> None:
     )
 
 
+def test_grade_parsing() -> None:
+    print()
+    print("== Pre-owned condition grades ==")
+    from app.providers.amiami import grade_rank, meets_grade, parse_grades
+
+    check("detail form", parse_grades("ITEM:A/BOX:B") == ("A", "B"))
+    check("other_items form", parse_grades("Condition Item:B Box:B") == ("B", "B"))
+    check("B+ is kept whole", parse_grades("Condition Item:B+  Box:B") == ("B+", "B"))
+    check("ideographic space", parse_grades("Condition Item:S　Box:A") == ("S", "A"))
+    check("nothing to find", parse_grades("no grades here") == (None, None))
+    check("empty input", parse_grades(None) == (None, None))
+
+    check("S outranks A", grade_rank("S") < grade_rank("A"))
+    check("A outranks B+", grade_rank("A") < grade_rank("B+"))
+    check("B+ outranks B", grade_rank("B+") < grade_rank("B"))
+    check("unknown sorts last", grade_rank("Z") > grade_rank("D"))
+
+    check("A satisfies A", meets_grade("A", "A"))
+    check("S satisfies A", meets_grade("S", "A"))
+    check("B+ does not satisfy A", not meets_grade("B+", "A"))
+    check("no filter accepts anything", meets_grade("D", None))
+    check("unknown grade fails a filter", not meets_grade(None, "B"))
+
+
+def test_variant_selection() -> None:
+    print()
+    print("== Choosing which graded listing to judge ==")
+    from app.models import Condition, Item, Watch
+    from app.services.matcher import effective_price, qualifying_variant
+
+    # Modelled on FIGURE-165063-R, which really is sold at five grades at once.
+    item = Item(
+        provider="amiami",
+        code="FIGURE-165063-R",
+        name="Rias Gremory Bunny 1/4",
+        currency="JPY",
+        current_price=40180,
+        price_max=59980,
+        condition=Condition.preowned,
+        variants=[
+            {"code": "R151", "price": 40180, "item_grade": "B", "box_grade": "B"},
+            {"code": "R153", "price": 53980, "item_grade": "B+", "box_grade": "B"},
+            {"code": "R152", "price": 53980, "item_grade": "B+", "box_grade": "B"},
+            {"code": "R156", "price": 59980, "item_grade": "A", "box_grade": "B"},
+        ],
+    )
+
+    unfiltered = Watch(user_id=1)
+    price, variant = effective_price(item, unfiltered)
+    check("without a filter, the cheapest listing is judged", price == 40180, price)
+    check("no variant is singled out", variant is None)
+
+    wants_a = Watch(user_id=1, min_item_grade="A")
+    price, variant = effective_price(item, wants_a)
+    check("Item:A costs more", price == 59980, price)
+    check("and names the listing", variant is not None and variant["code"] == "R156")
+
+    wants_bplus = Watch(user_id=1, min_item_grade="B+")
+    price, _ = effective_price(item, wants_bplus)
+    check("Item:B+ picks the cheapest of the two", price == 53980, price)
+
+    wants_box_a = Watch(user_id=1, min_box_grade="A")
+    price, variant = effective_price(item, wants_box_a)
+    check("no box is good enough, so no price", price is None, price)
+    check("and no listing is returned", variant is None)
+
+    check("box filter alone finds nothing here", qualifying_variant(item, wants_box_a) is None)
+
+    bare = Item(provider="amiami", code="X", name="No variants", current_price=1000, variants=[])
+    price, _ = effective_price(bare, wants_a)
+    check("unknown grades cannot satisfy a filter", price is None, price)
+    price, _ = effective_price(bare, unfiltered)
+    check("but are fine without one", price == 1000, price)
+
+
+def test_grade_filter_blocks_alerts() -> None:
+    print()
+    print("== A grade filter changes whether an alert fires ==")
+    from app.models import Condition, Item, TriggerType, Watch
+    from app.services.matcher import Valuation, decide_trigger, effective_price
+
+    item = Item(
+        provider="amiami",
+        code="FIGURE-165063-R",
+        name="Rias Gremory Bunny 1/4",
+        currency="JPY",
+        current_price=40180,
+        in_stock=True,
+        condition=Condition.preowned,
+        variants=[
+            {"code": "R151", "price": 40180, "item_grade": "B", "box_grade": "B"},
+            {"code": "R156", "price": 59980, "item_grade": "A", "box_grade": "B"},
+        ],
+    )
+
+    def valuation_for(watch: Watch) -> Valuation:
+        price, variant = effective_price(item, watch)
+        return Valuation(
+            compare_price=price,
+            compare_currency="JPY",
+            landed_total=None,
+            landed_currency="EUR",
+            breakdown=None,
+            shop_price=price,
+            variant=variant,
+        )
+
+    loose = Watch(user_id=1, target_price=45000, target_currency="JPY")
+    check(
+        "45k target matches the B-grade copy",
+        decide_trigger(loose, item, None, valuation_for(loose)) == TriggerType.price_below,
+    )
+
+    strict = Watch(user_id=1, target_price=45000, target_currency="JPY", min_item_grade="A")
+    check(
+        "the same target stays quiet when only Item:A will do",
+        decide_trigger(strict, item, None, valuation_for(strict)) is None,
+    )
+
+    generous = Watch(user_id=1, target_price=65000, target_currency="JPY", min_item_grade="A")
+    check(
+        "raising the target to 65k reaches the A-grade copy",
+        decide_trigger(generous, item, None, valuation_for(generous)) == TriggerType.price_below,
+    )
+
+
 def test_quiet_hours() -> None:
     print("\n== Quiet hours ==")
     from app.models import User, Watch
@@ -612,6 +738,9 @@ def main() -> int:
     test_shipping_table()
     test_trigger_rules()
     test_trigger_switches()
+    test_grade_parsing()
+    test_variant_selection()
+    test_grade_filter_blocks_alerts()
     test_quiet_hours()
     test_adaptive_intervals()
     test_password_rules()

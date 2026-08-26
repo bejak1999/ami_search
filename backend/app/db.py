@@ -2,11 +2,15 @@
 from __future__ import annotations
 
 import logging
+import sqlite3
 from collections.abc import Iterator
 from contextlib import contextmanager
+from datetime import datetime, timezone
+from pathlib import Path
 
-from sqlalchemy import create_engine, event, text
+from sqlalchemy import create_engine, event, inspect, text
 from sqlalchemy.engine import Engine
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session, sessionmaker
 
 from .config import settings
@@ -66,42 +70,150 @@ def session_scope() -> Iterator[Session]:
 
 
 def init_db() -> None:
-    """Create tables and apply the small set of additive migrations we need."""
+    """Create tables and bring an existing database up to the current schema."""
     from . import models  # noqa: F401  (registers mappers)
 
     models.Base.metadata.create_all(bind=engine)
-    _run_light_migrations()
+    added = migrate_schema()
+    if added:
+        log.info("Schema migration added %s column(s): %s", len(added), ", ".join(added))
     log.info("Database ready at %s", settings.resolved_database_url.split("://", 1)[0])
 
 
-# Columns added after the first public release. Each entry is
-# (table, column, DDL type + default) and is applied only when missing.
-_ADDITIVE_COLUMNS: list[tuple[str, str, str]] = [
-    ("watches", "baselined", "BOOLEAN DEFAULT 0 NOT NULL"),
-    ("watch_seen_items", "last_compare_price", "FLOAT"),
-    ("items", "mfc_id", "INTEGER"),
-    ("items", "mfc_matched_by", "VARCHAR(16)"),
-    ("items", "mfc_url", "TEXT"),
-    ("items", "mfc_confidence", "FLOAT"),
-    ("items", "mfc_fetched_at", "TIMESTAMP"),
-    ("items", "mfc_attempts", "INTEGER DEFAULT 0 NOT NULL"),
-]
+def _backup_sqlite() -> Path | None:
+    """Copy the SQLite file aside before touching the schema.
+
+    Cheap insurance. An upgrade that goes wrong should never be the reason
+    someone loses years of price history.
+    """
+    if not settings.is_sqlite:
+        return None
+    source = Path(settings.resolved_database_url.split("///", 1)[1])
+    if not source.exists() or source.stat().st_size == 0:
+        return None
+
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+    target = source.with_name(f"{source.stem}.pre-migration-{stamp}{source.suffix}")
+    try:
+        # sqlite3's backup API is safe against a live connection, unlike a
+        # plain file copy while WAL pages are outstanding.
+        with sqlite3.connect(str(source)) as src, sqlite3.connect(str(target)) as dst:
+            src.backup(dst)
+    except Exception:  # noqa: BLE001 - never let a backup failure block startup
+        log.warning("Could not back up the database before migrating", exc_info=True)
+        return None
+
+    _prune_backups(source)
+    log.info("Backed up the database to %s", target.name)
+    return target
 
 
-def _run_light_migrations() -> None:
-    """Additive-only migrations, safe to run on every boot."""
-    if not _ADDITIVE_COLUMNS:
-        return
-    from sqlalchemy import inspect
+def _prune_backups(source: Path, keep: int = 5) -> None:
+    backups = sorted(
+        source.parent.glob(f"{source.stem}.pre-migration-*{source.suffix}"),
+        key=lambda p: p.name,
+        reverse=True,
+    )
+    for stale in backups[keep:]:
+        try:
+            stale.unlink()
+        except OSError:
+            pass
+
+
+def migrate_schema() -> list[str]:
+    """Add any column the models declare but the database is missing.
+
+    Deliberately additive only. Nothing is ever dropped, renamed or retyped,
+    so an upgrade cannot destroy data: at worst a column the new code wants is
+    reported as unmigratable and the release notes have to explain it.
+
+    The column list is derived from the mappers rather than hand-maintained,
+    because a hand-maintained list is exactly the thing someone forgets to
+    update when adding a field, and the failure mode is a runtime
+    "no such column" on a database that was fine a moment ago.
+    """
+    from . import models
 
     inspector = inspect(engine)
     existing_tables = set(inspector.get_table_names())
-    with engine.begin() as conn:
-        for table, column, ddl in _ADDITIVE_COLUMNS:
-            if table not in existing_tables:
+    pending: list[tuple[str, str, str]] = []
+
+    for table in models.Base.metadata.sorted_tables:
+        if table.name not in existing_tables:
+            # create_all just made it, so it is already current.
+            continue
+        present = {column["name"] for column in inspector.get_columns(table.name)}
+        for column in table.columns:
+            if column.name in present:
                 continue
-            cols = {c["name"] for c in inspector.get_columns(table)}
-            if column in cols:
+            ddl = _column_ddl(column)
+            if ddl is None:
+                log.warning(
+                    "Cannot add %s.%s automatically; it needs a manual migration",
+                    table.name,
+                    column.name,
+                )
                 continue
-            log.info("Adding column %s.%s", table, column)
-            conn.execute(text(f"ALTER TABLE {table} ADD COLUMN {column} {ddl}"))
+            pending.append((table.name, column.name, ddl))
+
+    if not pending:
+        return []
+
+    _backup_sqlite()
+
+    applied: list[str] = []
+    for table_name, column_name, ddl in pending:
+        statement = f'ALTER TABLE "{table_name}" ADD COLUMN "{column_name}" {ddl}'
+        try:
+            with engine.begin() as conn:
+                conn.execute(text(statement))
+            applied.append(f"{table_name}.{column_name}")
+        except SQLAlchemyError:
+            log.exception("Failed to add %s.%s", table_name, column_name)
+    return applied
+
+
+def _column_ddl(column) -> str | None:
+    """Render a column definition, or None when it cannot be added safely."""
+    try:
+        type_sql = column.type.compile(dialect=engine.dialect)
+    except Exception:  # noqa: BLE001 - exotic types are not worth guessing at
+        return None
+
+    default = _default_literal(column)
+
+    if not column.nullable:
+        # SQLite refuses a NOT NULL column without a default on a populated
+        # table, and so does every other engine. Fall back to nullable rather
+        # than failing the upgrade; the ORM still enforces it on write.
+        if default is None:
+            log.info(
+                "Adding %s as nullable: NOT NULL needs a default on an existing table",
+                column.name,
+            )
+            return type_sql
+        return f"{type_sql} NOT NULL DEFAULT {default}"
+
+    return f"{type_sql} DEFAULT {default}" if default is not None else type_sql
+
+
+def _default_literal(column) -> str | None:
+    """A SQL literal for the column's default, if it has a static one."""
+    default = column.default
+    if default is None or getattr(default, "is_callable", False):
+        # Callable defaults (utcnow, dict, list) are applied by the ORM on
+        # insert; existing rows simply get NULL, which is correct.
+        return None
+
+    value = getattr(default, "arg", None)
+    if value is None or callable(value):
+        return None
+    if isinstance(value, bool):
+        return "1" if value else "0"
+    if isinstance(value, (int, float)):
+        return str(value)
+    if isinstance(value, str):
+        escaped = value.replace("'", "''")
+        return f"'{escaped}'"
+    return None

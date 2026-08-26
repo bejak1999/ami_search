@@ -223,7 +223,14 @@ class Item(Base):
     currency: Mapped[str] = mapped_column(String(3), default="JPY")
     # MSRP including Japanese tax, used to compute the discount badge.
     list_price: Mapped[float | None] = mapped_column(Float)
+    # The cheapest currently buyable listing. Pre-owned products are sold as
+    # several graded copies at different prices under one product code, so
+    # this is a range, and the cheapest one is what a target price must be
+    # compared against.
     current_price: Mapped[float | None] = mapped_column(Float)
+    price_max: Mapped[float | None] = mapped_column(Float)
+    # [{"code": "FIGURE-165063-R152", "price": 53980, "condition": "Item:B+ Box:B"}]
+    variants: Mapped[list] = mapped_column(JSON, default=list)
     lowest_price: Mapped[float | None] = mapped_column(Float)
     highest_price: Mapped[float | None] = mapped_column(Float)
     average_price: Mapped[float | None] = mapped_column(Float)
@@ -307,6 +314,11 @@ class Watch(Base):
 
     condition: Mapped[Condition] = mapped_column(Enum(Condition), default=Condition.any)
     stock_filter: Mapped[StockFilter] = mapped_column(Enum(StockFilter), default=StockFilter.any)
+    # Minimum acceptable pre-owned grade, e.g. "A" or "B+". A product code can
+    # cover several graded copies at different prices, so these decide which
+    # of them the target price is actually compared against.
+    min_item_grade: Mapped[str | None] = mapped_column(String(4))
+    min_box_grade: Mapped[str | None] = mapped_column(String(4))
 
     # Trigger configuration
     target_price: Mapped[float | None] = mapped_column(Float)

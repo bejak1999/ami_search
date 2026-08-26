@@ -157,6 +157,15 @@ export function ItemCard({ item, onOpen, onWatch, onWishlist, compact }: ItemCar
             )}
           </div>
 
+          {/* Several graded copies at once: the headline price is the cheapest
+              of them, so say so rather than implying it is the only price. */}
+          {item.price_max !== null && item.price !== null && item.price_max > item.price && (
+            <p className="mt-0.5 text-[11px] text-faint">
+              {item.variants.length > 1 ? `${item.variants.length} grades, ` : ''}up to{' '}
+              {money(item.price_max, item.currency)}
+            </p>
+          )}
+
           {item.landed && (
             <Tooltip content={<LandedTooltip item={item} />}>
               <span className="mt-0.5 inline-flex cursor-help items-center gap-1 text-xs text-muted">

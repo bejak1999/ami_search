@@ -31,6 +31,7 @@ from ..models import (
     utcnow,
 )
 from ..providers import ItemNotFound, ProviderError, SearchQuery, get_provider
+from ..providers.amiami import meets_grade
 from . import catalog, fx, landed_cost, notify
 
 log = logging.getLogger(__name__)
@@ -98,6 +99,47 @@ def _profile(db: Session, user: User) -> CostProfile:
     return profile
 
 
+#: A watch with grade filters needs the graded sub-listings, which only the
+#: detail endpoint returns. This caps how many extra detail calls one run may
+#: spend resolving them.
+MAX_GRADE_LOOKUPS_PER_RUN = 8
+
+
+def qualifying_variant(item: Item, watch: Watch) -> dict | None:
+    """The cheapest sub-listing that satisfies the watch's grade filters.
+
+    Returns None when the item has graded listings but none of them are good
+    enough, which correctly means "no match" rather than "match at the wrong
+    grade".
+    """
+    variants = item.variants or []
+    if not variants:
+        return None
+    for variant in sorted(variants, key=lambda v: v.get("price") or 0):
+        if not meets_grade(variant.get("item_grade"), watch.min_item_grade):
+            continue
+        if not meets_grade(variant.get("box_grade"), watch.min_box_grade):
+            continue
+        return variant
+    return None
+
+
+def effective_price(item: Item, watch: Watch) -> tuple[float | None, dict | None]:
+    """The price this watch should judge, plus the listing it came from.
+
+    Without grade filters that is simply the cheapest listing, which is what
+    ``item.current_price`` already holds.
+    """
+    if not (watch.min_item_grade or watch.min_box_grade):
+        return item.current_price, None
+    variant = qualifying_variant(item, watch)
+    if variant is None:
+        # Either nothing is good enough, or the graded listings have not been
+        # fetched yet. Both mean this item cannot be said to match.
+        return None, None
+    return variant.get("price"), variant
+
+
 @dataclass(slots=True)
 class Valuation:
     """An item's price expressed in the currency the watch compares against."""
@@ -107,6 +149,11 @@ class Valuation:
     landed_total: float | None
     landed_currency: str
     breakdown: dict | None
+    #: The shop price actually judged, which is the cheapest listing meeting
+    #: the watch's grade filters rather than necessarily the headline price.
+    shop_price: float | None = None
+    #: The graded sub-listing it came from, when grade filters are in use.
+    variant: dict | None = None
 
 
 def value_item(db: Session, item: Item, watch: Watch, user: User) -> Valuation:
@@ -115,9 +162,11 @@ def value_item(db: Session, item: Item, watch: Watch, user: User) -> Valuation:
     target_currency = (watch.target_currency or item.currency or "JPY").upper()
     display_currency = (user.display_currency or settings.display_currency).upper()
 
+    price, variant = effective_price(item, watch)
+
     breakdown = landed_cost.estimate(
         db,
-        item.current_price,
+        price,
         item.currency,
         profile,
         target_currency=display_currency,
@@ -131,7 +180,7 @@ def value_item(db: Session, item: Item, watch: Watch, user: User) -> Valuation:
         else:
             other = landed_cost.estimate(
                 db,
-                item.current_price,
+                price,
                 item.currency,
                 profile,
                 target_currency=target_currency,
@@ -139,7 +188,7 @@ def value_item(db: Session, item: Item, watch: Watch, user: User) -> Valuation:
             )
             compare = other.total if other else None
     else:
-        compare = fx.convert(db, item.current_price, item.currency, target_currency)
+        compare = fx.convert(db, price, item.currency, target_currency)
 
     return Valuation(
         compare_price=compare,
@@ -147,6 +196,8 @@ def value_item(db: Session, item: Item, watch: Watch, user: User) -> Valuation:
         landed_total=landed_total,
         landed_currency=display_currency,
         breakdown=breakdown.as_dict() if breakdown else None,
+        shop_price=price,
+        variant=variant,
     )
 
 
@@ -161,12 +212,18 @@ def decide_trigger(
     target = watch.target_price
     price = valuation.compare_price
 
-    hit_target = (
-        watch.notify_on_price_below
-        and target is not None
-        and price is not None
-        and price <= target
-    )
+    if (watch.min_item_grade or watch.min_box_grade) and valuation.shop_price is None:
+        # No listing under this product code is good enough, or the graded
+        # listings are not known yet. Either way there is nothing to announce.
+        return None
+
+    # These columns are NOT NULL with a default of True, but a Watch that has
+    # not been flushed yet still carries None, so read them explicitly.
+    on_price_below = watch.notify_on_price_below is not False
+    on_restock = watch.notify_on_restock is not False
+    on_new_match = watch.notify_on_new_match is not False
+
+    hit_target = on_price_below and target is not None and price is not None and price <= target
     if hit_target:
         # Fire on the crossing, not on every poll while the price sits below
         # the target. An item that was already cheap when the watch was
@@ -179,7 +236,7 @@ def decide_trigger(
             # It came down across the line since the last poll.
             candidates.add(TriggerType.price_below)
 
-    if watch.notify_on_restock and item.in_stock:
+    if on_restock and item.in_stock:
         if seen is not None and not seen.last_in_stock:
             candidates.add(
                 TriggerType.restock_preowned
@@ -188,18 +245,13 @@ def decide_trigger(
             )
 
     drop_pct = watch.notify_on_price_drop_pct
-    if (
-        drop_pct
-        and seen is not None
-        and seen.last_price
-        and item.current_price
-        and seen.last_price > 0
-    ):
-        drop = 1.0 - (item.current_price / seen.last_price)
+    observed = valuation.shop_price if valuation.shop_price is not None else item.current_price
+    if drop_pct and seen is not None and seen.last_price and observed and seen.last_price > 0:
+        drop = 1.0 - (observed / seen.last_price)
         if drop * 100.0 >= drop_pct:
             candidates.add(TriggerType.price_drop)
 
-    if watch.notify_on_new_match and seen is None:
+    if on_new_match and seen is None:
         # A brand new listing only counts when it is actually buyable, and
         # when it satisfies the target price if one is set.
         buyable = item.in_stock or item.is_preorder or item.is_backorder
@@ -255,8 +307,31 @@ def _build_alert(
         "watch_label": watch.label or watch.query,
         "breakdown": valuation.breakdown,
     }
-    if item.condition_grade:
+    if valuation.variant:
+        # Name the exact listing, because on a multi-grade product the price
+        # only means something together with the condition it applies to.
+        grades = " / ".join(
+            part
+            for part in (
+                f"Item:{valuation.variant.get('item_grade')}"
+                if valuation.variant.get("item_grade")
+                else "",
+                f"Box:{valuation.variant.get('box_grade')}"
+                if valuation.variant.get("box_grade")
+                else "",
+            )
+            if part
+        )
+        extra["grade"] = grades or valuation.variant.get("condition") or ""
+        extra["listing"] = valuation.variant.get("code")
+    elif item.condition_grade:
         extra["grade"] = item.condition_grade
+
+    if item.price_max and item.current_price and item.price_max > item.current_price:
+        extra["price_range"] = (
+            f"{item.current_price:,.0f} to {item.price_max:,.0f} {item.currency} "
+            "across the graded copies on offer"
+        )
     if item.release_date:
         extra["release"] = item.release_date
     if item.in_stock:
@@ -281,7 +356,7 @@ def _build_alert(
         trigger=trigger,
         title=_alert_title(trigger, item),
         body=body,
-        price=item.current_price,
+        price=valuation.shop_price if valuation.shop_price is not None else item.current_price,
         currency=item.currency,
         landed_price=valuation.landed_total,
         landed_currency=valuation.landed_currency,
@@ -298,6 +373,7 @@ def _remember(
     item: Item,
     alerted: TriggerType | None,
     compare_price: float | None = None,
+    shop_price: float | None = None,
 ) -> WatchSeenItem:
     seen = db.execute(
         select(WatchSeenItem).where(
@@ -308,7 +384,7 @@ def _remember(
         seen = WatchSeenItem(watch_id=watch.id, item_id=item.id)
         db.add(seen)
     seen.last_seen_at = utcnow()
-    seen.last_price = item.current_price
+    seen.last_price = shop_price if shop_price is not None else item.current_price
     if compare_price is not None:
         seen.last_compare_price = compare_price
     seen.last_in_stock = item.in_stock
@@ -435,7 +511,14 @@ def _baseline(
 
     for item in items:
         valuation = value_item(db, item, watch, user)
-        _remember(db, watch, item, None, compare_price=valuation.compare_price)
+        _remember(
+            db,
+            watch,
+            item,
+            None,
+            compare_price=valuation.compare_price,
+            shop_price=valuation.shop_price,
+        )
     watch.baselined = True
     watch.last_result_hash = _result_hash(items)
     outcome.matched = len(items)
@@ -491,7 +574,46 @@ def _collect_items(db: Session, watch: Watch) -> tuple[list[Item], str]:
         item, _ = catalog.upsert_item(db, normalized, commit=False)
         items.append(item)
     db.commit()
+
+    if watch.min_item_grade or watch.min_box_grade:
+        _resolve_grades(db, provider, watch, items)
     return items, provider.name
+
+
+def _resolve_grades(db: Session, provider, watch: Watch, items: list[Item]) -> None:
+    """Fetch the graded sub-listings for candidates a grade filter needs.
+
+    Search responses only carry a price range, never the individual grades, so
+    a watch filtering on condition has to open the detail page. That is one
+    extra request per item, which would be wasteful across a whole result
+    page, so it is spent only on the items that could plausibly match: the
+    ones already within reach of the target price, cheapest first, capped per
+    run. The rest keep their existing data and get resolved on a later poll.
+    """
+    ceiling = watch.target_price
+    candidates = [
+        item
+        for item in items
+        if item.current_price is not None and not (item.variants or [])
+    ]
+    # Without a target every candidate is equally plausible, so just take the
+    # cheapest ones; with one, anything above it cannot qualify anyway since
+    # grades only ever cost more.
+    if ceiling is not None and watch.price_basis == PriceBasis.listed:
+        candidates = [i for i in candidates if (i.current_price or 0) <= ceiling * 2]
+    candidates.sort(key=lambda i: i.current_price or 0)
+
+    for item in candidates[:MAX_GRADE_LOOKUPS_PER_RUN]:
+        try:
+            detailed = provider.get_item(item.code)
+        except ItemNotFound:
+            catalog.mark_unavailable(db, item)
+            continue
+        except ProviderError as exc:
+            log.debug("Could not resolve grades for %s: %s", item.code, exc)
+            break
+        catalog.upsert_item(db, detailed, commit=False)
+    db.commit()
 
 
 def run_watch(db: Session, watch: Watch) -> RunOutcome:
@@ -574,7 +696,14 @@ def run_watch(db: Session, watch: Watch) -> RunOutcome:
                 outcome.triggers.append(trigger.value)
                 watch.alert_count += 1
 
-        _remember(db, watch, item, fired, compare_price=valuation.compare_price)
+        _remember(
+            db,
+            watch,
+            item,
+            fired,
+            compare_price=valuation.compare_price,
+            shop_price=valuation.shop_price,
+        )
 
     if deferred and budget_left > 0:
         _summary_alert(
@@ -588,7 +717,12 @@ def run_watch(db: Session, watch: Watch) -> RunOutcome:
         outcome.alerts += 1
         for item, trigger, deferred_valuation in deferred:
             _remember(
-                db, watch, item, trigger, compare_price=deferred_valuation.compare_price
+                db,
+                watch,
+                item,
+                trigger,
+                compare_price=deferred_valuation.compare_price,
+                shop_price=deferred_valuation.shop_price,
             )
 
     watch.last_result_hash = _result_hash(items)

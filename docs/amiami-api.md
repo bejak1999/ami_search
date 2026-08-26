@@ -183,3 +183,52 @@ shared across every watch, with jitter, at most 3 concurrent requests, and a
 circuit breaker that backs off exponentially after repeated failures. That has
 been comfortable in practice. Raising it makes alerts faster and a temporary
 block more likely.
+
+## One product code, several prices
+
+This is the detail that breaks a naive tracker.
+
+A pre-owned product is sold as **several graded copies at once**, each its own
+sub-listing with its own `scode` and price. The product page shows them as
+"More Buying Choices". `FIGURE-165063-R` is a live example:
+
+| scode | Price | Condition |
+|---|---|---|
+| `FIGURE-165063-R151` | 40,180 JPY | Item:B Box:B |
+| `FIGURE-165063-R153` | 53,980 JPY | Item:B+ Box:B |
+| `FIGURE-165063-R152` | 53,980 JPY | Item:B+ Box:B |
+| `FIGURE-165063-R156` | 59,980 JPY | Item:A Box:B |
+| `FIGURE-165063-R155` | 59,980 JPY | Item:A Box:B |
+
+The two endpoints disagree about which price to show:
+
+- **Search** returns `min_price` (40,180) and `max_price` (59,980) — the range.
+- **Detail** returns one arbitrary sub-listing in its top-level fields. For
+  this item that is `R156` at **59,980**, the dearest. The rest are in
+  `_embedded.other_items`.
+
+Taking the detail price at face value therefore reports a figure **19,800 JPY
+too high**, and a watch targeting 45,000 would never fire even though a copy is
+listed at 40,180.
+
+AmiSearch reads `_embedded.other_items` together with the primary `scode`,
+sorts them by price, and reports the **cheapest** as the item price with the
+dearest as `price_max`. Grades are parsed out of the condition strings, which
+appear in two shapes:
+
+```
+"(Pre-owned ITEM:A/BOX:B)High School D x D HERO Rias Gremory…"   # detail sname
+"Condition Item:B+　Box:B"                                    # other_items
+```
+
+Note the ideographic space (U+3000) between the two fields in the second form.
+
+Grades run `S` > `A` > `B+` > `B` > `C` > `D`. A watch can set a minimum for
+the figure and the box independently; the target price is then compared
+against the cheapest copy that meets both, and an item whose copies are all
+below the minimum simply does not match.
+
+Because search responses carry only the range and never the grades, a search
+watch with a grade filter opens the detail page for a bounded number of
+candidates per run — the cheapest ones that are still plausibly within reach
+of the target. The rest resolve on later polls.

@@ -71,6 +71,12 @@ def upsert_item(db: Session, normalized: NormalizedItem, commit: bool = True) ->
     item.product_url = normalized.url or item.product_url
     item.currency = normalized.currency or item.currency
     item.current_price = normalized.price
+    if normalized.price_max is not None:
+        item.price_max = normalized.price_max
+    if normalized.variants:
+        # Only the detail endpoint knows the individual graded listings, so a
+        # cheaper list-only poll must not wipe what we already learned.
+        item.variants = normalized.variants
     if normalized.list_price:
         item.list_price = normalized.list_price
     item.condition = Condition(normalized.condition)

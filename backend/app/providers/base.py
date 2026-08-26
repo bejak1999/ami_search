@@ -26,8 +26,13 @@ class NormalizedItem:
     name: str
     url: str
     currency: str = "JPY"
+    #: The cheapest buyable listing under this product code.
     price: float | None = None
+    #: The dearest, when the shop sells several graded copies at once.
+    price_max: float | None = None
     list_price: float | None = None
+    #: One entry per buyable sub-listing: code, price, condition text.
+    variants: list[dict[str, Any]] = field(default_factory=list)
     name_jp: str | None = None
     maker: str | None = None
     series: str | None = None

@@ -45,6 +45,17 @@ export interface TagRef {
   mfc_url?: string | null
 }
 
+export type Grade = 'S' | 'A' | 'B+' | 'B' | 'C' | 'D'
+
+/** One graded copy on offer under a single product code. */
+export interface ItemVariant {
+  code: string
+  price: number
+  condition: string
+  item_grade: Grade | null
+  box_grade: Grade | null
+}
+
 export interface Item {
   id: number | null
   provider: string
@@ -54,6 +65,8 @@ export interface Item {
   url: string | null
   currency: string
   price: number | null
+  price_max: number | null
+  variants: ItemVariant[]
   list_price: number | null
   image_url: string | null
   images: string[]
@@ -122,6 +135,8 @@ export interface Watch {
   filters: Record<string, any>
   condition: Condition
   stock_filter: StockFilter
+  min_item_grade: Grade | null
+  min_box_grade: Grade | null
   target_price: number | null
   price_basis: PriceBasis
   target_currency: string

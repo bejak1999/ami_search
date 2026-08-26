@@ -58,6 +58,54 @@ _GRADE_RE = re.compile(r"\(Pre-owned\s*([^)]*)\)", re.IGNORECASE)
 _CODE_RE = re.compile(r"[A-Z]+[A-Z0-9-]*\d[A-Z0-9-]*")
 
 
+#: AmiAmi grades a pre-owned item and its box separately, best first. The
+#: order matters: it is what lets a watch say "Item:A or better".
+GRADE_ORDER = ("S", "A", "B+", "B", "C", "D")
+
+_GRADE_FIELD_RE = re.compile(
+    r"(item|box)\s*[:：]\s*(S|A|B\+|B|C|D)(?![A-Za-z0-9])",
+    re.IGNORECASE,
+)
+
+
+def _clean_condition(sname: str | None) -> str:
+    """Pull "Item:A Box:B" out of a pre-owned listing name."""
+    match = _GRADE_RE.search(sname or "")
+    return " ".join(match.group(1).split()) if match else ""
+
+
+def parse_grades(text: str | None) -> tuple[str | None, str | None]:
+    """Split a condition string into (item grade, box grade).
+
+    Handles both the detail form "(Pre-owned ITEM:A/BOX:B)..." and the
+    other_items form "Condition Item:A　Box:B", including the ideographic
+    space AmiAmi uses between the two.
+    """
+    if not text:
+        return None, None
+    grades: dict[str, str] = {}
+    for match in _GRADE_FIELD_RE.finditer(text):
+        grades[match.group(1).lower()] = match.group(2).upper()
+    return grades.get("item"), grades.get("box")
+
+
+def grade_rank(grade: str | None) -> int:
+    """Lower is better. Unknown grades sort last so they never pass a filter."""
+    if not grade:
+        return len(GRADE_ORDER)
+    try:
+        return GRADE_ORDER.index(grade.upper())
+    except ValueError:
+        return len(GRADE_ORDER)
+
+
+def meets_grade(grade: str | None, minimum: str | None) -> bool:
+    """True when ``grade`` is at least as good as ``minimum``."""
+    if not minimum:
+        return True
+    return grade_rank(grade) <= grade_rank(minimum)
+
+
 class AmiAmiProvider(ShopProvider):
     id = "amiami"
     name = "AmiAmi"
@@ -288,7 +336,10 @@ class AmiAmiProvider(ShopProvider):
         code = raw.get("gcode") or ""
         name = raw.get("gname") or ""
         preowned = bool(raw.get("condition_flg")) or code.endswith("-R")
+        # min_price is the cheapest grade on offer, max_price the dearest.
+        # A target price has to be judged against the cheapest one.
         price = raw.get("min_price")
+        price_max = raw.get("max_price")
         thumb = self._abs_image(raw.get("thumb_url"))
         return NormalizedItem(
             provider=self.id,
@@ -297,6 +348,7 @@ class AmiAmiProvider(ShopProvider):
             url=self.product_url(code),
             currency=self.currency,
             price=float(price) if price else None,
+            price_max=float(price_max) if price_max else None,
             list_price=float(raw["c_price_taxed"]) if raw.get("c_price_taxed") else None,
             maker=raw.get("maker_name"),
             scale=self._scale_from_name(name),
@@ -313,6 +365,46 @@ class AmiAmiProvider(ShopProvider):
             release_date_parsed=self._parse_release(raw.get("releasedate")),
             detail_loaded=False,
             raw=raw,
+        )
+
+    @staticmethod
+    def _collect_variants(raw: dict[str, Any], embedded: dict[str, Any]) -> list[dict[str, Any]]:
+        """Every buyable sub-listing under one product code.
+
+        AmiAmi sells a pre-owned product as several graded copies at different
+        prices. The detail endpoint returns one of them in the top-level
+        fields and the rest in ``_embedded.other_items`` - this is the
+        "More Buying Choices" box on the product page. The one it picks is not
+        the cheapest, so taking the top-level price at face value can be tens
+        of thousands of yen off.
+        """
+        seen: dict[str, dict[str, Any]] = {}
+
+        def record(code: str, price: Any, condition: str) -> None:
+            if not code or not price or code in seen:
+                return
+            item_grade, box_grade = parse_grades(condition)
+            seen[code] = {
+                "code": code,
+                "price": float(price),
+                "condition": " ".join((condition or "").split()),
+                "item_grade": item_grade,
+                "box_grade": box_grade,
+            }
+
+        record(
+            raw.get("scode") or raw.get("gcode") or "",
+            raw.get("price") or raw.get("price1"),
+            _clean_condition(raw.get("sname")),
+        )
+        for entry in embedded.get("other_items") or []:
+            record(entry.get("scode") or "", entry.get("price"), entry.get("condition") or "")
+
+        # Cheapest first, then best condition, which is the order someone
+        # actually shops in.
+        return sorted(
+            seen.values(),
+            key=lambda v: (v["price"], grade_rank(v["item_grade"]), grade_rank(v["box_grade"])),
         )
 
     def _normalize_detail(
@@ -332,12 +424,16 @@ class AmiAmiProvider(ShopProvider):
                 if url and url not in images:
                     images.append(url)
 
-        grade = None
-        grade_match = _GRADE_RE.search(raw.get("sname") or "")
-        if grade_match:
-            grade = (grade_match.group(1) or "").strip() or None
+        variants = self._collect_variants(raw, embedded)
+        # The top-level price is one arbitrary grade among several. Reporting
+        # it would make an item watch compare against the wrong number, so the
+        # cheapest listing wins and the range is kept alongside it.
+        cheapest = variants[0] if variants else None
+        dearest = variants[-1] if variants else None
 
-        price = raw.get("price") or raw.get("price1")
+        grade = (cheapest or {}).get("condition") or _clean_condition(raw.get("sname")) or None
+        price = (cheapest or {}).get("price") or raw.get("price") or raw.get("price1")
+        price_max = (dearest or {}).get("price") if dearest else None
         # Do not trust soldout_flg here: the detail endpoint returns 1 for
         # every item, including freshly opened pre-orders. The usable signals
         # are stock / order_closed_flg / end_flg, plus cart_type
@@ -354,6 +450,8 @@ class AmiAmiProvider(ShopProvider):
             url=self.product_url(code),
             currency=self.currency,
             price=float(price) if price else None,
+            price_max=float(price_max) if price_max else None,
+            variants=variants,
             list_price=float(raw["c_price_taxed"]) if raw.get("c_price_taxed") else None,
             maker=raw.get("maker_name") or self._first(embedded.get("makers")),
             series=self._first(embedded.get("original_titles")),

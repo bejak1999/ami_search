@@ -122,6 +122,8 @@ def create_watch(
         filters=payload.filters,
         condition=payload.condition,
         stock_filter=payload.stock_filter,
+        min_item_grade=payload.min_item_grade,
+        min_box_grade=payload.min_box_grade,
         target_price=payload.target_price,
         price_basis=payload.price_basis,
         target_currency=payload.target_currency.upper(),

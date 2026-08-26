@@ -188,6 +188,14 @@ export function ItemDetailPage() {
                     </>
                   )}
                 </div>
+                {item.price_max !== null && item.price !== null && item.price_max > item.price && (
+                  <p className="mt-1 text-xs text-muted">
+                    Cheapest of {item.variants.length || 'several'} graded copies, up to{' '}
+                    <span className="font-medium tabular-nums text-ink">
+                      {money(item.price_max, item.currency)}
+                    </span>
+                  </p>
+                )}
                 {item.landed && (
                   <Tooltip content={<LandedTooltip item={item} />}>
                     <p className="mt-1.5 inline-flex cursor-help items-center gap-1.5 text-sm text-muted">
@@ -253,6 +261,44 @@ export function ItemDetailPage() {
               </p>
             )}
           </Card>
+
+          {item.variants.length > 1 && (
+            <Card className="p-4">
+              <h2 className="mb-1 flex items-center gap-2 text-sm font-semibold">
+                <Icon name="list" className="h-4 w-4 text-accent" />
+                Buying choices
+                <span className="font-normal text-faint">
+                  ({item.variants.length} graded copies)
+                </span>
+              </h2>
+              <p className="mb-3 text-xs leading-relaxed text-muted">
+                AmiAmi sells this product code as separate graded copies. The headline price is
+                the cheapest of them; a watch can be told which grade it will accept.
+              </p>
+              <ul className="divide-y divide-line">
+                {item.variants.map((variant) => (
+                  <li
+                    key={variant.code}
+                    className="flex flex-wrap items-center gap-x-3 gap-y-1 py-2 text-sm"
+                  >
+                    <span className="font-semibold tabular-nums">
+                      {money(variant.price, item.currency)}
+                    </span>
+                    {variant.item_grade && (
+                      <Badge tone={variant.item_grade === 'S' || variant.item_grade === 'A' ? 'positive' : 'neutral'}>
+                        Figure {variant.item_grade}
+                      </Badge>
+                    )}
+                    {variant.box_grade && <Badge>Box {variant.box_grade}</Badge>}
+                    {variant.price === item.price && <Badge tone="accent">Cheapest</Badge>}
+                    <span className="ml-auto font-mono text-[11px] text-faint">
+                      {variant.code}
+                    </span>
+                  </li>
+                ))}
+              </ul>
+            </Card>
+          )}
 
           <Card className="p-4">
             <div className="mb-3 flex items-center justify-between gap-3">

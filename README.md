@@ -42,6 +42,12 @@ It also answers the question the shop price does not: **what will this actually 
 - Every landed figure comes with a **full breakdown** on hover — nothing is a magic number
 - Per watch: compare against the **shop price** or the **delivered total**
 
+### 🏅 Condition grades, handled properly
+- A pre-owned product code often covers **several graded copies at different prices** — AmiAmi's "More Buying Choices". The headline price is the cheapest of them, never an arbitrary one
+- Figure and box grades are read separately (`S`, `A`, `B+`, `B`, `C`, `D`)
+- A watch can demand **"Item:A or better"**, and the target price then applies to the cheapest copy that actually qualifies
+- Alerts name the exact listing and its grade, because a price without a condition means nothing
+
 ### 📈 Real price history
 - Every price and stock change is recorded — one row per *change*, not per poll
 - **Step charts**, because a price is a fact that holds until it changes
@@ -277,12 +283,42 @@ Then add it in `backend/app/providers/registry.py`. The database already keys ev
 ```bash
 cd backend
 
-python tests/test_offline.py       # 107 assertions, no network
+python tests/test_offline.py       # 135 assertions, no network
+python tests/test_migration.py     # 15 assertions: upgrading an old database
 python tests/smoke_e2e.py          # 68 assertions against the live AmiAmi API
 python tests/smoke_discovery.py    # 25 assertions across AmiAmi and MFC
 ```
 
-The offline suite is what CI runs. It covers the parts where a silent mistake would be expensive: the landed-cost arithmetic, the rules that decide whether you get woken up, and the parsers that turn shop responses into the model.
+The first two are what CI runs. They cover the parts where a silent mistake would be expensive: the landed-cost arithmetic, the rules that decide whether you get woken up, the condition-grade logic, and the promise that an upgrade never costs you data.
+
+---
+
+## 🔐 Data and security
+
+**Passwords** are stored as bcrypt hashes at cost 12, with a random salt per
+password, so the same password produces a different hash for every account.
+One verification takes roughly 200 ms, which puts an offline attacker at about
+five guesses per second per core. Passphrases longer than bcrypt's 72-byte
+input limit are pre-hashed with SHA-256 rather than silently truncated. The
+plaintext is never written anywhere, and changing a password revokes every
+other session.
+
+Sessions are JWTs in an httpOnly cookie, each backed by a revocable row, so
+you can sign out a specific device from **Settings → Account**.
+
+**Upgrades never destroy the database.** On every start the schema is compared
+against the models and any missing column is added; nothing is ever dropped,
+renamed or retyped. The column list is derived from the mappers rather than
+hand-maintained, because a hand-maintained list is exactly what gets forgotten.
+Before any change is applied, SQLite databases are copied aside to
+`amisearch.pre-migration-<timestamp>.db` in your data directory, and the last
+five such backups are kept. `tests/test_migration.py` builds a database in an
+older shape, upgrades it, and asserts every row survived — CI runs it on
+every push.
+
+**Notification secrets** — bot tokens, webhook URLs, push subscriptions — are
+stored in the database and never sent back to the browser; the edit form shows
+only a masked hint, and leaving a secret field empty keeps the stored value.
 
 ---
 

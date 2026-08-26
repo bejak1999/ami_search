@@ -1,13 +1,16 @@
 import { useMemo, useState } from 'react'
 import { useMutation, useQuery } from '@tanstack/react-query'
 import { api } from '@/api/client'
-import type { Item, PriceBasis, Watch } from '@/api/types'
+import type { Grade, Item, PriceBasis, Watch } from '@/api/types'
 import { useAuth } from '@/lib/auth'
 import { useToast } from '@/lib/toast'
 import { duration, money, tidyName } from '@/lib/format'
 import { Icon } from './Icon'
 import { Badge, Field, Modal, SegmentedControl, Spinner, Toggle, Tooltip } from './ui'
 import clsx from 'clsx'
+
+// AmiAmi grades the figure and its box separately, best first.
+const GRADES: Grade[] = ['S', 'A', 'B+', 'B', 'C', 'D']
 
 const INTERVAL_PRESETS = [
   { seconds: 15, label: '15 s', note: 'Sniping. Use sparingly.' },
@@ -33,6 +36,8 @@ interface FormState {
   item_code: string
   condition: 'any' | 'new' | 'preowned'
   stock_filter: 'any' | 'in_stock' | 'preorder' | 'backorder'
+  min_item_grade: Grade | ''
+  min_box_grade: Grade | ''
   exclude: string
   target_price: string
   price_basis: PriceBasis
@@ -66,6 +71,8 @@ function initialState(
       item_code: watch.item_code ?? '',
       condition: watch.condition,
       stock_filter: watch.stock_filter,
+      min_item_grade: watch.min_item_grade ?? '',
+      min_box_grade: watch.min_box_grade ?? '',
       exclude: (watch.filters?.exclude_keywords ?? []).join(', '),
       target_price: watch.target_price?.toString() ?? '',
       price_basis: watch.price_basis,
@@ -96,6 +103,8 @@ function initialState(
     item_code: seed?.code ?? '',
     condition: seed?.condition === 'preowned' ? 'preowned' : 'any',
     stock_filter: 'any',
+    min_item_grade: '',
+    min_box_grade: '',
     exclude: '',
     // Seeding the target just under the current price is the setting people
     // reach for anyway, and it makes the watch immediately meaningful.
@@ -156,6 +165,8 @@ export function WatchEditor({ open, onClose, onSaved, watch, seedItem }: WatchEd
       item_code: form.kind === 'item' ? form.item_code.trim() : null,
       condition: form.condition,
       stock_filter: form.stock_filter,
+      min_item_grade: form.min_item_grade || null,
+      min_box_grade: form.min_box_grade || null,
       filters: {
         exclude_keywords: form.exclude
           .split(',')
@@ -301,6 +312,62 @@ export function WatchEditor({ open, onClose, onSaved, watch, seedItem }: WatchEd
               />
             </Field>
           </div>
+
+          {form.condition !== 'new' && (
+            <div className="space-y-3 rounded-control border border-line bg-raised p-3.5">
+              <div>
+                <p className="text-xs font-medium uppercase tracking-wide text-muted">
+                  Minimum pre-owned condition
+                </p>
+                <p className="mt-1 text-xs leading-relaxed text-faint">
+                  One product code often covers several graded copies at different prices. Setting
+                  a minimum makes the target price apply to the cheapest copy that is actually good
+                  enough, instead of to the cheapest copy overall.
+                </p>
+              </div>
+
+              {(
+                [
+                  ['min_item_grade', 'Figure'],
+                  ['min_box_grade', 'Box'],
+                ] as const
+              ).map(([key, label]) => (
+                <div key={key}>
+                  <span className="label mb-1">{label}</span>
+                  <div className="flex flex-wrap gap-1.5">
+                    <button
+                      type="button"
+                      onClick={() => set(key, '')}
+                      className={clsx('chip', !form[key] && 'chip-active')}
+                    >
+                      Any
+                    </button>
+                    {GRADES.map((grade) => (
+                      <button
+                        key={grade}
+                        type="button"
+                        onClick={() => set(key, grade)}
+                        className={clsx('chip', form[key] === grade && 'chip-active')}
+                      >
+                        {grade}
+                        {form[key] === grade && (
+                          <span className="text-faint">or better</span>
+                        )}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              ))}
+
+              {form.kind === 'search' && (form.min_item_grade || form.min_box_grade) && (
+                <p className="flex items-start gap-1.5 text-xs text-faint">
+                  <Icon name="info" className="mt-0.5 h-3.5 w-3.5" />
+                  Grades only appear on a product's own page, so a few candidates per check are
+                  opened to read them. The rest are resolved on later checks.
+                </p>
+              )}
+            </div>
+          )}
 
           {form.kind === 'search' && (
             <Field
