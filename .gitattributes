@@ -1,0 +1,21 @@
+# Normalise line endings on commit so a clone on Windows cannot break the
+# container. entrypoint.sh in particular must stay LF: with CRLF the shebang
+# resolves to "/bin/sh\r" and the image fails to start with a confusing
+# "no such file or directory".
+* text=auto eol=lf
+
+*.sh            text eol=lf
+Dockerfile      text eol=lf
+*.py            text eol=lf
+*.ts            text eol=lf
+*.tsx           text eol=lf
+*.css           text eol=lf
+*.html          text eol=lf
+*.yml           text eol=lf
+*.yaml          text eol=lf
+*.json          text eol=lf
+*.md            text eol=lf
+
+*.png           binary
+*.jpg           binary
+*.ico           binary
