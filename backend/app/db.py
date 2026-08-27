@@ -77,6 +77,9 @@ def init_db() -> None:
     added = migrate_schema()
     if added:
         log.info("Schema migration added %s column(s): %s", len(added), ", ".join(added))
+    indexed = create_missing_indexes()
+    if indexed:
+        log.info("Created %s index(es): %s", len(indexed), ", ".join(indexed))
     log.info("Database ready at %s", settings.resolved_database_url.split("://", 1)[0])
 
 
@@ -217,3 +220,34 @@ def _default_literal(column) -> str | None:
         escaped = value.replace("'", "''")
         return f"'{escaped}'"
     return None
+
+
+def create_missing_indexes() -> list[str]:
+    """Create indexes the models declare but the database lacks.
+
+    ``create_all`` only builds indexes alongside a new table, so one added to
+    an existing model is silently never created. The symptom is not an error,
+    it is a catalogue search that quietly gets slower as rows accumulate,
+    which is exactly the kind of thing nobody notices until it is bad.
+
+    Creating an index is additive and safe to repeat.
+    """
+    from . import models
+
+    inspector = inspect(engine)
+    existing_tables = set(inspector.get_table_names())
+    created: list[str] = []
+
+    for table in models.Base.metadata.sorted_tables:
+        if table.name not in existing_tables:
+            continue
+        present = {index["name"] for index in inspector.get_indexes(table.name)}
+        for index in table.indexes:
+            if index.name in present:
+                continue
+            try:
+                index.create(bind=engine)
+                created.append(index.name)
+            except SQLAlchemyError:
+                log.exception("Could not create index %s", index.name)
+    return created

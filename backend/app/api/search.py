@@ -4,7 +4,7 @@ from __future__ import annotations
 import logging
 import math
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.orm import Session
 
 from ..db import get_db
@@ -20,13 +20,14 @@ from ..providers import (
 )
 from ..schemas import (
     ItemOut,
+    LocalSearchRequest,
     MessageResponse,
     ProviderInfo,
     ResolveRequest,
     SearchRequest,
     SearchResponse,
 )
-from ..services import catalog
+from ..services import catalog, localsearch
 from .serializers import item_from_normalized
 
 log = logging.getLogger(__name__)
@@ -122,6 +123,66 @@ def search(
         took_ms=result.took_ms,
         provider=provider.id,
     )
+
+
+@router.post("/local", response_model=SearchResponse)
+def search_local(
+    payload: LocalSearchRequest,
+    db: Session = Depends(get_db),
+    user: User = Depends(current_user),
+    profile: CostProfile = Depends(user_cost_profile),
+) -> SearchResponse:
+    """Search this instance's catalogue rather than the shop.
+
+    Larger than the shop's own search, because listings AmiAmi deletes when
+    they sell are kept here, and able to sort by things the shop cannot know
+    about its own removed listings, such as the lowest price ever recorded.
+    """
+    import time
+
+    started = time.monotonic()
+    result = localsearch.search(db, payload)
+    from .serializers import item_out
+
+    return SearchResponse(
+        items=[
+            item_out(db, item, user=user, profile=profile, with_context=True)
+            for item in result.items
+        ],
+        total=result.total,
+        page=result.page,
+        per_page=result.per_page,
+        pages=result.pages,
+        facets={},
+        took_ms=int((time.monotonic() - started) * 1000),
+        provider=payload.provider or "local",
+    )
+
+
+@router.get("/local/tags", response_model=list[dict])
+def local_tags(
+    q: str | None = None,
+    kind: str | None = None,
+    limit: int = Query(default=60, ge=1, le=300),
+    db: Session = Depends(get_db),
+    _user: User = Depends(current_user),
+) -> list[dict]:
+    """Tags available for filtering, most used first."""
+    tags = localsearch.facet_tags(db, limit=limit, kinds=[kind] if kind else None)
+    if q:
+        needle = q.strip().lower()
+        tags = [t for t in tags if needle in t["name"].lower() or needle in t["slug"].lower()]
+    return tags
+
+
+@router.get("/local/summary", response_model=MessageResponse)
+def local_summary(
+    provider: str | None = None,
+    db: Session = Depends(get_db),
+    _user: User = Depends(current_user),
+) -> MessageResponse:
+    """Size of the local catalogue, including how much of it the shop dropped."""
+    return MessageResponse(message="ok", detail=localsearch.catalogue_summary(db, provider))
 
 
 @router.post("/resolve", response_model=ItemOut)

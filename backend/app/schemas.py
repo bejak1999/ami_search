@@ -245,6 +245,43 @@ class SearchRequest(BaseModel):
         return value
 
 
+class LocalSearchRequest(BaseModel):
+    """Searching this instance's own catalogue rather than the shop.
+
+    The local catalogue keeps listings the shop has deleted, so it grows past
+    what AmiAmi will show you and can answer questions the shop cannot: what a
+    figure has ever cost, and whether today's price is the lowest it has been.
+    """
+
+    q: str = ""
+    provider: str | None = None
+    page: int = Field(default=1, ge=1, le=1000)
+    per_page: int = Field(default=48, ge=1, le=120)
+
+    condition: Literal["any", "new", "preowned"] = "any"
+    availability: Literal["any", "buyable", "in_stock", "preorder", "delisted"] = "any"
+
+    #: MFC tag slugs the item must carry.
+    tags: list[str] = []
+    #: How to combine them. Narrowing wants all; browsing wants any.
+    tag_mode: Literal["all", "any"] = "all"
+    #: Tag slugs that disqualify an item, e.g. nendoroid when hunting scales.
+    exclude_tags: list[str] = []
+
+    min_price: float | None = None
+    max_price: float | None = None
+    #: Only items whose current price equals the lowest ever recorded here.
+    at_lowest_ever: bool = False
+
+    maker: str | None = None
+    series: str | None = None
+    character: str | None = None
+
+    sort: Literal[
+        "newest", "oldest", "price_asc", "price_desc", "discount", "lowest_ever", "release"
+    ] = "newest"
+
+
 class SearchResponse(BaseModel):
     items: list[ItemOut]
     total: int

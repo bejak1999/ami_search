@@ -115,6 +115,12 @@ export const api = {
 
   search: {
     run: (body: Record<string, unknown>) => post<SearchResponse>('/search', body),
+    local: (body: Record<string, unknown>) => post<SearchResponse>('/search/local', body),
+    localTags: (params: Record<string, unknown> = {}) =>
+      get<{ slug: string; name: string; kind: string; usage_count: number }[]>(
+        `/search/local/tags${qs(params)}`,
+      ),
+    localSummary: () => get<MessageResponse>('/search/local/summary'),
     resolve: (input: string) => post<Item>('/search/resolve', { input }),
     providers: () => get<any[]>('/search/providers'),
   },
@@ -177,6 +183,7 @@ export const api = {
   },
 
   discover: {
+    feed: () => get<MessageResponse>('/discover/feed'),
     tags: (params: Record<string, unknown> = {}) => get<TagRef[]>(`/discover/tags${qs(params)}`),
     local: (params: Record<string, unknown> = {}) => get<Item[]>(`/discover/local${qs(params)}`),
     itemTags: (id: number) => get<TagRef[]>(`/discover/item/${id}/tags`),

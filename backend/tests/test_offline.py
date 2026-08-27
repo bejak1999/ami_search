@@ -1116,6 +1116,101 @@ def test_image_selection() -> None:
     check("an item with no photo selects nothing", images.urls_for_item(empty) == [])
 
 
+def test_local_search() -> None:
+    print()
+    print("== Searching the local catalogue ==")
+    from app.db import SessionLocal, init_db
+    from app.models import Condition, Item, ItemTag, Tag, TagKind
+    from app.schemas import LocalSearchRequest
+    from app.services import localsearch
+
+    PROVIDER = "localsearch-fixture"
+
+    init_db()
+    db = SessionLocal()
+    try:
+        scale = Tag(kind=TagKind.tag, slug="scale_figure", name="scale figure")
+        nendo = Tag(kind=TagKind.tag, slug="nendoroid", name="nendoroid")
+        db.add_all([scale, nendo])
+        db.flush()
+
+        rows = [
+            # name, condition, price, lowest, delisted, tags
+            ("Miku Scale Figure", Condition.new, 12000, 12000, False, [scale]),
+            ("Miku Nendoroid", Condition.new, 5000, 4000, False, [nendo]),
+            ("Rem Scale Figure", Condition.preowned, 8000, 8000, False, [scale]),
+            ("Sold Out Rem", Condition.preowned, 6000, 6000, True, [scale, nendo]),
+        ]
+        # A provider of its own, so counts are not disturbed by rows other
+        # tests left in the shared database.
+        for n, (name, cond, price, low, closed, tags) in enumerate(rows):
+            item = Item(
+                provider=PROVIDER,
+                code=f"LS-{n}",
+                name=name,
+                condition=cond,
+                current_price=price,
+                lowest_price=low,
+                list_price=20000,
+                in_stock=not closed,
+                order_closed=closed,
+            )
+            db.add(item)
+            db.flush()
+            for tag in tags:
+                db.add(ItemTag(item_id=item.id, tag_id=tag.id))
+        db.commit()
+
+        def run(**kw):
+            return localsearch.search(db, LocalSearchRequest(provider=PROVIDER, **kw))
+
+        check("everything is returned by default", run().total == 4, run().total)
+
+        # Delisted items stay in the results: that history is the whole point.
+        check("a sold-out listing is still findable", run(q="Sold Out").total == 1)
+        check("and can be isolated", run(availability="delisted").total == 1)
+        check("buyable excludes it", run(availability="buyable").total == 3)
+
+        check("keywords match the name", run(q="Miku").total == 2)
+        check("several words must all match", run(q="Miku Scale").total == 1, run(q="Miku Scale").total)
+        check("a word matching nothing finds nothing", run(q="Asuka").total == 0)
+
+        check("condition filters", run(condition="preowned").total == 2)
+        check("price ranges filter", run(max_price=6000).total == 2, run(max_price=6000).total)
+
+        # Tags: requiring, combining and excluding.
+        check("requiring a tag", run(tags=["scale_figure"]).total == 3)
+        check("excluding a tag", run(exclude_tags=["nendoroid"]).total == 2)
+        check(
+            "requiring one and excluding another",
+            run(tags=["scale_figure"], exclude_tags=["nendoroid"]).total == 2,
+        )
+        check(
+            "all of several tags",
+            run(tags=["scale_figure", "nendoroid"], tag_mode="all").total == 1,
+        )
+        check(
+            "any of several tags",
+            run(tags=["scale_figure", "nendoroid"], tag_mode="any").total == 4,
+        )
+        check("an unknown tag matches nothing", run(tags=["does_not_exist"]).total == 0)
+
+        # Only possible because prices are kept after a listing is removed.
+        at_lowest = run(at_lowest_ever=True)
+        check("items at their lowest ever", at_lowest.total == 3, at_lowest.total)
+
+        cheapest = run(sort="price_asc")
+        check("cheapest first", cheapest.items[0].current_price == 5000, cheapest.items[0].name)
+        dearest = run(sort="price_desc")
+        check("dearest first", dearest.items[0].current_price == 12000)
+
+        paged = run(per_page=2, page=2)
+        check("pagination reports pages", paged.pages == 2, paged.pages)
+        check("and returns the right slice", len(paged.items) == 2)
+    finally:
+        db.close()
+
+
 def test_settings() -> None:
     print("\n== Configuration ==")
     from app.config import Settings
@@ -1159,6 +1254,7 @@ def main() -> int:
     test_health_detection()
     test_image_url_derivation()
     test_image_selection()
+    test_local_search()
     test_settings()
 
     print(f"\n{'=' * 46}\n  {PASS} passed, {FAIL} failed\n{'=' * 46}")

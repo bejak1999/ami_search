@@ -200,6 +200,11 @@ class Item(Base):
     __table_args__ = (
         UniqueConstraint("provider", "code", name="uq_item_provider_code"),
         Index("ix_item_provider_updated", "provider", "last_seen_at"),
+        # Catalogue search sorts by these, and by the time the crawler has
+        # finished there are tens of thousands of rows to sort.
+        Index("ix_item_first_seen", "first_seen_at"),
+        Index("ix_item_price", "current_price"),
+        Index("ix_item_availability", "order_closed", "in_stock"),
     )
 
     id: Mapped[int] = mapped_column(primary_key=True)

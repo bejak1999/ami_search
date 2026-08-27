@@ -22,11 +22,47 @@ from ..enrichment.mfc import MfcError, client as mfc_client
 from ..models import CostProfile, DiscoverySeed, Item, ItemTag, Tag, TagKind, User, utcnow
 from ..providers import ProviderError, SearchQuery, get_provider
 from ..schemas import ItemOut, MessageResponse
-from ..services import catalog, enrich
+from ..services import catalog, enrich, feed
 from .serializers import item_out
 
 log = logging.getLogger(__name__)
 router = APIRouter(prefix="/discover", tags=["discovery"])
+
+
+@router.get("/feed", response_model=MessageResponse)
+def discovery_feed(
+    provider: str | None = None,
+    db: Session = Depends(get_db),
+    user: User = Depends(current_user),
+    profile: CostProfile = Depends(user_cost_profile),
+) -> MessageResponse:
+    """Things worth knowing about, without having to ask first.
+
+    Rails drawn from the user's own watches and wishlist come first when there
+    is anything to fill them; the rest work on a brand new account too.
+    """
+    rails = feed.build(db, user, provider)
+    return MessageResponse(
+        message=f"{len(rails)} rail(s)",
+        detail={
+            "rails": [
+                {
+                    "key": rail.key,
+                    "title": rail.title,
+                    "subtitle": rail.subtitle,
+                    "icon": rail.icon,
+                    "explore": rail.explore,
+                    "items": [
+                        item_out(db, item, user=user, profile=profile, with_context=True).model_dump(
+                            mode="json"
+                        )
+                        for item in rail.items
+                    ],
+                }
+                for rail in rails
+            ]
+        },
+    )
 
 
 @router.get("/tags", response_model=list[dict])

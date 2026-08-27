@@ -76,11 +76,20 @@ It also answers the question the shop price does not: **what will this actually 
 - **Per-slice settings** in Administration: how often to re-check, how deep, how often to sweep the lot
 - Progress, rates and estimates are all visible in **Administration**
 
+### 🔎 A catalogue larger than the shop's own search
+- Search **this instance** or **AmiAmi live**, whichever suits. The catalogue is the default: instant, page-navigable, and it keeps listings the shop has deleted
+- Opens showing results rather than an empty box, newest additions first
+- **Filter by MyFigureCollection tags, and against them.** Excluding matters as much as including: hunting a scale figure from one series means saying "this series, but no nendoroids"
+- Several tags combine with **all of them** or **any of them**, switchable
+- Sort by **near its lowest price ever**, which is a question the shop cannot answer about listings it has removed
+- Removed listings stay, marked, with their last known price
+
 ### 🏷️ Discovery by MyFigureCollection tag
 - Items are cross-referenced with MyFigureCollection **by barcode**, which is exact
 - Browse AmiAmi by MFC tags: character, series, pose, outfit, sculptor, material
 - A **local tag index** means results are instant and everything shown is buyable now
 - Or search MFC directly to reach figures nobody on your instance has looked for yet
+- A **discovery feed** that opens with something to say: just-listed pre-owned, items below their usual price, well under list price, and rails drawn from the series, characters and tags of what you already watch and want
 
 ### 🗂️ Wishlist and collection
 - Wishlist → ordered → owned → sold, with notes, tags and priorities
@@ -335,7 +344,7 @@ Then add it in `backend/app/providers/registry.py`. The database already keys ev
 ```bash
 cd backend
 
-python tests/test_offline.py       # 208 assertions, no network
+python tests/test_offline.py       # 228 assertions, no network
 python tests/test_migration.py     # 15 assertions: upgrading an old database
 python tests/smoke_e2e.py          # 68 assertions against the live AmiAmi API
 python tests/smoke_discovery.py    # 25 assertions across AmiAmi and MFC

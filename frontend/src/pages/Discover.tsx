@@ -1,117 +1,82 @@
-import { useEffect, useMemo, useState } from 'react'
-import { useNavigate, useSearchParams } from 'react-router-dom'
+import { useRef, useState } from 'react'
+import { useNavigate } from 'react-router-dom'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { api } from '@/api/client'
-import type { Item, TagRef } from '@/api/types'
-import { Icon } from '@/components/Icon'
+import type { Item } from '@/api/types'
+import { Icon, type IconName } from '@/components/Icon'
 import { ItemCard, ItemCardSkeleton } from '@/components/ItemCard'
+import { EMPTY_TAGS, TagFilter, type TagSelection } from '@/components/TagFilter'
 import { WatchEditor } from '@/components/WatchEditor'
-import { Badge, Card, EmptyState, SegmentedControl, Spinner, Toggle } from '@/components/ui'
+import { Card, EmptyState, SegmentedControl, Spinner } from '@/components/ui'
 import { useToast } from '@/lib/toast'
 import { useWishlistToggle } from '@/lib/useWishlist'
-import clsx from 'clsx'
 
-const KIND_LABELS: Record<string, string> = {
-  tag: 'Tag',
-  origin: 'Series',
-  character: 'Character',
-  company: 'Company',
-  artist: 'Artist',
-  material: 'Material',
-  classification: 'Category',
-}
-
-function TagPicker({
-  selected,
-  onToggle,
+/**
+ * A horizontally scrolling row of suggestions.
+ *
+ * Rails rather than a grid because each answers a different question, and a
+ * single grid would flatten "cheap right now" and "from series you follow"
+ * into one undifferentiated wall.
+ */
+function Rail({
+  rail,
+  onOpen,
+  onWatch,
+  onWishlist,
+  onExplore,
 }: {
-  selected: string[]
-  onToggle: (slug: string) => void
+  rail: any
+  onOpen: (item: Item) => void
+  onWatch: (item: Item) => void
+  onWishlist: (item: Item) => void
+  onExplore: (params: Record<string, unknown>) => void
 }) {
-  const [query, setQuery] = useState('')
-  const [kind, setKind] = useState<string>('')
+  const scroller = useRef<HTMLDivElement>(null)
 
-  const tags = useQuery({
-    queryKey: ['tags', query, kind],
-    queryFn: () => api.discover.tags({ q: query || undefined, kind: kind || undefined, limit: 60 }),
-    staleTime: 60_000,
-  })
-
-  const grouped = useMemo(() => {
-    const map = new Map<string, TagRef[]>()
-    for (const tag of tags.data ?? []) {
-      if (!map.has(tag.kind)) map.set(tag.kind, [])
-      map.get(tag.kind)!.push(tag)
-    }
-    return [...map.entries()]
-  }, [tags.data])
+  const nudge = (direction: 1 | -1) => {
+    scroller.current?.scrollBy({ left: direction * 640, behavior: 'smooth' })
+  }
 
   return (
-    <Card className="space-y-3 p-4">
-      <div className="relative">
-        <Icon
-          name="search"
-          className="pointer-events-none absolute left-3 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-faint"
-        />
-        <input
-          value={query}
-          onChange={(e) => setQuery(e.target.value)}
-          placeholder="Filter tags: sword, twintails, Good Smile…"
-          className="field pl-9 text-sm"
-        />
+    <section>
+      <div className="mb-3 flex items-end justify-between gap-4">
+        <div className="min-w-0">
+          <h2 className="flex items-center gap-2 text-lg font-semibold tracking-tight">
+            <Icon name={rail.icon as IconName} className="h-4.5 w-4.5 text-accent" />
+            {rail.title}
+          </h2>
+          <p className="mt-0.5 text-sm text-muted">{rail.subtitle}</p>
+        </div>
+        <div className="flex shrink-0 items-center gap-1">
+          {rail.explore && (
+            <button onClick={() => onExplore(rail.explore)} className="btn-quiet text-sm">
+              See all
+              <Icon name="chevronRight" className="h-3.5 w-3.5" />
+            </button>
+          )}
+          <button onClick={() => nudge(-1)} className="btn-ghost px-2 py-1.5" aria-label="Scroll left">
+            <Icon name="chevronLeft" className="h-3.5 w-3.5" />
+          </button>
+          <button onClick={() => nudge(1)} className="btn-ghost px-2 py-1.5" aria-label="Scroll right">
+            <Icon name="chevronRight" className="h-3.5 w-3.5" />
+          </button>
+        </div>
       </div>
 
-      <div className="scroll-x flex gap-1.5 pb-1">
-        <button
-          onClick={() => setKind('')}
-          className={clsx('chip shrink-0', !kind && 'chip-active')}
-        >
-          Everything
-        </button>
-        {Object.entries(KIND_LABELS).map(([value, label]) => (
-          <button
-            key={value}
-            onClick={() => setKind(value)}
-            className={clsx('chip shrink-0', kind === value && 'chip-active')}
-          >
-            {label}
-          </button>
+      <div ref={scroller} className="scroll-x no-scrollbar flex gap-4 pb-2">
+        {rail.items.map((item: Item) => (
+          <div key={item.id ?? item.code} className="w-[200px] shrink-0">
+            <ItemCard
+              item={item}
+              compact
+              onOpen={onOpen}
+              onWatch={onWatch}
+              onWishlist={onWishlist}
+            />
+          </div>
         ))}
       </div>
-
-      <div className="max-h-72 space-y-3 overflow-y-auto pr-1">
-        {tags.isLoading ? (
-          <p className="py-6 text-center text-sm text-faint">Loading tags…</p>
-        ) : grouped.length === 0 ? (
-          <p className="py-6 text-center text-sm text-faint">
-            No tags yet. Tags arrive as items get cross-referenced with MyFigureCollection.
-          </p>
-        ) : (
-          grouped.map(([groupKind, groupTags]) => (
-            <div key={groupKind}>
-              <p className="mb-1.5 text-[11px] font-semibold uppercase tracking-wide text-faint">
-                {KIND_LABELS[groupKind] ?? groupKind}
-              </p>
-              <div className="flex flex-wrap gap-1.5">
-                {groupTags.map((tag) => (
-                  <button
-                    key={`${tag.kind}-${tag.slug}`}
-                    onClick={() => onToggle(tag.slug)}
-                    className={clsx('chip', selected.includes(tag.slug) && 'chip-active')}
-                  >
-                    {selected.includes(tag.slug) && <Icon name="check" className="h-3 w-3" />}
-                    {tag.name}
-                    {tag.usage_count ? (
-                      <span className="text-faint">{tag.usage_count}</span>
-                    ) : null}
-                  </button>
-                ))}
-              </div>
-            </div>
-          ))
-        )}
-      </div>
-    </Card>
+    </section>
   )
 }
 
@@ -119,186 +84,193 @@ export function DiscoverPage() {
   const navigate = useNavigate()
   const toast = useToast()
   const queryClient = useQueryClient()
-  const [params, setParams] = useSearchParams()
-  const [selected, setSelected] = useState<string[]>(() => params.getAll('tag'))
-  const [source, setSource] = useState<'local' | 'mfc'>('local')
-  const [inStockOnly, setInStockOnly] = useState(false)
-  const [figuresOnly, setFiguresOnly] = useState(true)
-  const [mfcPage, setMfcPage] = useState(1)
+  const wishlist = useWishlistToggle()
+
+  const [mode, setMode] = useState<'feed' | 'tags'>('feed')
+  const [tags, setTags] = useState<TagSelection>(EMPTY_TAGS)
   const [watchSeed, setWatchSeed] = useState<Partial<Item> | null>(null)
 
-  useEffect(() => {
-    setParams(selected.length ? { tag: selected } : {}, { replace: true })
-  }, [selected, setParams])
+  const feed = useQuery({
+    queryKey: ['discover', 'feed'],
+    queryFn: () => api.discover.feed(),
+    enabled: mode === 'feed',
+    staleTime: 120_000,
+  })
 
-  const toggle = (slug: string) =>
-    setSelected((prev) => (prev.includes(slug) ? prev.filter((s) => s !== slug) : [...prev, slug]))
-
-  const local = useQuery({
-    queryKey: ['discover', 'local', selected, inStockOnly],
-    enabled: source === 'local',
+  const byTag = useQuery({
+    queryKey: ['discover', 'byTag', tags],
+    enabled: mode === 'tags' && (tags.include.length > 0 || tags.exclude.length > 0),
     queryFn: () =>
-      api.discover.local({
-        tags: selected,
-        in_stock: inStockOnly ? true : undefined,
-        limit: 60,
+      api.search.local({
+        tags: tags.include,
+        tag_mode: tags.mode,
+        exclude_tags: tags.exclude,
+        availability: 'buyable',
+        per_page: 60,
+        sort: 'newest',
       }),
   })
 
   const stats = useQuery({ queryKey: ['discover', 'stats'], queryFn: api.discover.stats })
-
-  const viaMfc = useMutation({
-    mutationFn: () =>
-      api.discover.viaMfc({ tags: selected, page: mfcPage, figures_only: figuresOnly, lookups: 12 }),
-    onError: (error) => toast.error('MyFigureCollection lookup failed', (error as Error).message),
-  })
-
-  const wishlist = useWishlistToggle()
 
   const enrichNow = useMutation({
     mutationFn: () => api.discover.runEnrichment(20),
     onSuccess: (result) => {
       toast.success('Cross-reference run finished', result.message)
       void queryClient.invalidateQueries({ queryKey: ['discover'] })
-      void queryClient.invalidateQueries({ queryKey: ['tags'] })
+      void queryClient.invalidateQueries({ queryKey: ['localTags'] })
     },
   })
 
-  const detail = viaMfc.data?.detail
+  /** Hand a rail's defining filter over to the search page. */
+  function explore(params: Record<string, unknown>) {
+    const search = new URLSearchParams()
+    for (const [key, value] of Object.entries(params)) {
+      if (value !== undefined && value !== null) search.set(key, String(value))
+    }
+    navigate(`/search?${search.toString()}`)
+  }
+
+  const rails = feed.data?.detail?.rails ?? []
+  const linked = stats.data?.detail?.linked_items ?? 0
+
+  const open = (item: Item) => item.id && navigate(`/item/${item.id}`)
 
   return (
-    <div className="space-y-6">
-      <header>
-        <h1 className="text-2xl font-semibold tracking-tight">Discover</h1>
-        <p className="mt-1 max-w-2xl text-sm text-muted">
-          Items are cross-referenced with MyFigureCollection by barcode, so you can browse AmiAmi by
-          the tags MFC gives figures — character, series, pose, outfit, anything.
-        </p>
+    <div className="space-y-8">
+      <header className="flex flex-wrap items-end justify-between gap-4">
+        <div>
+          <h1 className="text-2xl font-semibold tracking-tight">Discover</h1>
+          <p className="mt-1 max-w-2xl text-sm text-muted">
+            {mode === 'feed'
+              ? 'Drawn from the catalogue this instance has built, and from what you already watch and want.'
+              : 'Browse by the tags MyFigureCollection gives figures: character, series, pose, outfit, anything.'}
+          </p>
+        </div>
+        <SegmentedControl
+          value={mode}
+          onChange={setMode}
+          options={[
+            { value: 'feed', label: 'For you', icon: 'sparkle' },
+            { value: 'tags', label: 'By tag', icon: 'tag' },
+          ]}
+        />
       </header>
 
-      <div className="grid gap-6 lg:grid-cols-[320px_1fr]">
-        <aside className="space-y-4">
-          <TagPicker selected={selected} onToggle={toggle} />
-
-          {selected.length > 0 && (
-            <Card className="space-y-2 p-3.5">
-              <div className="flex items-center justify-between">
-                <p className="text-xs font-semibold uppercase tracking-wide text-muted">
-                  {selected.length} tag{selected.length === 1 ? '' : 's'} selected
-                </p>
-                <button onClick={() => setSelected([])} className="btn-quiet px-1.5 py-0.5 text-xs">
-                  Clear
-                </button>
+      {mode === 'feed' ? (
+        feed.isLoading ? (
+          <div className="space-y-8">
+            {Array.from({ length: 2 }).map((_, r) => (
+              <div key={r}>
+                <div className="skeleton mb-3 h-6 w-56 rounded" />
+                <div className="flex gap-4 overflow-hidden">
+                  {Array.from({ length: 6 }).map((_, i) => (
+                    <div key={i} className="w-[200px] shrink-0">
+                      <ItemCardSkeleton />
+                    </div>
+                  ))}
+                </div>
               </div>
-              <div className="flex flex-wrap gap-1.5">
-                {selected.map((slug) => (
-                  <button key={slug} onClick={() => toggle(slug)} className="chip chip-active">
-                    {slug.replace(/_/g, ' ').replace(/___$/, '')}
-                    <Icon name="close" className="h-3 w-3" />
-                  </button>
+            ))}
+          </div>
+        ) : rails.length ? (
+          <div className="space-y-9">
+            {rails.map((rail: any) => (
+              <Rail
+                key={rail.key}
+                rail={rail}
+                onOpen={open}
+                onWatch={setWatchSeed}
+                onWishlist={(item) => wishlist.mutate(item)}
+                onExplore={explore}
+              />
+            ))}
+          </div>
+        ) : (
+          <EmptyState
+            icon="compass"
+            title="Nothing to suggest yet"
+            body="The catalogue is still being built. Once the crawler has some listings, this page fills itself; add a watch or a wishlist entry and it starts suggesting things like them."
+            action={
+              <button onClick={() => navigate('/search')} className="btn-primary">
+                <Icon name="search" />
+                Browse the catalogue
+              </button>
+            }
+          />
+        )
+      ) : (
+        <div className="grid gap-6 lg:grid-cols-[320px_1fr]">
+          <aside className="space-y-4">
+            <Card className="p-4">
+              <TagFilter value={tags} onChange={setTags} />
+            </Card>
+
+            <Card className="space-y-3 p-3.5">
+              <p className="text-xs font-semibold uppercase tracking-wide text-muted">
+                Cross-reference
+              </p>
+              <div className="space-y-1 text-xs text-muted">
+                {[
+                  ['Linked items', linked],
+                  ['Still queued', stats.data?.detail?.pending_items],
+                  ['Known tags', stats.data?.detail?.tags],
+                ].map(([label, value]) => (
+                  <div key={label as string} className="flex justify-between">
+                    <span>{label as string}</span>
+                    <span className="font-medium tabular-nums text-ink">
+                      {typeof value === 'number' ? value.toLocaleString('en-GB') : '—'}
+                    </span>
+                  </div>
                 ))}
               </div>
+              <button
+                onClick={() => enrichNow.mutate()}
+                disabled={enrichNow.isPending}
+                className="btn-ghost w-full text-xs"
+              >
+                {enrichNow.isPending ? (
+                  <Spinner className="h-3 w-3" />
+                ) : (
+                  <Icon name="refresh" className="h-3 w-3" />
+                )}
+                Cross-reference 20 more now
+              </button>
               <p className="text-[11px] leading-relaxed text-faint">
-                Multiple tags are combined with AND.
+                Runs in the background at a deliberately slow rate, so
+                MyFigureCollection never sees a burst from your instance.
               </p>
             </Card>
-          )}
+          </aside>
 
-          <Card className="space-y-3 p-3.5">
-            <p className="text-xs font-semibold uppercase tracking-wide text-muted">Cross-reference</p>
-            <div className="space-y-1 text-xs text-muted">
-              <div className="flex justify-between">
-                <span>Linked items</span>
-                <span className="font-medium tabular-nums text-ink">
-                  {stats.data?.detail?.linked_items ?? '—'}
-                </span>
-              </div>
-              <div className="flex justify-between">
-                <span>Still queued</span>
-                <span className="font-medium tabular-nums text-ink">
-                  {stats.data?.detail?.pending_items ?? '—'}
-                </span>
-              </div>
-              <div className="flex justify-between">
-                <span>Known tags</span>
-                <span className="font-medium tabular-nums text-ink">
-                  {stats.data?.detail?.tags ?? '—'}
-                </span>
-              </div>
-            </div>
-            <button
-              onClick={() => enrichNow.mutate()}
-              disabled={enrichNow.isPending}
-              className="btn-ghost w-full text-xs"
-            >
-              {enrichNow.isPending ? <Spinner className="h-3 w-3" /> : <Icon name="refresh" className="h-3 w-3" />}
-              Cross-reference 20 more now
-            </button>
-            <p className="text-[11px] leading-relaxed text-faint">
-              This runs automatically in the background at a deliberately slow rate, so
-              MyFigureCollection never sees a burst from your instance.
-            </p>
-          </Card>
-        </aside>
-
-        <section className="min-w-0 space-y-4">
-          <div className="flex flex-wrap items-center gap-3">
-            <SegmentedControl
-              value={source}
-              onChange={setSource}
-              options={[
-                { value: 'local', label: 'Already on AmiAmi', icon: 'box' },
-                { value: 'mfc', label: 'Search MyFigureCollection', icon: 'compass' },
-              ]}
-            />
-            {source === 'local' ? (
-              <Toggle checked={inStockOnly} onChange={setInStockOnly} label="In stock only" />
-            ) : (
-              <>
-                <Toggle checked={figuresOnly} onChange={setFiguresOnly} label="Figures only" />
-                <div className="ml-auto flex items-center gap-3">
-                  {selected.length === 0 && (
-                    <span className="text-xs text-faint">Pick a tag first</span>
-                  )}
-                  <button
-                    onClick={() => viaMfc.mutate()}
-                    disabled={selected.length === 0 || viaMfc.isPending}
-                    title={
-                      selected.length === 0
-                        ? 'Select at least one tag on the left'
-                        : `Search MyFigureCollection for ${selected.length} tag(s)`
-                    }
-                    className="btn-primary"
-                  >
-                    {viaMfc.isPending ? <Spinner /> : <Icon name="search" />}
-                    Search
-                  </button>
-                </div>
-              </>
-            )}
-          </div>
-
-          {source === 'local' ? (
-            local.isLoading ? (
+          <section className="min-w-0 space-y-4">
+            {tags.include.length === 0 && tags.exclude.length === 0 ? (
+              <EmptyState
+                icon="tag"
+                title="Pick a tag to start"
+                body="Click a tag to require it, click again to exclude it. Combining a character with a pose or an outfit is where this gets interesting, and excluding is how you say 'this series, but no nendoroids'."
+              />
+            ) : byTag.isLoading ? (
               <div className="grid-cards">
-                {Array.from({ length: 8 }).map((_, index) => (
-                  <ItemCardSkeleton key={index} />
+                {Array.from({ length: 8 }).map((_, i) => (
+                  <ItemCardSkeleton key={i} />
                 ))}
               </div>
-            ) : local.data?.length ? (
+            ) : byTag.data?.items.length ? (
               <>
                 <p className="text-sm text-muted">
-                  <strong className="text-ink tabular-nums">{local.data.length}</strong> item
-                  {local.data.length === 1 ? '' : 's'} in this instance match
-                  {selected.length ? ' every selected tag' : ''}.
+                  <strong className="text-ink tabular-nums">
+                    {byTag.data.total.toLocaleString('en-GB')}
+                  </strong>{' '}
+                  buyable {byTag.data.total === 1 ? 'item matches' : 'items match'}
                 </p>
                 <div className="grid-cards">
-                  {local.data.map((item) => (
+                  {byTag.data.items.map((item) => (
                     <ItemCard
                       key={item.id ?? item.code}
                       item={item}
-                      onOpen={(target) => target.id && navigate(`/item/${target.id}`)}
-                      onWatch={(target) => setWatchSeed(target)}
+                      onOpen={open}
+                      onWatch={setWatchSeed}
                       onWishlist={(target) => wishlist.mutate(target)}
                     />
                   ))}
@@ -306,109 +278,14 @@ export function DiscoverPage() {
               </>
             ) : (
               <EmptyState
-                icon="compass"
-                title={selected.length ? 'Nothing here carries those tags yet' : 'Pick a tag to start'}
-                body={
-                  selected.length
-                    ? 'Only items this instance has already seen and cross-referenced can match. Try the MyFigureCollection search instead, which reaches everything.'
-                    : 'Choose one or more tags on the left. Combining a character with a pose or an outfit is where this gets interesting.'
-                }
+                icon="tag"
+                title="Nothing carries that combination"
+                body="Only items already cross-referenced with MyFigureCollection can match, and that runs slowly in the background. Try a single tag, or switch the combination to 'any of them'."
               />
-            )
-          ) : detail ? (
-            <>
-              <div className="flex flex-wrap items-center gap-3 text-sm text-muted">
-                <span>{viaMfc.data?.message}</span>
-                {detail.total_pages > 1 && (
-                  <span className="ml-auto flex items-center gap-2">
-                    <button
-                      onClick={() => {
-                        setMfcPage((p) => Math.max(1, p - 1))
-                        setTimeout(() => viaMfc.mutate(), 0)
-                      }}
-                      disabled={mfcPage <= 1}
-                      className="btn-ghost px-2 py-1"
-                    >
-                      <Icon name="chevronLeft" className="h-3.5 w-3.5" />
-                    </button>
-                    <span className="tabular-nums">
-                      {detail.page} / {detail.total_pages}
-                    </span>
-                    <button
-                      onClick={() => {
-                        setMfcPage((p) => p + 1)
-                        setTimeout(() => viaMfc.mutate(), 0)
-                      }}
-                      disabled={mfcPage >= detail.total_pages}
-                      className="btn-ghost px-2 py-1"
-                    >
-                      <Icon name="chevronRight" className="h-3.5 w-3.5" />
-                    </button>
-                  </span>
-                )}
-              </div>
-
-              <div className="grid-cards">
-                {detail.results.map((row: any) =>
-                  row.item ? (
-                    <ItemCard
-                      key={row.mfc_id}
-                      item={row.item}
-                      onOpen={(target) => target.id && navigate(`/item/${target.id}`)}
-                      onWatch={(target) => setWatchSeed(target)}
-                      onWishlist={(target) => wishlist.mutate(target)}
-                    />
-                  ) : (
-                    <Card key={row.mfc_id} className="flex flex-col overflow-hidden opacity-70">
-                      <div className="relative aspect-[3/4] bg-raised">
-                        {row.mfc_image ? (
-                          <img
-                            src={row.mfc_image}
-                            alt=""
-                            loading="lazy"
-                            className="h-full w-full object-cover grayscale"
-                          />
-                        ) : (
-                          <div className="grid h-full place-items-center text-faint">
-                            <Icon name="box" className="h-8 w-8" />
-                          </div>
-                        )}
-                        <span className="absolute right-2 top-2">
-                          <Badge tone={row.state === 'unmatched' ? 'danger' : 'neutral'}>
-                            {row.state === 'unmatched' ? 'Not on AmiAmi' : 'Not checked yet'}
-                          </Badge>
-                        </span>
-                      </div>
-                      <div className="flex flex-1 flex-col gap-2 p-3">
-                        <p className="line-clamp-3 text-xs leading-snug">{row.mfc_title}</p>
-                        <a
-                          href={row.mfc_url}
-                          target="_blank"
-                          rel="noreferrer"
-                          className="btn-quiet mt-auto justify-start px-0 text-xs"
-                        >
-                          View on MFC
-                          <Icon name="external" className="h-3 w-3" />
-                        </a>
-                      </div>
-                    </Card>
-                  ),
-                )}
-              </div>
-              <p className="text-xs text-faint">
-                Items marked <em>not checked yet</em> are looked up a few at a time to stay within
-                the shop request budget. Run the search again to check the next batch.
-              </p>
-            </>
-          ) : (
-            <EmptyState
-              icon="compass"
-              title="Browse MyFigureCollection by tag"
-              body="This asks MFC which figures carry your tags, then looks each one up on AmiAmi. Slower than the local index, but it reaches figures nobody here has searched for yet."
-            />
-          )}
-        </section>
-      </div>
+            )}
+          </section>
+        </div>
+      )}
 
       {watchSeed && (
         <WatchEditor
