@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { api } from '@/api/client'
-import type { CostProfile } from '@/api/types'
+import type { CostProfile, CostProfilePreview, ShippingService } from '@/api/types'
 import { ChannelManager } from '@/components/ChannelManager'
 import { Icon } from '@/components/Icon'
 import { Card, Field, SegmentedControl, Spinner, Toggle } from '@/components/ui'
@@ -14,13 +14,13 @@ import clsx from 'clsx'
 const CURRENCIES = ['EUR', 'USD', 'GBP', 'CHF', 'SEK', 'NOK', 'DKK', 'PLN', 'CZK', 'CAD', 'AUD', 'JPY']
 
 const COUNTRY_PRESETS: Record<string, Partial<CostProfile>> = {
-  DE: { vat_rate: 0.19, duty_rate: 0.047, duty_free_threshold: 150, customs_handling_fee: 6 },
-  AT: { vat_rate: 0.2, duty_rate: 0.047, duty_free_threshold: 150, customs_handling_fee: 5 },
-  CH: { vat_rate: 0.081, duty_rate: 0, duty_free_threshold: 0, customs_handling_fee: 16 },
-  NL: { vat_rate: 0.21, duty_rate: 0.047, duty_free_threshold: 150, customs_handling_fee: 13 },
-  FR: { vat_rate: 0.2, duty_rate: 0.047, duty_free_threshold: 150, customs_handling_fee: 8 },
-  GB: { vat_rate: 0.2, duty_rate: 0.047, duty_free_threshold: 135, customs_handling_fee: 12 },
-  US: { vat_rate: 0, duty_rate: 0, duty_free_threshold: 800, customs_handling_fee: 0 },
+  DE: { vat_rate: 0.19, duty_rate: 0.047, duty_free_threshold: 150, customs_handling_fee: 6, shipping_zone: 'zone3' },
+  AT: { vat_rate: 0.2, duty_rate: 0.047, duty_free_threshold: 150, customs_handling_fee: 5, shipping_zone: 'zone3' },
+  CH: { vat_rate: 0.081, duty_rate: 0, duty_free_threshold: 0, customs_handling_fee: 16, shipping_zone: 'zone3' },
+  NL: { vat_rate: 0.21, duty_rate: 0.047, duty_free_threshold: 150, customs_handling_fee: 13, shipping_zone: 'zone3' },
+  FR: { vat_rate: 0.2, duty_rate: 0.047, duty_free_threshold: 150, customs_handling_fee: 8, shipping_zone: 'zone3' },
+  GB: { vat_rate: 0.2, duty_rate: 0.047, duty_free_threshold: 135, customs_handling_fee: 12, shipping_zone: 'zone3' },
+  US: { vat_rate: 0, duty_rate: 0, duty_free_threshold: 800, customs_handling_fee: 0, shipping_zone: 'zone4' },
 }
 
 function AppearanceTab() {
@@ -126,23 +126,30 @@ function CostTab() {
     onError: (error) => toast.error('Could not save', (error as Error).message),
   })
 
+  const shipping = useQuery({
+    queryKey: ['shippingOptions'],
+    queryFn: api.auth.shippingOptions,
+    staleTime: Infinity,
+  })
+
+  // The worked example is priced by the estimator itself rather than
+  // approximated here, because a rate chart quoted in yen cannot be guessed
+  // at in the browser. Settle first so typing does not fire a request a key.
+  const [settled, setSettled] = useState<CostProfile | null>(null)
+  useEffect(() => {
+    const timer = setTimeout(() => setSettled(current), 350)
+    return () => clearTimeout(timer)
+  }, [current])
+  const preview = useQuery({
+    queryKey: ['costPreview', settled],
+    queryFn: () => api.auth.previewCostProfile(settled ?? {}),
+    enabled: settled !== null,
+    placeholderData: (previous?: CostProfilePreview) => previous,
+  })
+
   if (!current) return <Spinner className="h-5 w-5" />
   const set = (changes: Partial<CostProfile>) => setDraft({ ...current, ...changes })
 
-  // A worked example makes the abstract percentages concrete.
-  const sample = 10000
-  const rate = 0.0055
-  const goods = sample * rate * (1 + current.fx_markup)
-  const ship =
-    current.shipping_mode === 'none'
-      ? 0
-      : current.shipping_mode === 'flat'
-        ? current.shipping_flat
-        : (current.shipping_table.find((b) => b.max_grams >= current.default_weight_grams)?.cost ??
-          current.shipping_flat)
-  const duty = goods > current.duty_free_threshold ? (goods + ship) * current.duty_rate : 0
-  const vat = (goods + ship + duty) * current.vat_rate
-  const handling = duty + vat > 0 ? current.customs_handling_fee : 0
   const currency = user?.display_currency ?? 'EUR'
 
   return (
@@ -247,11 +254,54 @@ function CostTab() {
           value={current.shipping_mode}
           onChange={(shipping_mode) => set({ shipping_mode })}
           options={[
+            { value: 'amiami', label: 'AmiAmi rates' },
             { value: 'table', label: 'By weight' },
             { value: 'flat', label: 'Flat rate' },
             { value: 'none', label: 'Exclude' },
           ]}
         />
+
+        {current.shipping_mode === 'amiami' && (
+          <div className="space-y-4">
+            <p className="text-xs text-muted">
+              AmiAmi's own published rate charts, converted from yen at the live exchange rate.
+              The shop bills by zone rather than by country, and small packet stops at 2&nbsp;kg.
+            </p>
+            <div className="grid gap-4 sm:grid-cols-2">
+              <Field label="Shipping zone" hint="Set for you when you pick a country.">
+                <select
+                  value={current.shipping_zone}
+                  onChange={(e) => set({ shipping_zone: e.target.value as CostProfile['shipping_zone'] })}
+                  className="field"
+                >
+                  {(shipping.data?.zones ?? []).map((zone) => (
+                    <option key={zone.value} value={zone.value}>
+                      {zone.label}
+                    </option>
+                  ))}
+                </select>
+              </Field>
+              <Field
+                label="Service"
+                hint="Surface parcel is sea mail: cheap, but one to three months in transit."
+              >
+                <select
+                  value={current.shipping_service}
+                  onChange={(e) => set({ shipping_service: e.target.value as ShippingService })}
+                  className="field"
+                >
+                  <option value="auto_air">Cheapest by air</option>
+                  <option value="auto">Cheapest of any kind</option>
+                  {(shipping.data?.services ?? []).map((service) => (
+                    <option key={service.value} value={service.value}>
+                      {service.label}
+                    </option>
+                  ))}
+                </select>
+              </Field>
+            </div>
+          </div>
+        )}
 
         {current.shipping_mode === 'flat' && (
           <Field label={`Flat shipping (${currency})`}>
@@ -324,18 +374,33 @@ function CostTab() {
           </div>
         )}
 
-        <Field
-          label="Default weight when unknown"
-          hint="Used when neither the spec sheet nor the item type gives a clue."
-        >
-          <input
-            type="number"
-            min={1}
-            value={current.default_weight_grams}
-            onChange={(e) => set({ default_weight_grams: Number(e.target.value) })}
-            className="field max-w-[12rem] tabular-nums"
-          />
-        </Field>
+        <div className="grid gap-4 sm:grid-cols-2">
+          <Field
+            label="Default weight when unknown"
+            hint="Used when neither the spec sheet nor the item type gives a clue."
+          >
+            <input
+              type="number"
+              min={1}
+              value={current.default_weight_grams}
+              onChange={(e) => set({ default_weight_grams: Number(e.target.value) })}
+              className="field tabular-nums"
+            />
+          </Field>
+          <Field
+            label="Packaging weight"
+            hint="Box and padding, added on top of every shipment. The carrier weighs the parcel, not the figure."
+          >
+            <input
+              type="number"
+              min={0}
+              max={10000}
+              value={current.packaging_grams}
+              onChange={(e) => set({ packaging_grams: Number(e.target.value) })}
+              className="field tabular-nums"
+            />
+          </Field>
+        </div>
 
         <Toggle
           checked={current.consolidate_shipping}
@@ -347,28 +412,50 @@ function CostTab() {
 
       <Card className="p-4">
         <p className="text-xs font-semibold uppercase tracking-wide text-muted">
-          Worked example: a {money(sample, 'JPY')} figure at {grams(current.default_weight_grams)}
+          Worked example
+          {preview.data
+            ? `: a ${money(preview.data.sample_price, 'JPY')} 1/7 figure shipping at ${grams(
+                preview.data.weight_grams,
+              )}`
+            : ''}
         </p>
-        <div className="mt-2 space-y-1 text-sm">
-          {[
-            ['Goods, converted', goods],
-            ['Shipping', ship],
-            ['Customs duty', duty],
-            ['Import VAT', vat],
-            ['Handling fee', handling],
-          ].map(([label, value]) => (
-            <div key={label as string} className="flex justify-between">
-              <span className="text-muted">{label as string}</span>
-              <span className="tabular-nums">{money(value as number, currency)}</span>
+        {preview.data?.breakdown ? (
+          <>
+            <div className="mt-2 space-y-1 text-sm">
+              {[
+                ['Goods, converted', preview.data.breakdown.goods],
+                ['Shipping', preview.data.breakdown.shipping],
+                ['Customs duty', preview.data.breakdown.duty],
+                ['Import VAT', preview.data.breakdown.vat],
+                ['Handling fee', preview.data.breakdown.handling],
+              ].map(([label, value]) => (
+                <div key={label as string} className="flex justify-between">
+                  <span className="text-muted">{label as string}</span>
+                  <span className="tabular-nums">{money(value as number, currency)}</span>
+                </div>
+              ))}
+              <div className="flex justify-between border-t border-line pt-1.5 font-semibold">
+                <span>You pay</span>
+                <span className="tabular-nums">
+                  {money(preview.data.breakdown.total, currency)}
+                </span>
+              </div>
             </div>
-          ))}
-          <div className="flex justify-between border-t border-line pt-1.5 font-semibold">
-            <span>You pay</span>
-            <span className="tabular-nums">
-              {money(goods + ship + duty + vat + handling, currency)}
-            </span>
-          </div>
-        </div>
+            {preview.data.breakdown.notes.length > 0 && (
+              <ul className="mt-3 space-y-1 border-t border-line pt-2 text-xs text-faint">
+                {preview.data.breakdown.notes.map((note) => (
+                  <li key={note}>{note}</li>
+                ))}
+              </ul>
+            )}
+          </>
+        ) : (
+          <p className="mt-2 text-sm text-muted">
+            {preview.isFetching
+              ? 'Pricing your settings…'
+              : 'No exchange rate yet, so the example cannot be priced.'}
+          </p>
+        )}
       </Card>
 
       {draft && (

@@ -102,6 +102,10 @@ export interface Item {
   mfc_matched_by: string | null
   mfc_confidence: number | null
   mfc_restricted: boolean
+  dwell_days: number | null
+  dwell_basis: DwellBasis | null
+  dwell_samples: number
+  listing_count: number
   /** The same figure listed under the other condition, when known. */
   counterpart: {
     id: number
@@ -247,6 +251,30 @@ export interface CollectionEntry {
   item: Item
 }
 
+export type ShippingZone = 'zone1' | 'zone2' | 'zone3' | 'zone4' | 'zone5'
+
+export type ShippingService =
+  | 'auto_air'
+  | 'auto'
+  | 'small_packet'
+  | 'small_packet_registered'
+  | 'surface_parcel'
+  | 'air_parcel'
+  | 'ems'
+
+export interface ShippingOptions {
+  zones: { value: ShippingZone; label: string }[]
+  services: { value: Exclude<ShippingService, 'auto' | 'auto_air'>; label: string }[]
+}
+
+export interface CostProfilePreview {
+  sample_price: number
+  sample_currency: string
+  weight_grams: number
+  packaging_grams: number
+  breakdown: CostBreakdown | null
+}
+
 export interface CostProfile {
   country: string
   vat_rate: number
@@ -254,10 +282,13 @@ export interface CostProfile {
   duty_free_threshold: number
   vat_free_threshold: number
   customs_handling_fee: number
-  shipping_mode: 'table' | 'flat' | 'none'
+  shipping_mode: 'amiami' | 'table' | 'flat' | 'none'
+  shipping_zone: ShippingZone
+  shipping_service: ShippingService
   shipping_flat: number
   shipping_table: { max_grams: number; cost: number }[]
   default_weight_grams: number
+  packaging_grams: number
   category_weights: Record<string, number>
   consolidate_shipping: boolean
   fx_markup: number
@@ -322,6 +353,57 @@ export interface PricePoint {
   in_stock: boolean
   sale_status: string | null
   condition_grade: string | null
+}
+
+export type DwellBasis = 'observed' | 'intake' | 'intake_bootstrap' | 'product'
+
+export type ListingStatus = 'live' | 'gone'
+
+export interface ListingLifetime {
+  certain_days: number
+  /** Null when either end of the copy's spell is unknown. */
+  max_days: number | null
+  /** It was already on the shelf the first time we looked. */
+  open_start: boolean
+  /** It is still on the shelf now. */
+  open_end: boolean
+  observations: number
+}
+
+export interface ListingRow {
+  code: string
+  sequence: number | null
+  price: number | null
+  last_price: number | null
+  currency: string
+  condition: string | null
+  item_grade: string | null
+  box_grade: string | null
+  status: ListingStatus
+  outcome: 'sold' | 'delisted' | 'withdrawn' | 'unknown' | null
+  first_seen_at: string
+  last_seen_at: string
+  vanished_before: string | null
+  lifetime: ListingLifetime
+}
+
+export interface ShelfLife {
+  listings: ListingRow[]
+  live_count: number
+  observed_count: number
+  departed_count: number
+  anchored_count: number
+  median_days: number | null
+  by_grade: { grade: string; median_days: number; samples: number }[]
+  intake_per_month: number | null
+  intake_basis: 'measured' | 'bootstrap' | null
+  intake_total: number | null
+  intake_dwell_days: number | null
+  dwell_days: number | null
+  dwell_basis: DwellBasis | null
+  sold_out_days: number | null
+  cheapest_first: { wins: number; of: number } | null
+  tracked_since: string | null
 }
 
 export interface ItemHistory {

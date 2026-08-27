@@ -95,6 +95,11 @@ def _apply_filters(stmt: Select, db: Session, req) -> Select:
             Item.current_price <= Item.lowest_price * 1.001,
         )
 
+    if req.sells_within_days:
+        stmt = stmt.where(
+            Item.dwell_days.is_not(None), Item.dwell_days <= req.sells_within_days
+        )
+
     for field, value in (
         (Item.maker, req.maker),
         (Item.series, req.series),
@@ -150,6 +155,12 @@ def _apply_sort(stmt: Select, sort: str) -> Select:
             (Item.current_price / func.nullif(Item.lowest_price, 0)).asc().nulls_last(),
             Item.id.desc(),
         )
+    if sort == "sells_fastest":
+        # Shortest typical time on the shelf first. Products with no estimate
+        # yet sort last rather than pretending to be instant.
+        return stmt.order_by(Item.dwell_days.asc().nulls_last(), Item.id.desc())
+    if sort == "sells_slowest":
+        return stmt.order_by(Item.dwell_days.desc().nulls_last(), Item.id.desc())
     if sort == "release":
         return stmt.order_by(Item.release_date_parsed.desc().nulls_last(), Item.id.desc())
     # "newest" means newest to us, not the shop's release order.

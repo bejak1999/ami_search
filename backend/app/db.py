@@ -80,7 +80,42 @@ def init_db() -> None:
     indexed = create_missing_indexes()
     if indexed:
         log.info("Created %s index(es): %s", len(indexed), ", ".join(indexed))
+    adopted = adopt_amiami_rates()
+    if adopted:
+        log.info("Moved %s cost profile(s) onto AmiAmi's published rate charts", adopted)
     log.info("Database ready at %s", settings.resolved_database_url.split("://", 1)[0])
+
+
+def adopt_amiami_rates() -> int:
+    """Move untouched cost profiles onto AmiAmi's real published rates.
+
+    Before the shop's own rate charts were available, every profile was
+    seeded with a made-up weight table. Profiles still carrying that table
+    byte for byte were never configured by anyone, so replacing the guess
+    with the real thing is a fix rather than an override. A profile whose
+    table has been edited at all is left exactly as its owner set it.
+
+    Also fills in the shipping zone from the country, since a fresh column
+    otherwise defaults every existing user to Europe.
+    """
+    from . import models
+    from .services import landed_cost, shipping_rates
+
+    seeded = landed_cost.default_profile(0).shipping_table
+    moved = 0
+    with session_scope() as db:
+        try:
+            profiles = db.query(models.CostProfile).all()
+        except Exception:  # pragma: no cover - table may not exist yet
+            return 0
+        for profile in profiles:
+            if not profile.shipping_zone or profile.shipping_zone == "zone3":
+                profile.shipping_zone = shipping_rates.zone_for_country(profile.country)
+            if profile.shipping_mode == "table" and profile.shipping_table == seeded:
+                profile.shipping_mode = "amiami"
+                profile.shipping_service = profile.shipping_service or "auto_air"
+                moved += 1
+    return moved
 
 
 def _backup_sqlite() -> Path | None:

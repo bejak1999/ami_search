@@ -30,6 +30,7 @@ from ..services import (
     health,
     images,
     matcher,
+    shelfwatch,
 )
 
 log = logging.getLogger(__name__)
@@ -57,6 +58,9 @@ class PollingEngine:
         self.last_enrichment: dict | None = None
         self.last_health: dict | None = None
         self.last_image_prefetch: dict | None = None
+        self.shelf_checked_total = 0
+        self.shelf_vanished_total = 0
+        self.last_shelfwatch: dict | None = None
         #: Set on shutdown so long-running work can bail at a safe boundary.
         self.stopping = False
 
@@ -109,6 +113,19 @@ class PollingEngine:
                 max_instances=1,
                 coalesce=True,
                 next_run_time=datetime.now(timezone.utc) + timedelta(minutes=2),
+            )
+
+        # Follow individual pre-owned copies so a vanished listing becomes a
+        # recorded sale rather than a hole where a listing used to be.
+        if settings.shelf_tracking_enabled:
+            self.scheduler.add_job(
+                self.run_shelfwatch,
+                "interval",
+                minutes=max(1, settings.shelf_run_interval_minutes),
+                id="shelfwatch",
+                max_instances=1,
+                coalesce=True,
+                next_run_time=datetime.now(timezone.utc) + timedelta(minutes=4),
             )
 
         # MyFigureCollection is scraped slowly and steadily in the background,
@@ -278,6 +295,17 @@ class PollingEngine:
             self.last_crawl = outcome.as_dict()
         except Exception:  # noqa: BLE001
             log.exception("Catalogue crawl failed")
+
+    def run_shelfwatch(self) -> None:
+        try:
+            with session_scope() as db:
+                outcome = shelfwatch.run_once(db)
+            if outcome.checked:
+                self.shelf_checked_total += outcome.checked
+                self.shelf_vanished_total += outcome.vanished
+            self.last_shelfwatch = outcome.as_dict()
+        except Exception:  # noqa: BLE001
+            log.exception("Shelf-life sampling failed")
 
     def run_enrichment(self) -> None:
         try:

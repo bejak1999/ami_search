@@ -19,6 +19,7 @@ interface Filters {
   condition: 'any' | 'new' | 'preowned'
   availability: 'any' | 'buyable' | 'in_stock' | 'preorder' | 'delisted'
   sort: string
+  sellsWithin: string
   minPrice: string
   maxPrice: string
   atLowestEver: boolean
@@ -31,6 +32,7 @@ const EMPTY: Filters = {
   condition: 'any',
   availability: 'any',
   sort: 'newest',
+  sellsWithin: '',
   minPrice: '',
   maxPrice: '',
   atLowestEver: false,
@@ -45,6 +47,8 @@ const LOCAL_SORTS = [
   { value: 'price_desc', label: 'Dearest' },
   { value: 'discount', label: 'Biggest discount' },
   { value: 'lowest_ever', label: 'Near its lowest ever' },
+  { value: 'sells_fastest', label: 'Sells fastest' },
+  { value: 'sells_slowest', label: 'Sits longest' },
   { value: 'release', label: 'Release date' },
   { value: 'oldest', label: 'Oldest here' },
 ]
@@ -73,6 +77,7 @@ export function SearchPage() {
     condition: (params.get('condition') as Filters['condition']) || 'any',
     availability: (params.get('availability') as Filters['availability']) || 'any',
     sort: params.get('sort') || 'newest',
+    sellsWithin: params.get('sells_within') || '',
     minPrice: params.get('min') ?? '',
     maxPrice: params.get('max') ?? '',
     atLowestEver: params.get('lowest') === '1',
@@ -110,6 +115,7 @@ export function SearchPage() {
     if (f.condition !== 'any') search.set('condition', f.condition)
     if (f.availability !== 'any') search.set('availability', f.availability)
     if (f.sort !== 'newest') search.set('sort', f.sort)
+    if (f.sellsWithin) search.set('sells_within', f.sellsWithin)
     if (f.minPrice) search.set('min', f.minPrice)
     if (f.maxPrice) search.set('max', f.maxPrice)
     if (f.atLowestEver) search.set('lowest', '1')
@@ -158,6 +164,7 @@ export function SearchPage() {
             min_price: applied.minPrice ? Number(applied.minPrice) : undefined,
             max_price: applied.maxPrice ? Number(applied.maxPrice) : undefined,
             at_lowest_ever: applied.atLowestEver,
+            sells_within_days: applied.sellsWithin ? Number(applied.sellsWithin) : undefined,
           })
         : api.search.run({
             q: applied.q,
@@ -219,6 +226,7 @@ export function SearchPage() {
     (applied.minPrice ? 1 : 0) +
     (applied.maxPrice ? 1 : 0) +
     (applied.atLowestEver ? 1 : 0) +
+    (applied.sellsWithin ? 1 : 0) +
     (applied.exclude ? 1 : 0) +
     (applied.onSale ? 1 : 0) +
     tags.include.length +
@@ -389,12 +397,30 @@ export function SearchPage() {
                 </div>
 
                 {source === 'local' ? (
-                  <Toggle
-                    checked={draft.atLowestEver}
-                    onChange={(atLowestEver) => setDraft({ ...draft, atLowestEver })}
-                    label="Only items at their lowest price ever"
-                    hint="Measured against every price this instance has recorded, including listings the shop has since deleted."
-                  />
+                  <>
+                    <Toggle
+                      checked={draft.atLowestEver}
+                      onChange={(atLowestEver) => setDraft({ ...draft, atLowestEver })}
+                      label="Only items at their lowest price ever"
+                      hint="Measured against every price this instance has recorded, including listings the shop has since deleted."
+                    />
+                    <Field
+                      label="Sells within"
+                      hint="Only figures whose copies typically go this fast. Leave empty for all."
+                    >
+                      <select
+                        value={draft.sellsWithin}
+                        onChange={(e) => setDraft({ ...draft, sellsWithin: e.target.value })}
+                        className="field"
+                      >
+                        <option value="">Any shelf life</option>
+                        <option value="2">2 days</option>
+                        <option value="7">A week</option>
+                        <option value="14">A fortnight</option>
+                        <option value="30">A month</option>
+                      </select>
+                    </Field>
+                  </>
                 ) : (
                   <>
                     <Field

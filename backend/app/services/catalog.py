@@ -40,6 +40,7 @@ def upsert_item(db: Session, normalized: NormalizedItem, commit: bool = True) ->
 
     previous_price = item.current_price
     previous_stock = item.in_stock
+    previous_max = item.price_max
 
     item.name = normalized.name or item.name
     if normalized.name_jp:
@@ -90,8 +91,17 @@ def upsert_item(db: Session, normalized: NormalizedItem, commit: bool = True) ->
     item.release_date = normalized.release_date
     item.release_date_parsed = normalized.release_date_parsed
     item.last_seen_at = utcnow()
+    if normalized.in_stock:
+        # The crawler re-reads the newest pages every half hour, so for recent
+        # listings this is a far tighter "still on sale" signal than the
+        # detail fetches - and it costs nothing, the pages are read anyway.
+        item.last_listed_at = item.last_seen_at
 
     if normalized.detail_loaded:
+        # Remember the fetch before this one before overwriting it: without it
+        # a copy first seen today has no upper bound on how long it had
+        # already been sitting there.
+        item.prev_detail_fetch_at = item.last_detail_fetch_at
         item.detail_loaded = True
         item.last_detail_fetch_at = utcnow()
         item.raw = normalized.raw
@@ -110,6 +120,30 @@ def upsert_item(db: Session, normalized: NormalizedItem, commit: bool = True) ->
     if changed:
         _record_point(db, item, normalized)
         _refresh_aggregates(db, item)
+
+    # A list sweep cannot see individual copies, but it can see the price
+    # range move, and on a pre-owned product that means the shelf changed.
+    # The newest pages are re-read every half hour, so this catches a lot of
+    # movement for free - just not all of it: with four copies at one price
+    # and one cheaper, selling one of the four leaves the range untouched.
+    if not normalized.detail_loaded and item.condition == Condition.preowned:
+        range_moved = price_moved or (
+            normalized.price_max is not None and normalized.price_max != previous_max
+        )
+        if range_moved and not created:
+            from . import shelfwatch
+
+            shelfwatch.promote(db, item)
+
+    # Only a detail response knows the individual graded copies, so only a
+    # detail response can tell which of them have gone.
+    if normalized.detail_loaded and normalized.variants:
+        from . import shelflife
+
+        db.flush()  # the item needs an id before copies can point at it
+        shelflife.reconcile(
+            db, item, normalized.variants, observed_at=item.last_detail_fetch_at
+        )
 
     if commit:
         db.commit()
@@ -163,9 +197,15 @@ def mark_unavailable(db: Session, item: Item, commit: bool = True) -> bool:
     """
     if not item.in_stock and item.order_closed:
         return False
+    from . import shelflife
+
     item.in_stock = False
     item.order_closed = True
     item.last_seen_at = utcnow()
+    shelflife.close_all(db, item, observed_at=item.last_seen_at)
+    # Phase zero: how long the whole product stood before it sold out. Coarse
+    # next to following copies, but it needs nothing we were not already
+    # recording, so it can speak for products nobody has ever opened.
     db.add(
         PricePoint(
             item=item,
@@ -176,6 +216,11 @@ def mark_unavailable(db: Session, item: Item, commit: bool = True) -> bool:
             condition_grade=item.condition_grade,
         )
     )
+    db.flush()
+    days = shelflife.product_sold_out_days(db, item)
+    if days is not None:
+        item.sold_out_days = days
+        shelflife.refresh_estimates(db, item)
     if commit:
         db.commit()
     return True

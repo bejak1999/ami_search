@@ -164,6 +164,7 @@ def test_shipping_table() -> None:
     from app.services import landed_cost
 
     profile = landed_cost.default_profile(user_id=1)
+    profile.shipping_mode = "table"
     check("400 g lands in the first bracket", landed_cost.shipping_cost(400, profile)[0] == 14.0)
     check("900 g lands in the second", landed_cost.shipping_cost(900, profile)[0] == 20.0)
     check("1500 g lands in the third", landed_cost.shipping_cost(1500, profile)[0] == 30.0)
@@ -175,6 +176,469 @@ def test_shipping_table() -> None:
 
     profile.shipping_mode = "none"
     check("excluded shipping is free", landed_cost.shipping_cost(5000, profile)[0] == 0.0)
+
+
+def test_amiami_shipping_rates() -> None:
+    print("\n== AmiAmi's published rate charts ==")
+    from app.services import landed_cost, shipping_rates
+
+    # Spot checks against the corners of the shop's own tables. If AmiAmi
+    # reprices, these are the assertions that should fail first.
+    check("zone 3, 300 g unregistered", shipping_rates.lookup("zone3", "small_packet", 300) == 870)
+    check("zone 3, 300 g registered", shipping_rates.lookup("zone3", "small_packet_registered", 300) == 1330)
+    check("zone 4, 2 kg unregistered", shipping_rates.lookup("zone4", "small_packet", 2000) == 4820)
+    check("zone 1, 500 g EMS", shipping_rates.lookup("zone1", "ems", 500) == 1450)
+    check("zone 5, 30 kg EMS", shipping_rates.lookup("zone5", "ems", 30000) == 77700)
+    check("zone 2, 30 kg surface", shipping_rates.lookup("zone2", "surface_parcel", 30000) == 14600)
+
+    check("every zone is charted", set(shipping_rates.RATES) == set(shipping_rates.ZONES))
+    check(
+        "every zone quotes every service",
+        all(set(services) == set(shipping_rates.SERVICES) for services in shipping_rates.RATES.values()),
+    )
+    check(
+        "brackets ascend in weight and price",
+        all(
+            [w for w, _ in steps] == sorted(w for w, _ in steps)
+            and [c for _, c in steps] == sorted(c for _, c in steps)
+            for zone in shipping_rates.RATES.values()
+            for steps in zone.values()
+        ),
+    )
+
+    # A bracket is an upper bound, so anything under it pays the same.
+    check("199 g pays the 300 g rate", shipping_rates.lookup("zone3", "small_packet", 199) == 870)
+    check("301 g moves up a bracket", shipping_rates.lookup("zone3", "small_packet", 301) == 1050)
+
+    check("small packet stops at 2 kg", shipping_rates.lookup("zone3", "small_packet", 2001) is None)
+    check("nothing carries 31 kg", shipping_rates.cheapest("zone3", 31000) is None)
+    # Air parcel's chart simply starts at 1 kg, so a lighter parcel pays the
+    # smallest rate listed rather than nothing at all.
+    check(
+        "a light air parcel pays the minimum",
+        shipping_rates.lookup("zone3", "air_parcel", 300) == shipping_rates.lookup("zone3", "air_parcel", 1000),
+    )
+
+    check("Germany is the third zone", shipping_rates.zone_for_country("DE") == "zone3")
+    check("the US has its own", shipping_rates.zone_for_country("us") == "zone4")
+    check("Taiwan is the first", shipping_rates.zone_for_country("TW") == "zone1")
+    check("Brazil is the fifth", shipping_rates.zone_for_country("BR") == "zone5")
+    check("Canada is not the US", shipping_rates.zone_for_country("CA") == "zone3")
+    check("an unknown country falls back", shipping_rates.zone_for_country("??") == "zone3")
+    check("so does a missing one", shipping_rates.zone_for_country(None) == "zone3")
+
+    cheap = shipping_rates.cheapest("zone3", 1200)
+    check("auto picks the cheapest carrier", cheap == ("small_packet", 2490), cheap)
+    over = shipping_rates.cheapest("zone3", 2100)
+    check("and falls through once small packet is out", over[0] == "surface_parcel", over)
+
+    # Sea mail undercuts everything at weight, but it takes months, so the
+    # air-only mode has to refuse it and quote something that flies.
+    air = shipping_rates.cheapest("zone3", 2100, air_only=True)
+    check("air-only skips sea mail", air[0] not in shipping_rates.SURFACE_SERVICES, air)
+    check("and costs more for it", air[1] > over[1], (air, over))
+    check(
+        "air-only still gives up past 30 kg",
+        shipping_rates.cheapest("zone3", 31000, air_only=True) is None,
+    )
+
+    profile = landed_cost.default_profile(user_id=1)
+    check("new profiles use the real charts", profile.shipping_mode == "amiami")
+    check("and fly by default", profile.shipping_service == "auto_air")
+
+    # Forcing a service that cannot take the weight must not silently drop
+    # the buyer onto a boat.
+    profile.shipping_service = "small_packet_registered"
+    profile.packaging_grams = 900
+    quote = landed_cost._amiami_shipping(2100, profile, None, "JPY")
+    check("no FX rate means no chart quote", quote is None)
+
+    # Without a database there is no yen rate, so the estimator has to fall
+    # back rather than quote a number it cannot convert.
+    cost, note = landed_cost.shipping_cost(1600, profile)
+    check("no FX rate falls back to the table", cost == 30.0, (cost, note))
+    check("and the note says the number is estimated", note.startswith("Estimated:"), note)
+
+
+def test_packaging_weight() -> None:
+    print("\n== Packaging rides along on every parcel ==")
+    from app.models import Item
+    from app.services import landed_cost
+
+    profile = landed_cost.default_profile(user_id=1)
+    figure = Item(name="Honolulu 1/7 Complete Figure", scale="1/7", category="Figure")
+
+    check("the default allowance is 400 g", profile.packaging_grams == 400)
+    check("goods weigh what they weigh", landed_cost.estimate_weight(figure, profile) == 1200)
+    check("the parcel weighs more", landed_cost.shipment_weight(figure, profile) == 1600)
+    check(
+        "packaging is counted once, not per unit",
+        landed_cost.shipment_weight(figure, profile, quantity=3) == 1200 * 3 + 400,
+    )
+
+    profile.packaging_grams = 0
+    check("it can be switched off", landed_cost.shipment_weight(figure, profile) == 1200)
+    profile.packaging_grams = None
+    check("a null column still packs the box", landed_cost.shipment_weight(figure, profile) == 1600)
+
+    # The point of the allowance: it can push a parcel out of a bracket.
+    profile.packaging_grams = 400
+    light = Item(name="Nendoroid Something", category="Figure")
+    from app.services import shipping_rates
+
+    bare = shipping_rates.lookup("zone3", "small_packet", landed_cost.estimate_weight(light, profile))
+    packed = shipping_rates.lookup("zone3", "small_packet", landed_cost.shipment_weight(light, profile))
+    check("a 400 g nendoroid ships as an 800 g parcel", packed > bare, (bare, packed))
+
+
+def test_shelf_sequences() -> None:
+    print("\n== Copy codes carry an intake counter ==")
+    from app.services import shelflife
+
+    check("a copy code yields its number", shelflife.sequence_of("FIGURE-140238-R459") == 459)
+    check("lower case too", shelflife.sequence_of("figure-140238-r7") == 7)
+    check("the bare product code is not a copy", shelflife.sequence_of("FIGURE-140238-R") is None)
+    check("nor is a first-hand code", shelflife.sequence_of("FIG-MOE-6590") is None)
+    check("nor an empty one", shelflife.sequence_of("") is None)
+    check("nor a missing one", shelflife.sequence_of(None) is None)
+    check("whitespace is tolerated", shelflife.sequence_of("  FIGURE-1-R12  ") == 12)
+
+
+def test_kaplan_meier() -> None:
+    print("\n== The median survives copies that have not sold yet ==")
+    from app.services.shelflife import kaplan_meier_median as km
+
+    check("no data, no median", km([]) is None)
+    check("four completed lifetimes", km([(2, True), (4, True), (6, True), (8, True)]) == 4)
+    check(
+        "still-listed copies do not drag it down",
+        km([(2, True), (4, True), (6, False), (8, False)]) == 4,
+    )
+    check(
+        "mostly unfinished means no median yet",
+        km([(2, True), (4, False), (6, False), (8, False)]) is None,
+    )
+    check("nothing finished at all", km([(3, False), (9, False)]) is None)
+
+    # The trap the estimator exists to avoid: two fast sales and eight slow
+    # copies still sitting there. Averaging only what sold says 3 days.
+    biased = [(3.0, True), (3.0, True)] + [(60.0, False)] * 8
+    naive = sum(d for d, done in biased if done) / 2
+    check("naive average of completed sales is 3 days", abs(naive - 3.0) < 0.01)
+    check("the estimator refuses that answer", km(biased) is None, km(biased))
+
+
+def _purge(db, *codes: str) -> None:
+    """Remove what a shelf test created.
+
+    Every suite here shares one database, so rows left lying about quietly
+    change the totals another suite asserts on. Deleting by item cascades to
+    the copies and price points hanging off it.
+    """
+    from app.models import Item
+
+    for code in codes:
+        for row in db.query(Item).filter(Item.code == code).all():
+            db.delete(row)
+    db.commit()
+
+
+def _shelf_item(db, code: str = "FIGURE-140238-R"):
+    from app.models import Condition, Item
+
+    item = Item(
+        provider="amiami",
+        code=code,
+        name="Test Figure",
+        currency="JPY",
+        condition=Condition.preowned,
+    )
+    db.add(item)
+    db.commit()
+    return item
+
+
+def _copy(seq: int, price: float, grade: str = "B") -> dict:
+    return {
+        "code": "FIGURE-140238-R" + str(seq),
+        "price": price,
+        "condition": "Condition Item:" + grade + " Box:B",
+        "item_grade": grade,
+        "box_grade": "B",
+    }
+
+
+def _observe(db, item, day: int, copies: list, base: datetime) -> None:
+    """One detail fetch, at a controlled point in time."""
+    from app.services import shelflife
+
+    when = base + timedelta(days=day)
+    item.prev_detail_fetch_at = item.last_detail_fetch_at
+    item.last_detail_fetch_at = when
+    shelflife.reconcile(db, item, copies, observed_at=when, commit=True)
+
+
+def test_shelf_reconciliation() -> None:
+    print("\n== Copies appearing and vanishing ==")
+    from app.db import SessionLocal, init_db
+    from app.models import ListingOutcome, ListingStatus
+    from app.services import shelflife
+
+    init_db()
+    db = SessionLocal()
+    base = datetime(2026, 6, 1, tzinfo=timezone.utc)
+    item = _shelf_item(db, "FIGURE-140238-R")
+
+    _observe(db, item, 0, [_copy(100, 12240), _copy(101, 13770, "A")], base)
+    check("first look records both copies", len(item.listings) == 2)
+    first = {row.code: row for row in item.listings}
+    check(
+        "neither has a known start",
+        all(row.appeared_after is None for row in item.listings),
+    )
+
+    _observe(db, item, 3, [_copy(100, 12240), _copy(101, 13770, "A"), _copy(102, 14500)], base)
+    third = next(row for row in item.listings if row.sequence == 102)
+    check("a new copy is picked up", third is not None)
+    check(
+        "and its start is bracketed by the previous look",
+        third.appeared_after == base,
+        third.appeared_after,
+    )
+
+    _observe(db, item, 5, [_copy(100, 12240), _copy(102, 14500)], base)
+    gone = first["FIGURE-140238-R101"]
+    check("the missing copy is closed out", gone.status == ListingStatus.gone)
+    check("and read as a sale", gone.outcome == ListingOutcome.sold)
+    life = shelflife.lifetime_of(gone)
+    check("we witnessed three days of it", abs(life.certain_days - 3.0) < 0.01, life)
+    check("its start is unknown, so no ceiling", life.max_days is None)
+    check("and the UI is told to say 'at least'", life.open_start)
+
+    bounded = shelflife.lifetime_of(third)
+    check("a bracketed copy is still listed", bounded.open_end)
+
+    _observe(db, item, 9, [_copy(100, 11900), _copy(102, 14500)], base)
+    hundred = first["FIGURE-140238-R100"]
+    check("a markdown is recorded", hundred.last_price == 11900)
+    check("the original asking price survives", hundred.price == 12240)
+    check(
+        "and the cut is in the price history",
+        any(p.price == 11900 for p in hundred.prices),
+    )
+
+    _observe(db, item, 12, [_copy(100, 11900), _copy(102, 14500), _copy(101, 13770, "A")], base)
+    check("a returned copy reuses its row", len(item.listings) == 3)
+    check("and is live again", gone.status == ListingStatus.live)
+    check("its clock restarts rather than spanning the gap", gone.vanished_before is None)
+    check(
+        "the fresh spell starts where it reappeared",
+        abs((shelflife.lifetime_of(gone, base + timedelta(days=12)).certain_days)) < 0.01,
+    )
+
+    _purge(db, "FIGURE-140238-R")
+    db.close()
+
+
+def test_shelf_wholesale_disappearance() -> None:
+    print("\n== A shelf that empties all at once ==")
+    from app.db import SessionLocal, init_db
+    from app.models import ListingOutcome, ListingStatus
+    from app.services import shelflife
+
+    init_db()
+    db = SessionLocal()
+    base = datetime(2026, 7, 1, tzinfo=timezone.utc)
+    item = _shelf_item(db, "FIGURE-999001-R")
+
+    three = [_copy(10, 5000), _copy(11, 5200), _copy(12, 5400)]
+    for row in three:
+        row["code"] = row["code"].replace("140238", "999001")
+    _observe(db, item, 0, three, base)
+    _observe(db, item, 1, three[:1], base)
+    survivors = [r for r in item.listings if r.status == ListingStatus.live]
+    check("two copies going is read as two sales", len(survivors) == 1)
+    check(
+        "each one individually",
+        all(
+            r.outcome == ListingOutcome.sold
+            for r in item.listings
+            if r.status == ListingStatus.gone
+        ),
+    )
+
+    # Now empty the whole shelf in one step, which is a weaker claim.
+    item2 = _shelf_item(db, "FIGURE-999002-R")
+    four = []
+    for seq, price in ((20, 5000), (21, 5200), (22, 5400), (23, 5600)):
+        row = _copy(seq, price)
+        row["code"] = row["code"].replace("140238", "999002")
+        four.append(row)
+    _observe(db, item2, 0, four, base)
+    _observe(db, item2, 1, [], base)
+    check(
+        "an empty response is not treated as four sales",
+        all(r.status == ListingStatus.live for r in item2.listings),
+        [r.status for r in item2.listings],
+    )
+
+    _observe(db, item2, 2, four[:1], base)
+    check(
+        "three of four going is read as three sales",
+        all(
+            r.outcome == ListingOutcome.sold
+            for r in item2.listings
+            if r.status == ListingStatus.gone
+        ),
+    )
+
+    # A shelf that turns over completely between two looks is a different
+    # claim: four simultaneous sales and a stock rotation look identical, so
+    # the weaker reading wins.
+    item3 = _shelf_item(db, "FIGURE-999003-R")
+    old_stock = []
+    for seq, price in ((20, 5000), (21, 5200), (22, 5400), (23, 5600)):
+        row = _copy(seq, price)
+        row["code"] = row["code"].replace("140238", "999003")
+        old_stock.append(row)
+    replacement = _copy(30, 5800)
+    replacement["code"] = replacement["code"].replace("140238", "999003")
+    _observe(db, item3, 0, old_stock, base)
+    _observe(db, item3, 1, [replacement], base)
+    withdrawn = [r for r in item3.listings if r.status == ListingStatus.gone]
+    check("a whole shelf replaced at once is flagged", len(withdrawn) == 4)
+    check(
+        "as possibly withdrawn rather than sold",
+        all(r.outcome == ListingOutcome.withdrawn for r in withdrawn),
+        [r.outcome for r in withdrawn],
+    )
+    check(
+        "and a withdrawal is not evidence of a sale",
+        item3.dwell_samples == 0,
+        item3.dwell_samples,
+    )
+
+    _purge(db, "FIGURE-999001-R", "FIGURE-999002-R", "FIGURE-999003-R")
+    db.close()
+
+
+def test_shelf_intake_estimate() -> None:
+    print("\n== Little's Law from the intake counter ==")
+    from app.db import SessionLocal, init_db
+    from app.services import shelflife
+
+    init_db()
+    db = SessionLocal()
+    base = datetime(2026, 5, 1, tzinfo=timezone.utc)
+    item = _shelf_item(db, "FIGURE-777001-R")
+
+    def copies(seqs):
+        out = []
+        for seq in seqs:
+            row = _copy(seq, 9000)
+            row["code"] = "FIGURE-777001-R" + str(seq)
+            out.append(row)
+        return out
+
+    _observe(db, item, 0, copies([200, 201, 202]), base)
+    rate, basis = shelflife.intake_rate(item)
+    check("one look cannot measure a rate", basis != "measured", basis)
+
+    _observe(db, item, 20, copies([210, 211, 212]), base)
+    rate, basis = shelflife.intake_rate(item)
+    check("two looks twenty days apart can", basis == "measured", basis)
+    check("ten copies over twenty days is half a day each", abs(rate - 0.5) < 0.01, rate)
+
+    days, _ = shelflife.dwell_from_intake(item)
+    check("three on the shelf at that rate is six days", abs(days - 6.0) < 0.5, days)
+    check("which becomes the cached figure", item.dwell_basis == "intake")
+
+    # The highest live number falls when the newest copy sells. The counter
+    # itself has not gone backwards, and the rate must not either.
+    _observe(db, item, 25, copies([210]), base)
+    check("a sold top copy does not rewind the counter", item.intake_last_seq == 212)
+    rate_after, _ = shelflife.intake_rate(item)
+    check("so the rate stays positive", rate_after > 0, rate_after)
+
+    _purge(db, "FIGURE-777001-R")
+    db.close()
+
+
+def test_shelf_tiers() -> None:
+    print("\n== Where the request budget goes ==")
+    from app.db import SessionLocal, init_db
+    from app.models import Condition, Item, User, UserRole, Watch, WatchKind
+    from app.services import shelfwatch
+
+    init_db()
+    db = SessionLocal()
+    user = User(username="tiers", email="tiers@example.com", password_hash="x", role=UserRole.user)
+    db.add(user)
+    db.commit()
+
+    plain = Item(provider="amiami", code="FIGURE-800001-R", name="Cold", condition=Condition.preowned)
+    watched = Item(provider="amiami", code="FIGURE-800002-R", name="Hot", condition=Condition.preowned)
+    busy = Item(provider="amiami", code="FIGURE-800003-R", name="Warm", condition=Condition.preowned)
+    busy.listing_count = 4
+    db.add_all([plain, watched, busy])
+    db.commit()
+    db.add(
+        Watch(
+            user_id=user.id,
+            kind=WatchKind.item,
+            label="Hot one",
+            provider="amiami",
+            item_code="FIGURE-800002-R",
+            enabled=True,
+        )
+    )
+    db.commit()
+
+    check("an untouched product is cold", shelfwatch.tier_for(db, plain) == shelfwatch.COLD)
+    check("one someone watches is hot", shelfwatch.tier_for(db, watched) == shelfwatch.HOT)
+
+    # A watch aimed at one copy is really aimed at that product's shelf, so
+    # the product still has to come out hot.
+    db.add(
+        Watch(
+            user_id=user.id,
+            kind=WatchKind.item,
+            label="One copy",
+            provider="amiami",
+            item_code="FIGURE-800001-R044",
+            enabled=True,
+        )
+    )
+    db.commit()
+    check(
+        "a watch on a single copy still heats its product",
+        shelfwatch.tier_for(db, plain) == shelfwatch.HOT,
+    )
+    check("one with a moving shelf is warm", shelfwatch.tier_for(db, busy) == shelfwatch.WARM)
+
+    # Other suites share this database, so assert on these three rather than
+    # on a total that depends on what ran before.
+    due = {i.code for i in shelfwatch.due_items(db, "amiami", 200)}
+    check(
+        "everything unseen is due immediately",
+        {"FIGURE-800001-R", "FIGURE-800002-R", "FIGURE-800003-R"} <= due,
+        due,
+    )
+    shelfwatch.promote(db, plain, commit=True)
+    check("promotion puts a product at the front", plain.shelf_due_at is not None)
+
+    # A new-condition listing is one item at one price: nothing to follow.
+    fresh = Item(provider="amiami", code="FIG-NEW-1", name="New", condition=Condition.new)
+    db.add(fresh)
+    db.commit()
+    codes = {i.code for i in shelfwatch.due_items(db, "amiami", 200)}
+    check("first-hand listings are left alone", "FIG-NEW-1" not in codes, codes)
+
+    db.query(Watch).filter(Watch.user_id == user.id).delete()
+    db.delete(user)
+    db.commit()
+    _purge(db, "FIGURE-800001-R", "FIGURE-800002-R", "FIGURE-800003-R", "FIG-NEW-1")
+    db.close()
 
 
 def _valuation(compare: float | None):
@@ -1300,6 +1764,14 @@ def main() -> int:
     test_landed_cost()
     test_weight_estimation()
     test_shipping_table()
+    test_amiami_shipping_rates()
+    test_packaging_weight()
+    test_shelf_sequences()
+    test_kaplan_meier()
+    test_shelf_reconciliation()
+    test_shelf_wholesale_disappearance()
+    test_shelf_intake_estimate()
+    test_shelf_tiers()
     test_trigger_rules()
     test_trigger_switches()
     test_grade_parsing()

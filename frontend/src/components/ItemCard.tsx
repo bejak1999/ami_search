@@ -6,6 +6,33 @@ import { useTheme } from '@/lib/theme'
 import { Badge, Tooltip } from './ui'
 import { Icon } from './Icon'
 
+/**
+ * How quickly copies of this figure disappear, when we know.
+ *
+ * Only shown once it is short enough to matter. A badge saying "sells in 40
+ * days" is noise on a grid; one saying "gone in 3" changes what you do next.
+ */
+function ShelfBadge({ item }: { item: Item }) {
+  const days = item.dwell_days
+  if (days === null || days > 14 || item.order_closed) return null
+
+  const label = days < 1 ? 'Gone in hours' : days < 2 ? 'Gone in a day' : `Gone in ~${Math.round(days)}d`
+  const firm = item.dwell_basis === 'observed'
+  const explain = firm
+    ? `Measured from ${item.dwell_samples} copy(ies) we watched sell here.`
+    : 'Estimated from how fast the shop restocks this figure.'
+
+  return (
+    <Tooltip content={<span className="text-xs">{explain}</span>}>
+      <Badge tone={days <= 3 ? 'danger' : 'warning'}>
+        <Icon name="clock" className="h-3 w-3" />
+        {label}
+      </Badge>
+    </Tooltip>
+  )
+}
+
+
 function StockBadge({ item }: { item: Item }) {
   if (item.order_closed) return <Badge tone="danger">Sold out</Badge>
   if (item.in_stock) return <Badge tone="positive">In stock</Badge>
@@ -97,6 +124,7 @@ export function ItemCard({ item, onOpen, onWatch, onWishlist, compact }: ItemCar
           {discount !== null && discount >= 10 && (
             <Badge tone="positive">-{Math.round(discount)}%</Badge>
           )}
+          <ShelfBadge item={item} />
         </div>
 
         <div className="absolute right-2 top-2 flex flex-col items-end gap-1">

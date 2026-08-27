@@ -91,9 +91,12 @@ class CostProfileOut(ORMModel):
     vat_free_threshold: float
     customs_handling_fee: float
     shipping_mode: str
+    shipping_zone: str
+    shipping_service: str
     shipping_flat: float
     shipping_table: list[ShippingBracket] = []
     default_weight_grams: int
+    packaging_grams: int
     category_weights: dict = {}
     consolidate_shipping: bool
     fx_markup: float
@@ -106,13 +109,39 @@ class CostProfileUpdate(BaseModel):
     duty_free_threshold: float | None = Field(default=None, ge=0)
     vat_free_threshold: float | None = Field(default=None, ge=0)
     customs_handling_fee: float | None = Field(default=None, ge=0)
-    shipping_mode: Literal["table", "flat", "none"] | None = None
+    shipping_mode: Literal["amiami", "table", "flat", "none"] | None = None
+    shipping_zone: Literal["zone1", "zone2", "zone3", "zone4", "zone5"] | None = None
+    shipping_service: (
+        Literal[
+            "auto_air",
+            "auto",
+            "small_packet",
+            "small_packet_registered",
+            "surface_parcel",
+            "air_parcel",
+            "ems",
+        ]
+        | None
+    ) = None
     shipping_flat: float | None = Field(default=None, ge=0)
     shipping_table: list[ShippingBracket] | None = None
     default_weight_grams: int | None = Field(default=None, gt=0)
+    # 10 kg of bubble wrap would be absurd, but the cap keeps a typo from
+    # silently pushing every quote off the end of the rate charts.
+    packaging_grams: int | None = Field(default=None, ge=0, le=10000)
     category_weights: dict[str, int] | None = None
     consolidate_shipping: bool | None = None
     fx_markup: float | None = Field(default=None, ge=0, le=0.2)
+
+
+class CostProfilePreview(BaseModel):
+    """A worked example priced by the same code that prices real items."""
+
+    sample_price: float
+    sample_currency: str
+    weight_grams: int
+    packaging_grams: int
+    breakdown: dict | None
 
 
 class CostBreakdownOut(BaseModel):
@@ -202,6 +231,12 @@ class ItemOut(ItemBase):
     #: product is often sold pre-owned while the new listing is still open, so
     #: the two price histories are worth comparing side by side.
     counterpart: dict | None = None
+    #: Typical days a copy of this product stays listed before it sells, with
+    #: the method that produced it so the UI can say how much to trust it.
+    dwell_days: float | None = None
+    dwell_basis: str | None = None
+    dwell_samples: int = 0
+    listing_count: int = 0
 
 
 class PricePointOut(ORMModel):
@@ -217,6 +252,29 @@ class ItemHistoryOut(BaseModel):
     item: ItemOut
     points: list[PricePointOut]
     stats: dict[str, Any]
+
+
+class ShelfLifeOut(BaseModel):
+    """Per-copy history for one product, bounds and all."""
+
+    listings: list[dict]
+    live_count: int
+    observed_count: int
+    #: Copies we watched leave the shelf.
+    departed_count: int
+    #: Of those, how many have a known start and so can anchor the median.
+    anchored_count: int
+    median_days: float | None = None
+    by_grade: list[dict] = []
+    intake_per_month: float | None = None
+    intake_basis: str | None = None
+    intake_total: int | None = None
+    intake_dwell_days: float | None = None
+    dwell_days: float | None = None
+    dwell_basis: str | None = None
+    sold_out_days: float | None = None
+    cheapest_first: dict | None = None
+    tracked_since: datetime | None = None
 
 
 class SearchRequest(BaseModel):
@@ -277,8 +335,20 @@ class LocalSearchRequest(BaseModel):
     series: str | None = None
     character: str | None = None
 
+    #: Only products whose copies typically sell within this many days. The
+    #: point of the filter is urgency: show me the things I cannot sit on.
+    sells_within_days: float | None = Field(default=None, gt=0, le=3650)
+
     sort: Literal[
-        "newest", "oldest", "price_asc", "price_desc", "discount", "lowest_ever", "release"
+        "newest",
+        "oldest",
+        "price_asc",
+        "price_desc",
+        "discount",
+        "lowest_ever",
+        "release",
+        "sells_fastest",
+        "sells_slowest",
     ] = "newest"
 
 

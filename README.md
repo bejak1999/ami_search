@@ -37,10 +37,19 @@ It also answers the question the shop price does not: **what will this actually 
 
 ### 💶 The price you really pay
 - Live **JPY → EUR** conversion from two keyless sources, with the last good rate cached
-- **Shipping estimated by weight**, guessed from the product's spec sheet or its type
+- **Shipping from AmiAmi's own published rate charts** — all five zones, small packet through EMS, converted from yen at the live rate
+- **Weight estimated** from the product's spec sheet or its type, plus a packaging allowance you can set
 - **Customs duty and import VAT** modelled properly, including the EU duty-free threshold
 - Every landed figure comes with a **full breakdown** on hover — nothing is a magic number
 - Per watch: compare against the **shop price** or the **delivered total**
+
+### ⏳ How long a copy actually lasts
+- AmiAmi deletes a pre-owned copy the moment it sells, so **every copy gets its own row** here and a vanished listing becomes a recorded sale
+- A **timeline per product**: which copy, at what price, in what condition, for how many days
+- Bounds, not fiction — a copy seen between two checks is reported as a **range**, and one that was already there when we arrived says "at least"
+- **Kaplan-Meier** for the median, so copies still sitting on the shelf count instead of quietly flattering the number
+- A second estimate from the shop's own **intake counter**, which covers the whole catalogue from two looks a fortnight apart
+- Alerts say **how fast this figure moves**, so a notification becomes a decision
 
 ### 🏅 Condition grades, handled properly
 - A pre-owned product code often covers **several graded copies at different prices** — AmiAmi's "More Buying Choices". The headline price is the cheapest of them, never an arbitrary one

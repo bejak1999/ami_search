@@ -9,8 +9,14 @@ from ..db import get_db
 from ..deps import current_user, user_cost_profile
 from ..models import CostProfile, Item, User
 from ..providers import ItemNotFound, ProviderError, get_provider
-from ..schemas import CostBreakdownOut, ItemHistoryOut, ItemOut, PricePointOut
-from ..services import catalog, landed_cost
+from ..schemas import (
+    CostBreakdownOut,
+    ItemHistoryOut,
+    ItemOut,
+    PricePointOut,
+    ShelfLifeOut,
+)
+from ..services import catalog, landed_cost, shelflife
 from .serializers import item_out, register_images
 
 router = APIRouter(prefix="/items", tags=["items"])
@@ -93,6 +99,24 @@ def get_history(
         points=[PricePointOut.model_validate(p) for p in points],
         stats=catalog.price_stats(db, item_id),
     )
+
+
+@router.get("/{item_id}/shelf-life", response_model=ShelfLifeOut)
+def get_shelf_life(
+    item_id: int,
+    db: Session = Depends(get_db),
+    user: User = Depends(current_user),
+) -> ShelfLifeOut:
+    """Every copy we have seen under this product code, and what it tells us.
+
+    AmiAmi deletes a pre-owned copy when it sells, so a copy that is missing
+    from a later fetch is a sale. What we cannot see is exactly when: the
+    answer is bracketed by the two looks either side of it, and every figure
+    here carries those bounds rather than pretending to a precision the poll
+    rate does not support.
+    """
+    item = _get_or_404(db, item_id)
+    return ShelfLifeOut(**shelflife.summary(db, item))
 
 
 @router.get("/{item_id}/landed", response_model=CostBreakdownOut)

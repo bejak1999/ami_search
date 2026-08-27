@@ -216,6 +216,32 @@ def build(db: Session, user: User, provider: str | None = None) -> list[Rail]:
             )
         )
 
+    # Things that will not wait for you. The "just listed" rail above claims
+    # pre-owned sells fastest as a generality; this one is the products where
+    # we have actually measured it.
+    stmt = (
+        base()
+        .where(
+            Item.dwell_days.is_not(None),
+            Item.dwell_days <= 7.0,
+            Item.condition == Condition.preowned,
+        )
+        .order_by(Item.dwell_days.asc(), Item.first_seen_at.desc())
+    )
+    items = _fetch(db, stmt, seen)
+    if items:
+        seen.update(i.id for i in items)
+        rails.append(
+            Rail(
+                key="sells_fast",
+                title="Gone within a week",
+                subtitle="Copies of these have measurably short shelf lives here",
+                icon="clock",
+                items=items,
+                explore={"condition": "preowned", "sort": "sells_fastest"},
+            )
+        )
+
     # Cheap against their own history, which only works because delisted
     # listings keep their last price here.
     stmt = (

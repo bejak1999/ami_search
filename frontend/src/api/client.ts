@@ -12,12 +12,15 @@ import type {
   CollectionEntry,
   CostBreakdown,
   CostProfile,
+  CostProfilePreview,
   DashboardStats,
   Item,
   ItemHistory,
   MessageResponse,
   PublicConfig,
   SearchResponse,
+  ShelfLife,
+  ShippingOptions,
   SystemStatus,
   TagRef,
   User,
@@ -111,6 +114,9 @@ export const api = {
     costProfile: () => get<CostProfile>('/auth/cost-profile'),
     updateCostProfile: (body: Partial<CostProfile>) =>
       patch<CostProfile>('/auth/cost-profile', body),
+    previewCostProfile: (body: Partial<CostProfile>) =>
+      post<CostProfilePreview>('/auth/cost-profile/preview', body),
+    shippingOptions: () => get<ShippingOptions>('/auth/shipping-zones'),
   },
 
   search: {
@@ -133,6 +139,7 @@ export const api = {
       get<CostBreakdown>(`/items/${id}/landed${qs({ quantity })}`),
     refresh: (id: number) => post<Item>(`/items/${id}/refresh`),
     counterpart: (id: number) => post<Item>(`/items/${id}/counterpart`),
+    shelfLife: (id: number) => get<ShelfLife>(`/items/${id}/shelf-life`),
   },
 
   watches: {
@@ -206,6 +213,9 @@ export const api = {
     settings: () => get<MessageResponse>('/admin/settings'),
     generateVapid: () => post<MessageResponse>('/admin/vapid/generate'),
     catalog: () => get<MessageResponse>('/admin/catalog'),
+    shelfLife: () => get<MessageResponse>('/admin/shelf-life'),
+    runShelfSampler: (seconds = 30) =>
+      post<MessageResponse>(`/admin/shelf-life/run${qs({ seconds })}`),
     images: () => get<MessageResponse>('/admin/images'),
     prefetchImages: (limit = 40) =>
       post<MessageResponse>(`/admin/images/prefetch${qs({ limit })}`),

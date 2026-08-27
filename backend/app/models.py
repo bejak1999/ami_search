@@ -89,6 +89,28 @@ class ChannelType(str, enum.Enum):
     webhook = "webhook"
 
 
+class ListingStatus(str, enum.Enum):
+    """Whether an individual copy is still on the shelf."""
+
+    live = "live"
+    gone = "gone"
+
+
+class ListingOutcome(str, enum.Enum):
+    """Why a copy left the shelf, as far as we can tell from outside."""
+
+    #: It vanished on its own while the product stayed listed. On AmiAmi a
+    #: sold pre-owned copy is deleted rather than flagged, so this is by far
+    #: the most likely reading, but a withdrawal looks identical.
+    sold = "sold"
+    #: The whole product went away, taking every copy with it.
+    delisted = "delisted"
+    #: It went away in a batch with its siblings, which smells like a shop
+    #: side action rather than several simultaneous sales.
+    withdrawn = "withdrawn"
+    unknown = "unknown"
+
+
 class CollectionStatus(str, enum.Enum):
     wishlist = "wishlist"
     ordered = "ordered"
@@ -162,11 +184,21 @@ class CostProfile(Base):
     # Flat carrier presentation fee, DHL charges about 6 EUR.
     customs_handling_fee: Mapped[float] = mapped_column(Float, default=6.0)
 
-    # table = weight based lookup, flat = one number, none = skip shipping
-    shipping_mode: Mapped[str] = mapped_column(String(32), default="table")
+    # amiami = the shop's own published rate charts, table = your own weight
+    # brackets, flat = one number, none = skip shipping entirely
+    shipping_mode: Mapped[str] = mapped_column(String(32), default="amiami")
+    # Which column of AmiAmi's charts you are quoted, and which service to
+    # price. The two auto modes take the cheapest service that will carry the
+    # weight, which matters because small packet stops at 2 kg; auto_air
+    # leaves out surface mail, which is cheap but takes months.
+    shipping_zone: Mapped[str] = mapped_column(String(16), default="zone3")
+    shipping_service: Mapped[str] = mapped_column(String(32), default="auto_air")
     shipping_flat: Mapped[float] = mapped_column(Float, default=25.0)
     shipping_table: Mapped[list] = mapped_column(JSON, default=list)
     default_weight_grams: Mapped[int] = mapped_column(Integer, default=900)
+    # Box, padding and packing slip, added on top of every shipment because
+    # the carrier bills the parcel, not the figure inside it.
+    packaging_grams: Mapped[int] = mapped_column(Integer, default=400)
     category_weights: Mapped[dict] = mapped_column(JSON, default=dict)
     consolidate_shipping: Mapped[bool] = mapped_column(Boolean, default=False)
     # Payment provider FX spread, added on top of the mid-market rate.
@@ -258,7 +290,49 @@ class Item(Base):
     first_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     last_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     last_detail_fetch_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # The fetch before that one. Without it a copy that appeared between two
+    # polls has no upper bound on how long it had been listed, and the whole
+    # shelf-life figure becomes a lower bound with no ceiling.
+    prev_detail_fetch_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     detail_loaded: Mapped[bool] = mapped_column(Boolean, default=False)
+
+    # -- Shelf life -----------------------------------------------------
+    # AmiAmi numbers pre-owned copies per product: FIGURE-140238-R459 is the
+    # 459th used copy it has taken in. Watching that counter move gives the
+    # intake rate without following a single copy, and intake rate plus shelf
+    # depth is all Little's Law needs to estimate how long a copy sits.
+    intake_first_seq: Mapped[int | None] = mapped_column(Integer)
+    intake_first_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    intake_last_seq: Mapped[int | None] = mapped_column(Integer)
+    intake_last_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    #: Copies on the shelf at the last detail fetch, denormalized for sorting.
+    listing_count: Mapped[int] = mapped_column(Integer, default=0)
+    #: Shelf depth smoothed across fetches. Little's Law wants the average
+    #: depth over the window, not the depth at the instant we happened to
+    #: look, and one snapshot of a four-copy shelf that is usually six copies
+    #: deep skews the answer badly.
+    listing_count_avg: Mapped[float | None] = mapped_column(Float)
+    #: Typical days a copy stays listed, cached so search can sort and badge.
+    dwell_days: Mapped[float | None] = mapped_column(Float, index=True)
+    #: observed = measured from copies we watched sell; intake = derived from
+    #: the counter; product = the coarse whole-product figure from phase zero.
+    dwell_basis: Mapped[str | None] = mapped_column(String(16))
+    #: Copies we watched leave the shelf. Backs the observed figure, and
+    #: elsewhere tells the reader how much evidence there is either way.
+    dwell_samples: Mapped[int] = mapped_column(Integer, default=0)
+    #: Days the whole product stayed listed before it sold out entirely.
+    sold_out_days: Mapped[float | None] = mapped_column(Float)
+    #: When this product is next due a detail fetch for shelf tracking. One
+    #: column drives the whole sampler: a price range that moved on a cheap
+    #: list sweep simply sets it to now, jumping the product to the front.
+    shelf_due_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
+    #: hot | warm | cold, cached from the last scheduling decision so the
+    #: admin panel can show where the request budget is going.
+    shelf_tier: Mapped[str | None] = mapped_column(String(8))
+    #: Last time a catalogue list sweep still found this product on sale. The
+    #: head pages are re-read every half hour, so for the newest listings this
+    #: is a far tighter signal than the detail fetches and costs nothing.
+    last_listed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
     # MyFigureCollection cross-reference. The JAN barcode gives an exact match;
     # a title search is the fallback and is flagged as such so the UI can say
@@ -272,6 +346,10 @@ class Item(Base):
     # The entry was identified, but MyFigureCollection withholds the page from
     # signed-out visitors, so no tags could be imported for it.
     mfc_restricted: Mapped[bool] = mapped_column(Boolean, default=False)
+
+    listings: Mapped[list["Listing"]] = relationship(
+        back_populates="item", cascade="all, delete-orphan", passive_deletes=True
+    )
 
     prices: Mapped[list["PricePoint"]] = relationship(
         back_populates="item", cascade="all, delete-orphan", passive_deletes=True
@@ -289,6 +367,11 @@ class PricePoint(Base):
 
     id: Mapped[int] = mapped_column(primary_key=True)
     item_id: Mapped[int] = mapped_column(ForeignKey("items.id", ondelete="CASCADE"), index=True)
+    #: Set when the point belongs to one individual copy rather than to the
+    #: product as a whole, so both histories share one table.
+    listing_id: Mapped[int | None] = mapped_column(
+        ForeignKey("listings.id", ondelete="CASCADE"), index=True
+    )
     recorded_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     price: Mapped[float | None] = mapped_column(Float)
     currency: Mapped[str] = mapped_column(String(3), default="JPY")
@@ -297,11 +380,83 @@ class PricePoint(Base):
     condition_grade: Mapped[str | None] = mapped_column(String(32))
 
     item: Mapped[Item] = relationship(back_populates="prices")
+    listing: Mapped["Listing | None"] = relationship(back_populates="prices")
 
 
 # ---------------------------------------------------------------------------
 # Watches
 # ---------------------------------------------------------------------------
+
+
+class Listing(Base):
+    """One individual copy offered under a product code.
+
+    AmiAmi sells a used figure as several separately graded copies, each with
+    its own code and price: FIGURE-140238-R459 is one copy of the product
+    FIGURE-140238-R. Until now those lived only in Item.variants, a JSON blob
+    overwritten wholesale on every detail fetch, so a copy that sold left no
+    trace at all. One row per copy fixes that, and turns "how long was it
+    listed" into a question the database can answer.
+
+    Because we only see a copy when we happen to look, its lifetime is an
+    interval rather than a number. The four timestamps bracket it:
+
+        appeared_after   last look that did NOT have it   (may be NULL)
+        first_seen_at    first look that DID
+        last_seen_at     last look that DID
+        vanished_before  first look that did NOT again    (NULL while live)
+
+    Certain lifetime is last_seen_at - first_seen_at; the most it could have
+    been is vanished_before - appeared_after. With appeared_after unknown the
+    upper bound is open and the UI must say "at least", never a bare figure.
+    """
+
+    __tablename__ = "listings"
+    __table_args__ = (
+        UniqueConstraint("provider", "code", name="uq_listing_provider_code"),
+        Index("ix_listing_item_first_seen", "item_id", "first_seen_at"),
+        # The sweep that closes out vanished copies filters on these two.
+        Index("ix_listing_status_seen", "status", "last_seen_at"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    item_id: Mapped[int] = mapped_column(
+        ForeignKey("items.id", ondelete="CASCADE"), index=True
+    )
+    provider: Mapped[str] = mapped_column(String(32), default="amiami")
+    #: The copy's own code, for example FIGURE-140238-R459.
+    code: Mapped[str] = mapped_column(String(64), index=True)
+    #: 459, parsed from the code. AmiAmi appears to number copies per product
+    #: in the order it takes them in, which makes this a cumulative intake
+    #: count and the basis for the rate estimate.
+    sequence: Mapped[int | None] = mapped_column(Integer)
+
+    #: Price when first seen, and the latest one. Pre-owned stock gets marked
+    #: down while it sits, so the two differing is itself information.
+    price: Mapped[float | None] = mapped_column(Float)
+    last_price: Mapped[float | None] = mapped_column(Float)
+    currency: Mapped[str] = mapped_column(String(3), default="JPY")
+
+    condition: Mapped[str | None] = mapped_column(String(64))
+    item_grade: Mapped[str | None] = mapped_column(String(8))
+    box_grade: Mapped[str | None] = mapped_column(String(8))
+
+    appeared_after: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    first_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    last_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    vanished_before: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+    status: Mapped[ListingStatus] = mapped_column(
+        Enum(ListingStatus), default=ListingStatus.live, index=True
+    )
+    outcome: Mapped[ListingOutcome | None] = mapped_column(Enum(ListingOutcome))
+    #: How many times we actually saw it, so thin data can be shown as thin.
+    observations: Mapped[int] = mapped_column(Integer, default=1)
+
+    item: Mapped[Item] = relationship(back_populates="listings")
+    prices: Mapped[list["PricePoint"]] = relationship(
+        back_populates="listing", cascade="all, delete-orphan", passive_deletes=True
+    )
 
 
 class Watch(Base):

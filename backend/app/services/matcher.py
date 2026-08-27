@@ -349,6 +349,15 @@ def _build_alert(
             f"({basis})."
         )
 
+    urgency = _urgency_note(item)
+    if urgency:
+        # The whole point of this application is arriving in time to act. A
+        # price alert for something that sits for a month and one for
+        # something gone by tomorrow deserve different reactions, and only we
+        # know which is which.
+        extra["urgency"] = urgency
+        body = f"{body} {urgency}".strip()
+
     return Alert(
         user_id=watch.user_id,
         watch_id=watch.id,
@@ -365,6 +374,36 @@ def _build_alert(
         image_url=item.image_url,
         extra=extra,
     )
+
+
+def _urgency_note(item: Item) -> str:
+    """One line on how fast copies of this figure disappear.
+
+    Deliberately says where the number came from. A figure measured from
+    copies we watched sell is worth acting on; one extrapolated from the
+    intake counter is a hint, and should not read like a countdown.
+    """
+    days = item.dwell_days
+    if not days:
+        return ""
+
+    if days < 1:
+        sells, lasts = "within a day", "less than a day"
+    elif days < 2:
+        sells, lasts = "in about a day", "about a day"
+    else:
+        sells, lasts = f"in about {days:.0f} days", f"about {days:.0f} days"
+
+    if item.dwell_basis == "observed":
+        samples = item.dwell_samples or 0
+        return f"Copies of this figure sell {sells} ({samples} watched here)."
+    if item.dwell_basis == "intake":
+        return f"Going by shop turnover, copies last {lasts}."
+    if item.dwell_basis == "intake_bootstrap":
+        return f"Rough estimate from shop turnover: copies last {lasts}."
+    if item.dwell_basis == "product":
+        return f"This listing stood {lasts} last time before selling out."
+    return ""
 
 
 def _remember(

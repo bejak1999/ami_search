@@ -349,6 +349,151 @@ function Slice({
   )
 }
 
+/**
+ * How much of the pre-owned catalogue is being followed copy by copy.
+ *
+ * Two numbers matter and they mean different things. "Counter seen" is every
+ * product we have opened at least once, which is enough for a turnover
+ * estimate. "With an estimate" is every product that actually has a shelf-life
+ * figure attached, by any of the three methods.
+ */
+function ShelfLifePanel() {
+  const toast = useToast()
+  const queryClient = useQueryClient()
+
+  const shelf = useQuery({
+    queryKey: ['admin', 'shelfLife'],
+    queryFn: () => api.admin.shelfLife(),
+    refetchInterval: 20_000,
+  })
+
+  const runNow = useMutation({
+    mutationFn: () => api.admin.runShelfSampler(30),
+    onSuccess: (result) => {
+      toast.success('Sampler finished', result.message)
+      void queryClient.invalidateQueries({ queryKey: ['admin', 'shelfLife'] })
+    },
+    onError: (error) => toast.error('Sampler failed', (error as Error).message),
+  })
+
+  const d = shelf.data?.detail as
+    | {
+        enabled: boolean
+        preowned_total: number
+        counter_seen: number
+        with_estimate: number
+        due_now: number
+        tiers: Record<string, number>
+        by_basis: Record<string, number>
+        listings_total: number
+        listings_live: number
+        listings_departed: number
+        requests_per_minute: number
+      }
+    | undefined
+
+  if (!d) return null
+
+  const pct = (n: number) => (d.preowned_total ? (n / d.preowned_total) * 100 : 0)
+  const BASIS_LABEL: Record<string, string> = {
+    observed: 'Watched copies sell',
+    intake: 'Shop turnover',
+    intake_bootstrap: 'Turnover, rough',
+    product: 'Whole listing',
+  }
+
+  return (
+    <Card className="p-4">
+      <div className="mb-3 flex items-start justify-between gap-3">
+        <div>
+          <h3 className="flex items-center gap-2 text-sm font-semibold">
+            <Icon name="clock" className="h-4 w-4 text-accent" />
+            Shelf-life tracking
+          </h3>
+          <p className="mt-0.5 text-xs text-muted">
+            Following individual pre-owned copies so a vanished listing becomes a recorded sale.
+            {!d.enabled && ' Currently switched off.'}
+          </p>
+        </div>
+        <button
+          onClick={() => runNow.mutate()}
+          disabled={runNow.isPending || !d.enabled}
+          className="btn-quiet text-xs"
+        >
+          {runNow.isPending ? 'Sampling…' : 'Sample now'}
+        </button>
+      </div>
+
+      <div className="space-y-3">
+        <div>
+          <div className="mb-1 flex justify-between text-xs">
+            <span className="text-muted">Products opened at least once</span>
+            <span className="tabular-nums">
+              {d.counter_seen.toLocaleString('en-GB')} of{' '}
+              {d.preowned_total.toLocaleString('en-GB')}
+            </span>
+          </div>
+          <Bar percent={pct(d.counter_seen)} />
+        </div>
+        <div>
+          <div className="mb-1 flex justify-between text-xs">
+            <span className="text-muted">Products with a shelf-life figure</span>
+            <span className="tabular-nums">{d.with_estimate.toLocaleString('en-GB')}</span>
+          </div>
+          <Bar percent={pct(d.with_estimate)} tone="positive" />
+        </div>
+      </div>
+
+      <div className="mt-4 grid grid-cols-2 gap-3 border-t border-line pt-3 text-xs sm:grid-cols-4">
+        <div>
+          <p className="text-faint">Copies tracked</p>
+          <p className="font-mono tabular-nums">{d.listings_total.toLocaleString('en-GB')}</p>
+        </div>
+        <div>
+          <p className="text-faint">Still listed</p>
+          <p className="font-mono tabular-nums">{d.listings_live.toLocaleString('en-GB')}</p>
+        </div>
+        <div>
+          <p className="text-faint">Seen to sell</p>
+          <p className="font-mono tabular-nums">{d.listings_departed.toLocaleString('en-GB')}</p>
+        </div>
+        <div>
+          <p className="text-faint">Waiting for a look</p>
+          <p className="font-mono tabular-nums">{d.due_now.toLocaleString('en-GB')}</p>
+        </div>
+      </div>
+
+      {Object.keys(d.by_basis).length > 0 && (
+        <div className="mt-3 border-t border-line pt-3">
+          <p className="mb-1.5 text-xs text-faint">Where the figures come from</p>
+          <div className="flex flex-wrap gap-x-4 gap-y-1 text-xs">
+            {Object.entries(d.by_basis).map(([basis, count]) => (
+              <span key={basis} className="text-muted">
+                {BASIS_LABEL[basis] ?? basis}:{' '}
+                <span className="font-mono tabular-nums text-ink">
+                  {count.toLocaleString('en-GB')}
+                </span>
+              </span>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {Object.keys(d.tiers).length > 0 && (
+        <p className="mt-3 border-t border-line pt-2 text-xs text-faint">
+          Attention split:{' '}
+          {(['hot', 'warm', 'cold'] as const)
+            .filter((t) => d.tiers[t])
+            .map((t) => `${d.tiers[t].toLocaleString('en-GB')} ${t}`)
+            .join(' · ')}{' '}
+          · {d.requests_per_minute} requests a minute
+        </p>
+      )}
+    </Card>
+  )
+}
+
+
 export function CatalogPanel() {
   const toast = useToast()
   const queryClient = useQueryClient()
@@ -461,6 +606,7 @@ export function CatalogPanel() {
         </Card>
       </div>
 
+      <ShelfLifePanel />
       <ImageCache />
       <MfcSession />
     </section>

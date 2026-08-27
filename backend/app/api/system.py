@@ -240,6 +240,39 @@ def run_catalog_crawl(
     )
 
 
+@admin.get("/shelf-life", response_model=MessageResponse)
+def shelf_coverage(
+    provider: str = "amiami",
+    db: Session = Depends(get_db),
+    _admin: User = Depends(admin_user),
+) -> MessageResponse:
+    """How much of the pre-owned catalogue is being followed, and how closely."""
+    from ..services import shelfwatch
+
+    return MessageResponse(message="ok", detail=shelfwatch.coverage(db, provider))
+
+
+@admin.post("/shelf-life/run", response_model=MessageResponse)
+def run_shelf_sampler(
+    seconds: int = Query(default=30, ge=5, le=120),
+    provider: str = "amiami",
+    db: Session = Depends(get_db),
+    _admin: User = Depends(admin_user),
+) -> MessageResponse:
+    """Sample a few products right now, so the effect is visible immediately."""
+    from ..services import shelfwatch
+
+    outcome = shelfwatch.run_once(db, provider, budget_seconds=seconds)
+    return MessageResponse(
+        message=(
+            f"{outcome.checked} product(s) checked, {outcome.appeared} copy(ies) appeared, "
+            f"{outcome.vanished} sold, {outcome.delisted} product(s) gone. "
+            f"Stopped: {outcome.stopped_because or 'budget spent'}"
+        ),
+        detail=outcome.as_dict(),
+    )
+
+
 @admin.patch("/catalog/{scope}", response_model=MessageResponse)
 def update_catalog_slice(
     scope: str,

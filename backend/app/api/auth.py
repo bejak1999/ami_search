@@ -10,11 +10,12 @@ from sqlalchemy.orm import Session
 from ..config import settings
 from ..db import get_db
 from ..deps import COOKIE_NAME, client_fingerprint, current_user
-from ..models import AuthSession, User, UserRole, utcnow
+from ..models import AuthSession, CostProfile, Item, User, UserRole, utcnow
 from ..schemas import (
     AuthResponse,
     ChangePasswordRequest,
     CostProfileOut,
+    CostProfilePreview,
     CostProfileUpdate,
     LoginRequest,
     MessageResponse,
@@ -29,9 +30,13 @@ from ..security import (
     password_strength_problem,
     verify_password,
 )
-from ..services import landed_cost
+from ..services import landed_cost, shipping_rates
 
 router = APIRouter(prefix="/auth", tags=["auth"])
+
+#: A typical order, used only to show the user what their settings do.
+SAMPLE_PRICE_JPY = 10000.0
+SAMPLE_ITEM = Item(name="1/7 Scale Figure", scale="1/7", category="Figure")
 
 
 def _user_count(db: Session) -> int:
@@ -260,6 +265,58 @@ def get_cost_profile(
         db.commit()
         db.refresh(user)
     return CostProfileOut.model_validate(user.cost_profile)
+
+
+@router.get("/shipping-zones")
+def shipping_zones() -> dict:
+    """AmiAmi's zones and services, so the settings page can label them."""
+    return {
+        "zones": [{"value": k, "label": v} for k, v in shipping_rates.ZONES.items()],
+        "services": [{"value": k, "label": v} for k, v in shipping_rates.SERVICES.items()],
+    }
+
+
+@router.post("/cost-profile/preview", response_model=CostProfilePreview)
+def preview_cost_profile(
+    payload: CostProfileUpdate,
+    db: Session = Depends(get_db),
+    user: User = Depends(current_user),
+) -> CostProfilePreview:
+    """Price a sample figure against unsaved settings.
+
+    The settings page used to approximate this in the browser with a guessed
+    exchange rate, which stopped being honest the moment shipping came off a
+    real rate chart. This runs the actual estimator instead, on a detached
+    copy of the profile so nothing touches the database.
+    """
+    base = user.cost_profile or landed_cost.default_profile(user.id)
+    profile = CostProfile(
+        user_id=user.id,
+        **{
+            column.key: getattr(base, column.key)
+            for column in CostProfile.__mapper__.column_attrs
+            if column.key not in {"id", "user_id"}
+        },
+    )
+    for key, value in payload.model_dump(exclude_unset=True).items():
+        if key == "shipping_table" and value is not None:
+            value = [{"max_grams": b["max_grams"], "cost": b["cost"]} for b in value]
+        if key == "country" and value:
+            value = value.upper()
+        setattr(profile, key, value)
+
+    sample = SAMPLE_ITEM
+    currency = user.display_currency or "EUR"
+    breakdown = landed_cost.estimate(
+        db, SAMPLE_PRICE_JPY, "JPY", profile, target_currency=currency, item=sample
+    )
+    return CostProfilePreview(
+        sample_price=SAMPLE_PRICE_JPY,
+        sample_currency=currency,
+        weight_grams=landed_cost.shipment_weight(sample, profile),
+        packaging_grams=max(0, int(profile.packaging_grams or 0)),
+        breakdown=breakdown.as_dict() if breakdown else None,
+    )
 
 
 @router.patch("/cost-profile", response_model=CostProfileOut)

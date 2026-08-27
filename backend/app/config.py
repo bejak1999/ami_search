@@ -67,6 +67,21 @@ class Settings(BaseSettings):
     # ---- MyFigureCollection ------------------------------------------------
     mfc_enabled: bool = True
     mfc_requests_per_minute: float = 10.0
+
+    # -- Shelf-life sampling ---------------------------------------------
+    #: Follow individual pre-owned copies so "how long was it listed" has an
+    #: answer. Off means the intake-counter estimate still works, since that
+    #: rides along on detail fetches that happen for other reasons anyway.
+    shelf_tracking_enabled: bool = True
+    shelf_run_interval_minutes: int = 10
+    shelf_max_seconds_per_run: int = 240
+    shelf_requests_per_minute: float = 10.0
+    #: How often each tier gets looked at. Hot is the handful of products
+    #: someone is actually waiting on, where the tight bound is worth paying
+    #: for; cold is the long tail, which only has to feed the statistics.
+    shelf_hot_interval_hours: float = 2.0
+    shelf_warm_interval_hours: float = 12.0
+    shelf_cold_interval_hours: float = 72.0
     mfc_batch_size: int = 8
     mfc_run_interval_minutes: int = 5
     mfc_session_cookie: str = ""

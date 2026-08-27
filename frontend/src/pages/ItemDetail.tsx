@@ -6,6 +6,7 @@ import { Icon } from '@/components/Icon'
 import { LookupMenu } from '@/components/LookupMenu'
 import { CollectionButton } from '@/components/CollectionButton'
 import { PriceChart } from '@/components/PriceChart'
+import { ShelfLifePanel } from '@/components/ShelfLife'
 import { WatchEditor } from '@/components/WatchEditor'
 import { LandedTooltip } from '@/components/ItemCard'
 import { Badge, Card, SegmentedControl, Skeleton, Spinner, Tooltip } from '@/components/ui'
@@ -39,6 +40,19 @@ export function ItemDetailPage() {
     queryFn: () => api.items.history(id, Number(range)),
     enabled: Number.isFinite(id),
   })
+  // Sale marks for the chart. Same query key as the shelf-life panel below,
+  // so both read one cached response rather than fetching twice.
+  const shelf = useQuery({
+    queryKey: ['shelfLife', id],
+    queryFn: () => api.items.shelfLife(id),
+    // Only pre-owned products have copies to follow, so a first-hand listing
+    // must not spend a request finding that out.
+    enabled: Number.isFinite(id) && history.data?.item.condition === 'preowned',
+  })
+  const sales = (shelf.data?.listings ?? []).filter(
+    (row) => row.vanished_before && row.outcome === 'sold',
+  )
+
   const tags = useQuery({
     queryKey: ['item', id, 'tags'],
     queryFn: () => api.discover.itemTags(id),
@@ -351,6 +365,7 @@ export function ItemDetailPage() {
               points={chartHistory.data?.points ?? []}
               currency={item.currency}
               height={280}
+              sales={sales}
             />
 
             {counterpart ? (
@@ -383,6 +398,8 @@ export function ItemDetailPage() {
               </p>
             )}
           </Card>
+
+          <ShelfLifePanel itemId={id} preowned={item.condition === 'preowned'} />
 
           <Card className="p-4">
             <div className="mb-3 flex items-center justify-between gap-3">

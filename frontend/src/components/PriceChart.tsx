@@ -10,7 +10,7 @@ import {
   XAxis,
   YAxis,
 } from 'recharts'
-import type { PricePoint } from '@/api/types'
+import type { ListingRow, PricePoint } from '@/api/types'
 import { compactMoney, dateTime, money } from '@/lib/format'
 
 /**
@@ -25,11 +25,14 @@ export function PriceChart({
   currency,
   targetPrice,
   height = 260,
+  sales = [],
 }: {
   points: PricePoint[]
   currency: string
   targetPrice?: number | null
   height?: number
+  /** Copies seen to leave the shelf, drawn as marks on the same time axis. */
+  sales?: ListingRow[]
 }) {
   const data = useMemo(() => {
     const rows = points
@@ -119,6 +122,24 @@ export function PriceChart({
             'Price',
           ]}
         />
+
+        {/* Where a copy disappeared. Sharing the axis with the price line is
+            the point: it shows whether a markdown actually moved anything. */}
+        {sales.map((row) => (
+          <ReferenceLine
+            key={row.code}
+            x={new Date(row.vanished_before as string).getTime()}
+            stroke="rgb(var(--c-danger))"
+            strokeDasharray="2 3"
+            strokeOpacity={0.7}
+            label={{
+              value: '✕',
+              position: 'top',
+              fill: 'rgb(var(--c-danger))',
+              fontSize: 10,
+            }}
+          />
+        ))}
 
         {targetPrice ? (
           <ReferenceLine

@@ -9,7 +9,10 @@ carries a full breakdown that the UI renders as a tooltip.
 Method (EU rules, configurable per user):
   1. goods    = shop price converted to the display currency, plus the FX
                 spread a card issuer charges
-  2. shipping = flat, weight-table or skipped
+  2. shipping = AmiAmi's own published rate chart, your own weight
+                brackets, a flat number, or skipped. Every mode bills the
+                packed parcel, so a packaging allowance is added on top of
+                the estimated weight of the goods.
   3. duty     = (goods + shipping) * duty_rate, waived below the duty-free
                 threshold (150 EUR in the EU)
   4. VAT      = (goods + shipping + duty) * vat_rate, charged from the first
@@ -24,7 +27,7 @@ from dataclasses import asdict, dataclass, field
 from sqlalchemy.orm import Session
 
 from ..models import CostProfile, Item
-from . import fx
+from . import fx, shipping_rates
 
 # Rough shipping weights, in grams, keyed by a token found in the product
 # name. Deliberately generous: underestimating shipping is the failure mode
@@ -95,7 +98,9 @@ def default_profile(user_id: int) -> CostProfile:
         duty_rate=0.047,
         duty_free_threshold=150.0,
         customs_handling_fee=6.0,
-        shipping_mode="table",
+        shipping_mode="amiami",
+        shipping_zone="zone3",
+        shipping_service="auto_air",
         shipping_flat=25.0,
         shipping_table=[
             {"max_grams": 500, "cost": 14.0},
@@ -105,6 +110,7 @@ def default_profile(user_id: int) -> CostProfile:
             {"max_grams": 10000, "cost": 78.0},
         ],
         default_weight_grams=900,
+        packaging_grams=400,
         category_weights=dict(DEFAULT_CATEGORY_WEIGHTS),
         consolidate_shipping=False,
         fx_markup=0.015,
@@ -135,27 +141,101 @@ def estimate_weight(item: Item | None, profile: CostProfile) -> int:
     return profile.default_weight_grams or 900
 
 
-def shipping_cost(weight_grams: int, profile: CostProfile) -> tuple[float, str]:
+def shipment_weight(item: Item | None, profile: CostProfile, quantity: int = 1) -> int:
+    """Weight the carrier actually bills: the goods plus their packaging.
+
+    The box, the padding and the paperwork travel too, and AmiAmi's rate
+    charts are read off the parcel on the scale rather than the figure inside
+    it. Packaging is charged once per shipment however many units are in it.
+    """
+    goods = estimate_weight(item, profile) * max(1, quantity)
+    packaging = profile.packaging_grams
+    if packaging is None:
+        packaging = 400
+    return goods + max(0, int(packaging))
+
+
+def _amiami_shipping(
+    weight_grams: int,
+    profile: CostProfile,
+    db: Session | None,
+    target_currency: str,
+) -> tuple[float, str] | None:
+    """Quote from AmiAmi's own charts, or None if they cannot answer."""
+    zone = profile.shipping_zone or shipping_rates.zone_for_country(profile.country)
+    if zone not in shipping_rates.RATES:
+        zone = shipping_rates.zone_for_country(profile.country)
+
+    chosen = (profile.shipping_service or "auto_air").lower()
+    detail = ""
+    if chosen in ("auto", "auto_air"):
+        air_only = chosen == "auto_air"
+        quote = shipping_rates.cheapest(zone, weight_grams, air_only=air_only)
+        if quote is None:
+            return None
+        service, yen = quote
+        detail = ", the cheapest air service" if air_only else ", the cheapest service"
+        detail += " that takes the weight"
+    else:
+        yen = shipping_rates.lookup(zone, chosen, weight_grams)
+        service = chosen
+        if yen is None:
+            # Small packet stops at 2 kg, so a heavy parcel has to fall
+            # through to a service that will actually carry it. Stay on air
+            # unless the user deliberately asked for sea mail.
+            air_only = chosen not in shipping_rates.SURFACE_SERVICES
+            fallback = shipping_rates.cheapest(zone, weight_grams, air_only=air_only)
+            if fallback is None:
+                fallback = shipping_rates.cheapest(zone, weight_grams)
+            if fallback is None:
+                return None
+            cap = shipping_rates.heaviest(zone, chosen)
+            service, yen = fallback
+            label = shipping_rates.SERVICES.get(chosen, chosen)
+            detail = f", switched from {label} which stops at {cap} g"
+
+    rate = fx.get_rate(db, "JPY", target_currency.upper()) if db is not None else None
+    if rate is None:
+        return None
+
+    name = shipping_rates.SERVICES.get(service, service)
+    note = f"AmiAmi {name}, {weight_grams} g to {shipping_rates.ZONES[zone]}{detail}"
+    return yen * rate, note
+
+
+def shipping_cost(
+    weight_grams: int,
+    profile: CostProfile,
+    db: Session | None = None,
+    target_currency: str = "EUR",
+) -> tuple[float, str]:
     """Shipping in the profile currency, plus a note explaining the number."""
     mode = (profile.shipping_mode or "table").lower()
     if mode == "none":
         return 0.0, "Shipping excluded by your cost profile"
-    if mode == "flat":
+    if mode == "amiami":
+        quote = _amiami_shipping(weight_grams, profile, db, target_currency)
+        if quote is not None:
+            return quote
+        # Off the end of the charts, or no yen rate to convert with. Either
+        # way the weight table below is a better answer than nothing.
+    elif mode == "flat":
         return float(profile.shipping_flat or 0.0), "Flat shipping rate"
 
     table = sorted(
         (row for row in (profile.shipping_table or []) if row.get("max_grams")),
         key=lambda row: row["max_grams"],
     )
+    prefix = "Estimated: " if mode == "amiami" else ""
     if not table:
-        return float(profile.shipping_flat or 0.0), "No weight table set, using flat rate"
+        return float(profile.shipping_flat or 0.0), f"{prefix}no weight table set, using flat rate"
     for row in table:
         if weight_grams <= row["max_grams"]:
-            return float(row["cost"]), f"Weight bracket up to {row['max_grams']} g"
-    heaviest = table[-1]
+            return float(row["cost"]), f"{prefix}weight bracket up to {row['max_grams']} g"
+    top = table[-1]
     # Beyond the table, extrapolate linearly from the top bracket.
-    per_gram = heaviest["cost"] / max(1, heaviest["max_grams"])
-    return float(weight_grams * per_gram), "Extrapolated beyond the heaviest bracket"
+    per_gram = top["cost"] / max(1, top["max_grams"])
+    return float(weight_grams * per_gram), f"{prefix}extrapolated beyond the heaviest bracket"
 
 
 def estimate(
@@ -185,8 +265,11 @@ def estimate(
     if markup:
         notes.append(f"Includes a {markup * 100:.1f}% card FX spread")
 
-    weight = estimate_weight(item, profile) * max(1, quantity)
-    ship, ship_note = shipping_cost(weight, profile)
+    weight = shipment_weight(item, profile, quantity)
+    ship, ship_note = shipping_cost(weight, profile, db, target_currency)
+    packaging = max(0, int(profile.packaging_grams or 0))
+    if packaging:
+        notes.append(f"Weight includes a {packaging} g packaging allowance")
     if profile.consolidate_shipping:
         # The user batches orders, so charge a share rather than a full parcel.
         ship = ship / 2.0
@@ -254,8 +337,8 @@ def to_shop_currency(
     if not rate:
         return None
 
-    weight = estimate_weight(item, profile)
-    ship, _ = shipping_cost(weight, profile)
+    weight = shipment_weight(item, profile)
+    ship, _ = shipping_cost(weight, profile, db, target_currency)
     if profile.consolidate_shipping:
         ship /= 2.0
 
