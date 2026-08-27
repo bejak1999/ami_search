@@ -78,6 +78,7 @@ def public_config(db: Session = Depends(get_db)) -> PublicConfig:
         default_currency=settings.display_currency,
         min_poll_interval_seconds=settings.min_poll_interval_seconds,
         version=VERSION,
+        refresh_on_open=bool(behaviour(db).get("refresh_on_open")),
     )
 
 
@@ -439,6 +440,51 @@ def health_test(
 #: Key under which the runtime MyFigureCollection session is stored, so it can
 #: be changed without a restart. It is never echoed back to the browser.
 MFC_SESSION_SETTING = "mfc_session"
+
+#: Instance-wide behaviour toggles kept in the database so they survive a
+#: restart and can be changed without touching the environment.
+BEHAVIOUR_SETTING = "behaviour"
+BEHAVIOUR_DEFAULTS = {"refresh_on_open": False}
+
+
+def behaviour(db: Session) -> dict:
+    """Instance behaviour flags, with defaults filled in."""
+    from ..models import AppSetting
+
+    row = db.get(AppSetting, BEHAVIOUR_SETTING)
+    return {**BEHAVIOUR_DEFAULTS, **((row.value if row else None) or {})}
+
+
+@admin.get("/behaviour", response_model=MessageResponse)
+def get_behaviour(
+    db: Session = Depends(get_db), _admin: User = Depends(admin_user)
+) -> MessageResponse:
+    return MessageResponse(message="ok", detail=behaviour(db))
+
+
+@admin.put("/behaviour", response_model=MessageResponse)
+def set_behaviour(
+    payload: dict, db: Session = Depends(get_db), _admin: User = Depends(admin_user)
+) -> MessageResponse:
+    """Change how the instance behaves for everyone using it.
+
+    Refreshing on open costs one upstream request per item anyone views, taken
+    from the same budget the crawler and the watches share, so it is an
+    instance decision rather than a personal preference.
+    """
+    from ..models import AppSetting
+
+    row = db.get(AppSetting, BEHAVIOUR_SETTING)
+    if row is None:
+        row = AppSetting(key=BEHAVIOUR_SETTING, value={})
+        db.add(row)
+    merged = {**behaviour(db)}
+    for key in BEHAVIOUR_DEFAULTS:
+        if key in payload:
+            merged[key] = bool(payload[key])
+    row.value = merged
+    db.commit()
+    return MessageResponse(message="Saved", detail=merged)
 
 
 def load_mfc_session(db: Session) -> None:

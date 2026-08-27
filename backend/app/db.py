@@ -83,6 +83,9 @@ def init_db() -> None:
     adopted = adopt_amiami_rates()
     if adopted:
         log.info("Moved %s cost profile(s) onto AmiAmi's published rate charts", adopted)
+    grouped = backfill_figure_codes()
+    if grouped:
+        log.info("Grouped %s item(s) by figure", grouped)
     log.info("Database ready at %s", settings.resolved_database_url.split("://", 1)[0])
 
 
@@ -116,6 +119,45 @@ def adopt_amiami_rates() -> int:
                 profile.shipping_service = profile.shipping_service or "auto_air"
                 moved += 1
     return moved
+
+
+def backfill_figure_codes() -> int:
+    """Fill in the figure grouping for rows written before it existed.
+
+    Purely derived from the code already stored, so it is safe to repeat and
+    cannot lose anything: rows that already have a value are left alone.
+    """
+    from sqlalchemy import case, func, literal, select, update
+
+    from . import models
+
+    with session_scope() as db:
+        try:
+            pending = int(
+                db.execute(
+                    select(func.count(models.Item.id)).where(
+                        models.Item.figure_code.is_(None)
+                    )
+                ).scalar_one()
+                or 0
+            )
+        except Exception:  # pragma: no cover - table may not exist yet
+            return 0
+        if not pending:
+            return 0
+        derived = case(
+            (
+                models.Item.code.like("%-R"),
+                func.substr(models.Item.code, 1, func.length(models.Item.code) - 2),
+            ),
+            else_=models.Item.code,
+        )
+        db.execute(
+            update(models.Item)
+            .where(models.Item.figure_code.is_(None))
+            .values(figure_code=derived)
+        )
+    return pending
 
 
 def _backup_sqlite() -> Path | None:

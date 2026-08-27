@@ -5,6 +5,7 @@ import type { DwellBasis, ListingRow } from '@/api/types'
 import { Icon } from '@/components/Icon'
 import { Card, Spinner, Tooltip } from '@/components/ui'
 import { money, shortDate } from '@/lib/format'
+import { shopUrl } from '@/lib/shop'
 import clsx from 'clsx'
 
 /**
@@ -31,23 +32,35 @@ const BASIS_NOTE: Record<DwellBasis, string> = {
   product: 'from how long the whole listing stood last time, not from individual copies',
 }
 
+function lifetimeLabel(row: ListingRow): string {
+  const life = row.lifetime
+  if (row.status === 'live') return `listed ${days(life.certain_days)}`
+  if (life.open_start) return `at least ${days(life.certain_days)}`
+  if (life.max_days && life.max_days - life.certain_days > 0.5) {
+    return `${days(life.certain_days)}–${days(life.max_days)}`
+  }
+  return days(life.certain_days)
+}
+
+/**
+ * One copy's spell on the shelf, drawn on the shared time axis.
+ *
+ * The bar is the only thing positioned here. An earlier version floated the
+ * duration label beside it, which fell apart the moment a bar filled the whole
+ * track: the label flipped to the left of a bar that started at zero and
+ * landed on top of the columns next to it. It has its own column now, so it
+ * cannot collide with anything.
+ */
 function Bar({ row, span }: { row: ListingRow; span: { start: number; end: number } }) {
   const total = Math.max(1, span.end - span.start)
   const from = new Date(row.first_seen_at).getTime()
   const to = row.vanished_before ? new Date(row.vanished_before).getTime() : span.end
 
-  const left = ((Math.max(from, span.start) - span.start) / total) * 100
-  const width = Math.max(1.5, ((Math.min(to, span.end) - Math.max(from, span.start)) / total) * 100)
+  const left = Math.max(0, ((from - span.start) / total) * 100)
+  const right = Math.min(100, ((to - span.start) / total) * 100)
+  const width = Math.max(2, right - left)
   const live = row.status === 'live'
   const life = row.lifetime
-
-  const label = live
-    ? `still listed · ${days(life.certain_days)}`
-    : life.open_start
-      ? `at least ${days(life.certain_days)}`
-      : life.max_days && life.max_days - life.certain_days > 0.5
-        ? `${days(life.certain_days)}–${days(life.max_days)}`
-        : days(life.certain_days)
 
   const detail = (
     <div className="space-y-1 text-xs">
@@ -61,10 +74,12 @@ function Bar({ row, span }: { row: ListingRow; span: { start: number; end: numbe
         <p>Last confirmed {shortDate(row.last_seen_at)}</p>
       )}
       {life.open_start && (
-        <p className="text-warning">Already listed when we first looked, so it ran longer than this.</p>
+        <p className="text-warning">
+          Already listed when we first looked, so it ran longer than this.
+        </p>
       )}
       {row.outcome === 'withdrawn' && (
-        <p className="text-warning">Vanished together with every other copy, so possibly withdrawn.</p>
+        <p className="text-warning">Vanished with every other copy, so possibly withdrawn.</p>
       )}
       <p className="text-faint">Seen on {life.observations} check(s)</p>
     </div>
@@ -72,34 +87,20 @@ function Bar({ row, span }: { row: ListingRow; span: { start: number; end: numbe
 
   return (
     <Tooltip content={detail}>
-      <div className="relative h-5 w-full cursor-default">
+      <div className="relative h-4 w-full cursor-default rounded-sm bg-raised">
         <div
           className={clsx(
-            'absolute top-1 h-3 rounded-sm border',
-            live ? 'border-positive bg-positive/20' : 'border-accent bg-accent/20',
+            'absolute inset-y-0 rounded-sm border',
+            live ? 'border-positive bg-positive/25' : 'border-accent bg-accent/25',
           )}
           style={{ left: `${left}%`, width: `${width}%` }}
-        >
-          {life.open_start && (
-            // It was already there when we arrived, so the bar starts mid-air.
-            <span className="absolute -left-2 top-1/2 -translate-y-1/2 text-2xs text-faint">
-              &lsaquo;
-            </span>
-          )}
-          {!live && (
-            <span className="absolute -right-1 top-1/2 h-2 w-2 -translate-y-1/2 rounded-full bg-accent" />
-          )}
-        </div>
-        <span
-          className="absolute top-0.5 whitespace-nowrap text-2xs text-faint"
-          style={
-            left + width > 62
-              ? { right: `${Math.max(0, 100 - left)}%`, marginRight: '0.4rem' }
-              : { left: `${left + width}%`, marginLeft: '0.4rem' }
-          }
-        >
-          {label}
-        </span>
+        />
+        {!live && (
+          <span
+            className="absolute top-1/2 h-1.5 w-1.5 -translate-y-1/2 rounded-full bg-accent"
+            style={{ left: `calc(${right}% - 3px)` }}
+          />
+        )}
       </div>
     </Tooltip>
   )
@@ -195,8 +196,19 @@ export function ShelfLifePanel({ itemId, preowned }: { itemId: number; preowned:
         <>
           <div className="space-y-1.5">
             {data.listings.map((row) => (
-              <div key={row.code} className="grid grid-cols-[5.5rem_1fr] items-center gap-2 sm:grid-cols-[5.5rem_7rem_5rem_1fr]">
-                <span className="truncate font-mono text-2xs font-semibold" title={row.code}>
+              <a
+                key={row.code}
+                href={shopUrl(row.code)}
+                target="_blank"
+                rel="noreferrer"
+                title={`Open ${row.code} on AmiAmi`}
+                className={clsx(
+                  'grid items-center gap-2 rounded-control px-1 py-0.5',
+                  'grid-cols-[3.5rem_1fr_5.5rem] sm:grid-cols-[3.5rem_6.5rem_4.5rem_1fr_5.5rem]',
+                  'hover:bg-raised focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent',
+                )}
+              >
+                <span className="truncate font-mono text-2xs font-semibold">
                   {row.sequence !== null ? `#${row.sequence}` : row.code}
                 </span>
                 <span className="hidden truncate text-2xs text-muted sm:block">
@@ -206,12 +218,25 @@ export function ShelfLifePanel({ itemId, preowned }: { itemId: number; preowned:
                   {money(row.last_price ?? row.price, row.currency)}
                 </span>
                 <Bar row={row} span={span} />
-              </div>
+                <span
+                  className={clsx(
+                    'text-right text-2xs tabular-nums',
+                    row.status === 'live' ? 'text-positive' : 'text-muted',
+                  )}
+                >
+                  {lifetimeLabel(row)}
+                </span>
+              </a>
             ))}
           </div>
-          <div className="mt-2 flex justify-between border-t border-line pt-1.5 text-2xs text-faint">
-            <span>{shortDate(new Date(span.start).toISOString())}</span>
-            <span>today</span>
+          <div className="mt-2 grid grid-cols-[3.5rem_1fr_5.5rem] gap-2 border-t border-line pt-1.5 text-2xs text-faint sm:grid-cols-[3.5rem_6.5rem_4.5rem_1fr_5.5rem]">
+            <span className="hidden sm:block" />
+            <span className="hidden sm:block" />
+            <span className="hidden sm:block" />
+            <span className="col-start-1 flex justify-between sm:col-start-4">
+              <span>{shortDate(new Date(span.start).toISOString())}</span>
+              <span>today</span>
+            </span>
           </div>
         </>
       ) : (

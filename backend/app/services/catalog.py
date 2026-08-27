@@ -19,6 +19,88 @@ def _aware(value: datetime | None) -> datetime | None:
     return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
 
 
+def figure_code(code: str) -> str:
+    """Strip the condition from a product code, leaving the figure.
+
+    FIGURE-153570 and FIGURE-153570-R are the same figure sold new and used,
+    so both reduce to FIGURE-153570.
+    """
+    return code[:-2] if code.endswith("-R") else code
+
+
+def counterpart_code(code: str) -> str:
+    """The other condition's product code for the same figure.
+
+    AmiAmi lists a used copy under the new code with an ``-R`` suffix, so the
+    relationship is purely mechanical and needs no stored link.
+    """
+    return code[:-2] if code.endswith("-R") else code + "-R"
+
+
+def wishlist_available(db: Session, user_id: int, limit: int = 6) -> list[Item]:
+    """Wishlisted figures that can actually be bought right now.
+
+    A wishlist entry is about the figure rather than the listing it was saved
+    from, which matters because the two conditions are separate listings and
+    the used one usually appears long after you saved the new one. Saving the
+    only listing that existed at the time should not mean never being told the
+    figure came back cheaper second-hand.
+
+    Where both conditions are on sale the cheaper one is shown, once.
+    """
+    from ..models import CollectionEntry, CollectionStatus
+
+    saved = list(
+        db.execute(
+            select(Item)
+            .join(CollectionEntry, CollectionEntry.item_id == Item.id)
+            .where(
+                CollectionEntry.user_id == user_id,
+                CollectionEntry.status == CollectionStatus.wishlist,
+            )
+        )
+        .scalars()
+        .all()
+    )
+    if not saved:
+        return []
+
+    # Both codes for every saved figure, then whichever of them is buyable.
+    wanted: dict[str, set[str]] = {}
+    for item in saved:
+        wanted.setdefault(item.provider, set()).update(
+            {item.code, counterpart_code(item.code)}
+        )
+
+    candidates: list[Item] = []
+    for provider, codes in wanted.items():
+        candidates.extend(
+            db.execute(
+                select(Item).where(
+                    Item.provider == provider,
+                    Item.code.in_(codes),
+                    Item.in_stock.is_(True),
+                    Item.order_closed.is_(False),
+                    Item.current_price.is_not(None),
+                )
+            )
+            .scalars()
+            .all()
+        )
+
+    # One row per figure: the new and used listings are the same thing to
+    # someone deciding whether to buy, so show whichever costs less.
+    best: dict[tuple[str, str], Item] = {}
+    for item in candidates:
+        base = counterpart_code(item.code) if item.code.endswith("-R") else item.code
+        key = (item.provider, base)
+        held = best.get(key)
+        if held is None or (item.current_price or 0) < (held.current_price or 0):
+            best[key] = item
+
+    return sorted(best.values(), key=lambda i: i.current_price or 0)[:limit]
+
+
 def get_item(db: Session, provider: str, code: str) -> Item | None:
     return db.execute(
         select(Item).where(Item.provider == provider, Item.code == code)
@@ -69,6 +151,7 @@ def upsert_item(db: Session, normalized: NormalizedItem, commit: bool = True) ->
     if normalized.remarks:
         item.remarks = normalized.remarks
 
+    item.figure_code = figure_code(item.code)
     item.product_url = normalized.url or item.product_url
     item.currency = normalized.currency or item.currency
     if normalized.price is not None:

@@ -495,6 +495,48 @@ function ShelfLifePanel() {
 }
 
 
+/** Instance-wide behaviour, set once for everyone using this install. */
+function BehaviourPanel() {
+  const toast = useToast()
+  const queryClient = useQueryClient()
+
+  const behaviour = useQuery({
+    queryKey: ['admin', 'behaviour'],
+    queryFn: () => api.admin.behaviour(),
+  })
+
+  const save = useMutation({
+    mutationFn: (body: Record<string, boolean>) => api.admin.setBehaviour(body),
+    onSuccess: () => {
+      toast.success('Saved', 'Applies to everyone using this instance.')
+      void queryClient.invalidateQueries({ queryKey: ['admin', 'behaviour'] })
+      void queryClient.invalidateQueries({ queryKey: ['config'] })
+    },
+    onError: (error) => toast.error('Could not save', (error as Error).message),
+  })
+
+  const flags = (behaviour.data?.detail as { refresh_on_open?: boolean } | undefined) ?? {}
+
+  return (
+    <Card className="p-4">
+      <h3 className="flex items-center gap-2 text-sm font-semibold">
+        <Icon name="settings" className="h-4 w-4 text-accent" />
+        Behaviour
+      </h3>
+      <p className="mb-3 mt-0.5 text-xs text-muted">
+        How this instance behaves for everyone using it.
+      </p>
+      <Toggle
+        checked={Boolean(flags.refresh_on_open)}
+        onChange={(refresh_on_open) => save.mutate({ refresh_on_open })}
+        label="Ask the shop for fresh data when an item is opened"
+        hint="Prices and stock are always current when you look, at the cost of one upstream request per item viewed. That comes out of the same budget the crawler and your watches share, which is why it is set here rather than per person."
+      />
+    </Card>
+  )
+}
+
+
 export function CatalogPanel() {
   const toast = useToast()
   const queryClient = useQueryClient()
@@ -607,6 +649,7 @@ export function CatalogPanel() {
         </Card>
       </div>
 
+      <BehaviourPanel />
       <BackupPanel />
       <ShelfLifePanel />
       <ImageCache />

@@ -84,14 +84,29 @@ export function ItemCard({ item, onOpen, onWatch, onWishlist, compact }: ItemCar
   const discount = item.discount_pct
   const preowned = item.condition === 'preowned'
 
+  // A real link rather than a click handler, so the middle button, ctrl-click
+  // and "open in new tab" all work the way they do everywhere else. The plain
+  // left click is still intercepted and routed in-app, which keeps navigation
+  // instant instead of reloading the whole application.
+  const href = item.id ? `/item/${item.id}` : undefined
+
   return (
-    <article
-      className={clsx(
-        'card card-hover group relative flex flex-col overflow-hidden',
-        onOpen && 'cursor-pointer',
+    <article className="card card-hover group relative flex flex-col overflow-hidden">
+      {href && (
+        <a
+          href={href}
+          aria-label={tidyName(item.name)}
+          className="absolute inset-0 z-10 rounded-card focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent"
+          onClick={(event) => {
+            // Let the browser handle anything that means "somewhere else".
+            if (event.defaultPrevented) return
+            if (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return
+            if (event.button !== 0) return
+            event.preventDefault()
+            onOpen?.(item)
+          }}
+        />
       )}
-      onClick={() => onOpen?.(item)}
-    >
       {/* AmiAmi's photos are square. Square shows all of one; portrait crops
           it but fits more figures on a screen. */}
       <div
@@ -119,7 +134,7 @@ export function ItemCard({ item, onOpen, onWatch, onWishlist, compact }: ItemCar
           </div>
         )}
 
-        <div className="absolute left-2 top-2 flex flex-col items-start gap-1">
+        <div className="absolute left-2 top-2 z-20 flex flex-col items-start gap-1">
           {preowned && <Badge tone="accent">Pre-owned</Badge>}
           {discount !== null && discount >= 10 && (
             <Badge tone="positive">-{Math.round(discount)}%</Badge>
@@ -127,7 +142,7 @@ export function ItemCard({ item, onOpen, onWatch, onWishlist, compact }: ItemCar
           <ShelfBadge item={item} />
         </div>
 
-        <div className="absolute right-2 top-2 flex flex-col items-end gap-1">
+        <div className="absolute right-2 top-2 z-20 flex flex-col items-end gap-1">
           <StockBadge item={item} />
           {item.watch_count > 0 && (
             <Badge tone="info">
@@ -139,7 +154,7 @@ export function ItemCard({ item, onOpen, onWatch, onWishlist, compact }: ItemCar
 
         {/* Quick actions slide in on hover; on touch they are always visible. */}
         {(onWatch || onWishlist) && (
-          <div className="absolute inset-x-2 bottom-2 flex gap-1.5 opacity-0 transition-opacity duration-200 group-hover:opacity-100 focus-within:opacity-100 max-md:opacity-100">
+          <div className="absolute inset-x-2 bottom-2 z-20 flex gap-1.5 opacity-0 transition-opacity duration-200 group-hover:opacity-100 focus-within:opacity-100 max-md:opacity-100">
             {onWatch && (
               <button
                 onClick={(event) => {
@@ -194,7 +209,7 @@ export function ItemCard({ item, onOpen, onWatch, onWishlist, compact }: ItemCar
         )}
 
         <div className="mt-auto">
-          <div className="flex items-baseline gap-2">
+          <div className="relative z-20 flex w-fit items-baseline gap-2">
             <span className="text-base font-semibold tabular-nums">
               {money(item.price, item.currency)}
             </span>

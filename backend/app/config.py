@@ -82,7 +82,12 @@ class Settings(BaseSettings):
     shelf_hot_interval_hours: float = 2.0
     shelf_warm_interval_hours: float = 12.0
     shelf_cold_interval_hours: float = 72.0
-    mfc_batch_size: int = 8
+    #: 0 means "work it out from the rate limit", which is almost always what
+    #: you want: a fixed batch silently caps throughput far below the budget
+    #: you configured. Eight items every five minutes allowed 96 an hour while
+    #: MFC_REQUESTS_PER_MINUTE was permitting roughly three times that, and the
+    #: backlog looked stuck for no visible reason. Set a number to override.
+    mfc_batch_size: int = 0
     mfc_run_interval_minutes: int = 5
     mfc_session_cookie: str = ""
     """Optional PHPSESSID from a signed-in MyFigureCollection browser session.
@@ -142,6 +147,20 @@ class Settings(BaseSettings):
     # ---- Retention --------------------------------------------------------
     price_history_retention_days: int = 1095
     alert_retention_days: int = 365
+
+    @property
+    def mfc_effective_batch_size(self) -> int:
+        """How many items one enrichment pass should attempt.
+
+        Linking an item costs about two requests: a barcode lookup, then the
+        entry page it resolves to. Sizing the batch from the rate limit and the
+        interval keeps the two settings in step, so raising the request budget
+        actually speeds the backlog up instead of doing nothing at all.
+        """
+        if self.mfc_batch_size > 0:
+            return self.mfc_batch_size
+        per_run = self.mfc_requests_per_minute * max(1, self.mfc_run_interval_minutes)
+        return max(1, int(per_run / 2.0))
 
     @field_validator("data_dir", mode="before")
     @classmethod

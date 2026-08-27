@@ -163,8 +163,40 @@ def _apply_sort(stmt: Select, sort: str) -> Select:
         return stmt.order_by(Item.dwell_days.desc().nulls_last(), Item.id.desc())
     if sort == "release":
         return stmt.order_by(Item.release_date_parsed.desc().nulls_last(), Item.id.desc())
+    if sort == "changed":
+        # Last time the shop moved something about this listing, rather than
+        # when it first reached us. This is what "recently updated" means on
+        # the shop's own site, and the closest thing our data has to it.
+        return stmt.order_by(Item.last_seen_at.desc(), Item.id.desc())
     # "newest" means newest to us, not the shop's release order.
     return stmt.order_by(Item.first_seen_at.desc(), Item.id.desc())
+
+
+def _collapse_conditions(stmt: Select) -> Select:
+    """One row per figure instead of one per listing.
+
+    The same figure is sold new and pre-owned under two codes, so a search
+    otherwise returns it twice. Which of the pair survives is the one someone
+    would actually click: in stock beats out of stock, and then cheaper wins.
+    """
+    ranked = (
+        stmt.add_columns(
+            func.row_number()
+            .over(
+                partition_by=Item.figure_code,
+                order_by=[
+                    Item.in_stock.desc(),
+                    Item.order_closed.asc(),
+                    Item.current_price.asc().nulls_last(),
+                    Item.id.desc(),
+                ],
+            )
+            .label("rank")
+        )
+        .order_by(None)
+        .subquery()
+    )
+    return select(Item).join(ranked, ranked.c.id == Item.id).where(ranked.c.rank == 1)
 
 
 def search(db: Session, req) -> LocalResult:
@@ -174,6 +206,9 @@ def search(db: Session, req) -> LocalResult:
     tagged = _apply_tags(base, db, req)
     if tagged is None:
         return LocalResult(items=[], total=0, page=req.page, per_page=req.per_page, pages=0)
+
+    if getattr(req, "combine_conditions", False):
+        tagged = _collapse_conditions(tagged)
 
     # Count through a subquery so grouping from the tag join does not turn the
     # total into one row per group.

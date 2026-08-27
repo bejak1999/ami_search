@@ -195,10 +195,15 @@ class CostProfile(Base):
     shipping_service: Mapped[str] = mapped_column(String(32), default="auto_air")
     shipping_flat: Mapped[float] = mapped_column(Float, default=25.0)
     shipping_table: Mapped[list] = mapped_column(JSON, default=list)
-    default_weight_grams: Mapped[int] = mapped_column(Integer, default=900)
+    default_weight_grams: Mapped[int] = mapped_column(Integer, default=800)
     # Box, padding and packing slip, added on top of every shipment because
     # the carrier bills the parcel, not the figure inside it.
-    packaging_grams: Mapped[int] = mapped_column(Integer, default=400)
+    packaging_grams: Mapped[int] = mapped_column(Integer, default=250)
+    # Multiplies every estimated goods weight. Real parcels for figures of much
+    # the same size have come in anywhere between 1.0 and 1.5 kg, so no single
+    # table gets everyone right; this is the one dial that shifts the whole
+    # estimate without editing the table row by row.
+    weight_scale: Mapped[float] = mapped_column(Float, default=1.0)
     category_weights: Mapped[dict] = mapped_column(JSON, default=dict)
     consolidate_shipping: Mapped[bool] = mapped_column(Boolean, default=False)
     # Payment provider FX spread, added on top of the mid-market rate.
@@ -243,6 +248,10 @@ class Item(Base):
     provider: Mapped[str] = mapped_column(String(32), index=True, default="amiami")
     # Shop product code, for example FIGURE-153570-R
     code: Mapped[str] = mapped_column(String(64), index=True)
+    #: The same figure sold new and pre-owned is two listings under two codes
+    #: that differ only by an -R suffix. This is the shared half, so the two
+    #: can be grouped without a join or a stored relationship.
+    figure_code: Mapped[str | None] = mapped_column(String(64), index=True)
 
     name: Mapped[str] = mapped_column(Text)
     name_jp: Mapped[str | None] = mapped_column(Text)

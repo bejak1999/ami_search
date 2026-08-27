@@ -123,13 +123,9 @@ def item_from_normalized(
     )
 
 
-def counterpart_code(code: str) -> str:
-    """The other condition's product code for the same figure.
-
-    AmiAmi lists a pre-owned copy under the new code with an ``-R`` suffix, so
-    the relationship is purely mechanical.
-    """
-    return code[:-2] if code.endswith("-R") else code + "-R"
+# One definition, in the service layer, because the wishlist and the item
+# serializer both depend on the two codes meaning the same figure.
+from ..services.catalog import counterpart_code  # noqa: E402
 
 
 def item_out(
@@ -232,13 +228,25 @@ def item_out(
             or 0
         )
         payload.tracked = payload.watch_count > 0
+        # A wishlist entry is about the figure, not about the one listing you
+        # happened to click. The same figure is sold under two codes - the
+        # pre-owned one carries an -R suffix - so having saved either of them
+        # counts as having saved the figure, and the heart has to show that
+        # from both sides.
         entry = db.execute(
-            select(CollectionEntry).where(
-                CollectionEntry.user_id == user.id, CollectionEntry.item_id == item.id
+            select(CollectionEntry)
+            .join(Item, Item.id == CollectionEntry.item_id)
+            .where(
+                CollectionEntry.user_id == user.id,
+                Item.provider == item.provider,
+                Item.code.in_([item.code, counterpart_code(item.code)]),
             )
-        ).scalar_one_or_none()
+            # The listing actually clicked wins when both are saved.
+            .order_by((Item.code == item.code).desc())
+        ).scalars().first()
         payload.in_collection = entry.status.value if entry else None
         payload.collection_entry_id = entry.id if entry else None
+        payload.saved_via_counterpart = bool(entry) and entry.item_id != item.id
     return payload
 
 

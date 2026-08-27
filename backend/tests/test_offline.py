@@ -143,20 +143,61 @@ def test_weight_estimation() -> None:
     keychain = Item(name="Acrylic Keychain Miku", provider="amiami", code="C")
     unknown = Item(name="Mystery Object", provider="amiami", code="D")
 
-    check("nendoroid is light", landed_cost.estimate_weight(nendoroid, profile) == 400)
-    check("1/7 scale is heavy", landed_cost.estimate_weight(scale_figure, profile) == 1200)
-    check("keychain is lightest", landed_cost.estimate_weight(keychain, profile) == 120)
-    check("unknown falls back to the default", landed_cost.estimate_weight(unknown, profile) == 900)
+    check("nendoroid is light", landed_cost.estimate_weight(nendoroid, profile) == 250)
+    check("1/7 scale is heavy", landed_cost.estimate_weight(scale_figure, profile) == 850)
+    check("keychain is lightest", landed_cost.estimate_weight(keychain, profile) == 90)
+    check("unknown falls back to the default", landed_cost.estimate_weight(unknown, profile) == 800)
 
     # An explicit height in the spec sheet should beat any keyword guess.
     sized = Item(name="Something", provider="amiami", code="E", spec="Scale: 1/7\nSize: H260mm")
-    check("spec height wins", approx(landed_cost.estimate_weight(sized, profile), 1200, 40))
+    check("spec height wins", approx(landed_cost.estimate_weight(sized, profile), 900, 80))
 
     tall = Item(name="Something", provider="amiami", code="F", spec="Size: H400mm")
     check(
         "a taller figure weighs more",
         landed_cost.estimate_weight(tall, profile) > landed_cost.estimate_weight(sized, profile),
     )
+
+
+def test_weights_match_real_parcels() -> None:
+    print("\n== Weights agree with parcels actually paid for ==")
+    from app.models import Item
+    from app.services import landed_cost, shipping_rates
+
+    # Three shipments actually paid for, decoded back through AmiAmi's own
+    # small-packet chart for zone three. All were scale figures between 1/6
+    # and 1/7, which is the size the estimate is most often asked about, and
+    # they bracket the answer at 1000-1500 g including the shop's packaging.
+    #   JPY 2310 unregistered  -> 1001-1100 g
+    #   JPY 3130 registered    -> 1201-1300 g
+    #   JPY 3490 registered    -> 1401-1500 g
+    OBSERVED_LOW, OBSERVED_HIGH = 1000, 1500
+
+    profile = landed_cost.default_profile(user_id=1)
+    for name, spec in (
+        ("Something 1/7 Complete Figure", None),
+        ("Something 1/6 Complete Figure", None),
+        ("Scale Figure", "Size: Approx. H25cm"),
+        ("Scale Figure", "Size: Approx. H28cm"),
+    ):
+        item = Item(provider="amiami", code="X", name=name, spec=spec)
+        weight = landed_cost.shipment_weight(item, profile)
+        check(
+            f"{name if spec is None else spec} lands in the observed range",
+            OBSERVED_LOW <= weight <= OBSERVED_HIGH,
+            f"{weight} g",
+        )
+
+    # And the postage that follows from it is what actually got paid.
+    seventh = Item(provider="amiami", code="X", name="Something 1/7 Complete Figure")
+    quoted = shipping_rates.lookup(
+        "zone3", "small_packet", landed_cost.shipment_weight(seventh, profile)
+    )
+    check("a 1/7 figure quotes the fare that was paid", quoted == 2310, quoted)
+
+    # The old table put the same figure two brackets higher, which is the
+    # regression this test exists to catch.
+    check("and not the old over-estimate", quoted < 3570, quoted)
 
 
 def test_shipping_table() -> None:
@@ -268,21 +309,28 @@ def test_packaging_weight() -> None:
     profile = landed_cost.default_profile(user_id=1)
     figure = Item(name="Honolulu 1/7 Complete Figure", scale="1/7", category="Figure")
 
-    check("the default allowance is 400 g", profile.packaging_grams == 400)
-    check("goods weigh what they weigh", landed_cost.estimate_weight(figure, profile) == 1200)
-    check("the parcel weighs more", landed_cost.shipment_weight(figure, profile) == 1600)
+    check("the default allowance is 250 g", profile.packaging_grams == 250)
+    check("goods weigh what they weigh", landed_cost.estimate_weight(figure, profile) == 850)
+    check("the parcel weighs more", landed_cost.shipment_weight(figure, profile) == 1100)
     check(
         "packaging is counted once, not per unit",
-        landed_cost.shipment_weight(figure, profile, quantity=3) == 1200 * 3 + 400,
+        landed_cost.shipment_weight(figure, profile, quantity=3) == 850 * 3 + 250,
     )
 
     profile.packaging_grams = 0
-    check("it can be switched off", landed_cost.shipment_weight(figure, profile) == 1200)
+    check("it can be switched off", landed_cost.shipment_weight(figure, profile) == 850)
     profile.packaging_grams = None
-    check("a null column still packs the box", landed_cost.shipment_weight(figure, profile) == 1600)
+    check("a null column still packs the box", landed_cost.shipment_weight(figure, profile) == 1100)
+    profile.packaging_grams = 250
+
+    profile.weight_scale = 1.4
+    check(
+        "the dial moves the whole estimate",
+        landed_cost.shipment_weight(figure, profile) == int(850 * 1.4) + 250,
+    )
+    profile.weight_scale = 1.0
 
     # The point of the allowance: it can push a parcel out of a bracket.
-    profile.packaging_grams = 400
     light = Item(name="Nendoroid Something", category="Figure")
     from app.services import shipping_rates
 
@@ -912,6 +960,125 @@ def test_price_survives_a_quiet_response() -> None:
 
     db.delete(item)
     db.commit()
+    db.close()
+
+
+def test_wishlist_covers_both_conditions() -> None:
+    print("\n== A wishlist entry is about the figure ==")
+    from app.db import SessionLocal, init_db
+    from app.models import (
+        CollectionEntry,
+        CollectionStatus,
+        Condition,
+        Item,
+        User,
+        UserRole,
+    )
+    from app.services import catalog
+
+    init_db()
+    db = SessionLocal()
+    user = User(username="wish", email="w@example.com", password_hash="x", role=UserRole.user)
+    db.add(user)
+    db.commit()
+
+    # The figure exists twice: new but sold out, and used but on the shelf.
+    # Wishlisting the only listing that existed when you first saw it should
+    # not mean never hearing that it came back second-hand.
+    new = Item(
+        provider="amiami", code="WISH-1", name="Miku", condition=Condition.new,
+        current_price=12800.0, in_stock=False, order_closed=True,
+    )
+    used = Item(
+        provider="amiami", code="WISH-1-R", name="Miku", condition=Condition.preowned,
+        current_price=8400.0, in_stock=True,
+    )
+    db.add_all([new, used])
+    db.commit()
+    db.add(
+        CollectionEntry(user_id=user.id, item_id=new.id, status=CollectionStatus.wishlist)
+    )
+    db.commit()
+
+    available = catalog.wishlist_available(db, user.id)
+    check("saving the new listing surfaces the used one", len(available) == 1, available)
+    check("and it is the one you can actually buy", available[0].code == "WISH-1-R")
+
+    # Both on sale: one row, the cheaper of the pair.
+    new.in_stock = True
+    new.order_closed = False
+    db.commit()
+    available = catalog.wishlist_available(db, user.id)
+    check("with both on sale the figure appears once", len(available) == 1, available)
+    check("as the cheaper listing", available[0].code == "WISH-1-R")
+
+    # Nothing buyable means nothing to show, rather than a stale row.
+    new.in_stock = False
+    used.in_stock = False
+    db.commit()
+    check("nothing on sale shows nothing", catalog.wishlist_available(db, user.id) == [])
+
+    check("codes reduce to one figure", catalog.figure_code("WISH-1-R") == "WISH-1")
+    check("and a new code is already the figure", catalog.figure_code("WISH-1") == "WISH-1")
+    check("the counterpart flips both ways", catalog.counterpart_code("WISH-1") == "WISH-1-R")
+    check("and back", catalog.counterpart_code("WISH-1-R") == "WISH-1")
+
+    db.query(CollectionEntry).filter(CollectionEntry.user_id == user.id).delete()
+    db.delete(user)
+    db.commit()
+    _purge(db, "WISH-1", "WISH-1-R")
+    db.close()
+
+
+def test_search_can_fold_conditions() -> None:
+    print("\n== Search can show one row per figure ==")
+    from app.db import SessionLocal, init_db
+    from app.models import Condition, Item
+    from app.schemas import LocalSearchRequest
+    from app.services import localsearch
+
+    init_db()
+    db = SessionLocal()
+    rows = [
+        ("FOLD-1", 12000.0, True, Condition.new),
+        ("FOLD-1-R", 8400.0, True, Condition.preowned),
+        ("FOLD-2", 5000.0, False, Condition.new),
+        ("FOLD-2-R", 4200.0, True, Condition.preowned),
+        ("FOLD-3", 9000.0, True, Condition.new),
+    ]
+    for code, price, stock, condition in rows:
+        db.add(
+            Item(
+                provider="amiami",
+                code=code,
+                figure_code=code[:-2] if code.endswith("-R") else code,
+                name="Folding test " + code,
+                current_price=price,
+                in_stock=stock,
+                condition=condition,
+            )
+        )
+    db.commit()
+
+    def codes(**kwargs):
+        result = localsearch.search(db, LocalSearchRequest(q="Folding test", **kwargs))
+        return [item.code for item in result.items], result.total
+
+    listed, total = codes()
+    check("without folding every listing appears", total == 5, (listed, total))
+
+    folded, total = codes(combine_conditions=True)
+    check("folded, one row per figure", total == 3, (folded, total))
+    check("the used listing wins when it is cheaper", "FOLD-1-R" in folded)
+    check("and the new one is dropped", "FOLD-1" not in folded, folded)
+    check(
+        "an out-of-stock listing loses to its in-stock twin",
+        "FOLD-2-R" in folded and "FOLD-2" not in folded,
+        folded,
+    )
+    check("a figure with only one listing still shows", "FOLD-3" in folded)
+
+    _purge(db, *[code for code, *_ in rows])
     db.close()
 
 
@@ -2037,6 +2204,7 @@ def main() -> int:
     test_release_dates()
     test_landed_cost()
     test_weight_estimation()
+    test_weights_match_real_parcels()
     test_shipping_table()
     test_amiami_shipping_rates()
     test_packaging_weight()
@@ -2047,6 +2215,8 @@ def main() -> int:
     test_shelf_wholesale_disappearance()
     test_shelf_intake_estimate()
     test_shelf_tiers()
+    test_wishlist_covers_both_conditions()
+    test_search_can_fold_conditions()
     test_history_pruning_keeps_the_irreplaceable()
     test_deleting_a_copy_keeps_its_prices()
     test_image_prune_protects_the_unfetchable()

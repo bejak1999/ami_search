@@ -102,6 +102,8 @@ export interface Item {
   mfc_matched_by: string | null
   mfc_confidence: number | null
   mfc_restricted: boolean
+  /** The figure is on a list under its other condition, not this listing. */
+  saved_via_counterpart: boolean
   dwell_days: number | null
   dwell_basis: DwellBasis | null
   dwell_samples: number
@@ -289,6 +291,7 @@ export interface CostProfile {
   shipping_table: { max_grams: number; cost: number }[]
   default_weight_grams: number
   packaging_grams: number
+  weight_scale: number
   category_weights: Record<string, number>
   consolidate_shipping: boolean
   fx_markup: number
@@ -333,6 +336,8 @@ export interface PublicConfig {
   default_currency: string
   min_poll_interval_seconds: number
   version: string
+  /** Opening an item asks the shop for fresh data. Instance-wide. */
+  refresh_on_open: boolean
 }
 
 export interface SearchResponse {

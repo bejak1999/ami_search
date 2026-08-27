@@ -29,27 +29,36 @@ from sqlalchemy.orm import Session
 from ..models import CostProfile, Item
 from . import fx, shipping_rates
 
-# Rough shipping weights, in grams, keyed by a token found in the product
-# name. Deliberately generous: underestimating shipping is the failure mode
-# that costs the user money.
+# Shipping weight of the goods in grams, keyed by a token found in the product
+# name. These are calibrated against real parcels rather than guessed: three
+# recent shipments to Germany priced at AmiAmi's published small-packet rates
+# put a boxed figure between 1/6 and 1/7 scale at 1000, 1300 and 1500 g all
+# in. Subtracting the packaging allowance leaves roughly 850-1050 g of goods,
+# which is where the scale entries below sit. The previous numbers were half
+# again too heavy and quoted postage two brackets above what actually gets
+# paid.
 DEFAULT_CATEGORY_WEIGHTS: dict[str, int] = {
-    "nendoroid": 400,
-    "figma": 450,
-    "trading figure": 250,
-    "acrylic": 150,
-    "keychain": 120,
-    "plush": 500,
-    "1/8": 900,
-    "1/7": 1200,
-    "1/6": 1800,
-    "1/4": 3500,
-    "statue": 3000,
-    "plastic model": 1300,
-    "model kit": 1300,
-    "figure": 900,
+    "nendoroid": 250,
+    "figma": 350,
+    "trading figure": 150,
+    "acrylic": 120,
+    "keychain": 90,
+    "plush": 400,
+    "1/8": 600,
+    "1/7": 850,
+    "1/6": 1050,
+    "1/4": 2200,
+    "statue": 2500,
+    "plastic model": 900,
+    "model kit": 900,
+    "figure": 850,
 }
 
-_SIZE_RE = re.compile(r"H\s*(\d{2,4})\s*mm", re.IGNORECASE)
+#: AmiAmi writes the height either way round depending on the product:
+#: "Approx. H28cm" on scale figures, "Approx. H100mm" on smaller ones. Only
+#: matching millimetres meant the better, size-based estimate was silently
+#: skipped on exactly the items where it matters most.
+_SIZE_RE = re.compile(r"H\s*(\d{1,4}(?:[.,]\d+)?)\s*(mm|cm)", re.IGNORECASE)
 
 #: Words that describe almost any product and must lose to anything specific.
 #: Without this, "Honolulu 1/7 Complete Figure" would match "figure" (900 g)
@@ -109,8 +118,9 @@ def default_profile(user_id: int) -> CostProfile:
             {"max_grams": 5000, "cost": 48.0},
             {"max_grams": 10000, "cost": 78.0},
         ],
-        default_weight_grams=900,
-        packaging_grams=400,
+        default_weight_grams=800,
+        packaging_grams=250,
+        weight_scale=1.0,
         category_weights=dict(DEFAULT_CATEGORY_WEIGHTS),
         consolidate_shipping=False,
         fx_markup=0.015,
@@ -128,11 +138,16 @@ def estimate_weight(item: Item | None, profile: CostProfile) -> int:
     spec = item.spec or ""
     size_match = _SIZE_RE.search(spec)
     if size_match:
-        height_mm = int(size_match.group(1))
-        # Boxed weight scales roughly with the cube of height. Anchored on a
-        # 260 mm 1/7 scale figure shipping at about 1.2 kg.
-        estimated = int(1200 * (height_mm / 260.0) ** 2.4)
-        return max(150, min(estimated, 15000))
+        height_mm = float(size_match.group(1).replace(",", "."))
+        if size_match.group(2).lower() == "cm":
+            height_mm *= 10.0
+        # A packed figure has a fixed part - the box, the padding, the blister
+        # - and a part that grows with the size of what is inside it, so a
+        # pure power law under-reads badly at the small end. Calibrated so a
+        # 270 mm figure lands near 1 kg of goods, which is what three real
+        # parcels to Germany worked out at once their packaging is taken off.
+        estimated = int(180 + 780 * (height_mm / 270.0) ** 2.4)
+        return max(80, min(estimated, 15000))
 
     haystack = " ".join(filter(None, [item.name, item.scale, item.category])).lower()
     for key in sorted(weights, key=_specificity):
@@ -148,10 +163,11 @@ def shipment_weight(item: Item | None, profile: CostProfile, quantity: int = 1) 
     charts are read off the parcel on the scale rather than the figure inside
     it. Packaging is charged once per shipment however many units are in it.
     """
-    goods = estimate_weight(item, profile) * max(1, quantity)
+    scale = float(profile.weight_scale or 1.0)
+    goods = int(estimate_weight(item, profile) * scale) * max(1, quantity)
     packaging = profile.packaging_grams
     if packaging is None:
-        packaging = 400
+        packaging = 250
     return goods + max(0, int(packaging))
 
 

@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { useNavigate, useParams } from 'react-router-dom'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { api } from '@/api/client'
@@ -7,10 +7,12 @@ import { LookupMenu } from '@/components/LookupMenu'
 import { CollectionButton } from '@/components/CollectionButton'
 import { PriceChart } from '@/components/PriceChart'
 import { ShelfLifePanel } from '@/components/ShelfLife'
+import { shopUrl } from '@/lib/shop'
 import { WatchEditor } from '@/components/WatchEditor'
 import { LandedTooltip } from '@/components/ItemCard'
 import { Badge, Card, SegmentedControl, Skeleton, Spinner, Tooltip } from '@/components/ui'
 import { dateTime, grams, money, percent, relativeTime, tidyName } from '@/lib/format'
+import { useAuth } from '@/lib/auth'
 import { useToast } from '@/lib/toast'
 import clsx from 'clsx'
 
@@ -27,6 +29,7 @@ export function ItemDetailPage() {
   const navigate = useNavigate()
   const toast = useToast()
   const queryClient = useQueryClient()
+  const { config } = useAuth()
   const [range, setRange] = useState('365')
   const [activeImage, setActiveImage] = useState(0)
   const [watchOpen, setWatchOpen] = useState(false)
@@ -88,6 +91,19 @@ export function ItemDetailPage() {
     },
     onError: (error) => toast.error('Refresh failed', (error as Error).message),
   })
+
+  // When the instance is set to do so, opening an item asks the shop for its
+  // current state instead of showing whatever the last sweep happened to see.
+  // Once per item per visit: the effect keys on the id, and the mutation being
+  // in flight guards the double invocation React does in development.
+  const refreshOnOpen = Boolean(config?.refresh_on_open)
+  const refreshedFor = useRef<number | null>(null)
+  useEffect(() => {
+    if (!refreshOnOpen || !Number.isFinite(id)) return
+    if (refreshedFor.current === id) return
+    refreshedFor.current = id
+    refresh.mutate()
+  }, [id, refreshOnOpen])
 
   const enrich = useMutation({
     mutationFn: () => api.discover.enrichItem(id, true),
@@ -307,23 +323,30 @@ export function ItemDetailPage() {
               </p>
               <ul className="divide-y divide-line">
                 {item.variants.map((variant) => (
-                  <li
-                    key={variant.code}
-                    className="flex flex-wrap items-center gap-x-3 gap-y-1 py-2 text-sm"
-                  >
-                    <span className="font-semibold tabular-nums">
-                      {money(variant.price, item.currency)}
-                    </span>
-                    {variant.item_grade && (
-                      <Badge tone={variant.item_grade === 'S' || variant.item_grade === 'A' ? 'positive' : 'neutral'}>
-                        Figure {variant.item_grade}
-                      </Badge>
-                    )}
-                    {variant.box_grade && <Badge>Box {variant.box_grade}</Badge>}
-                    {variant.price === item.price && <Badge tone="accent">Cheapest</Badge>}
-                    <span className="ml-auto font-mono text-[11px] text-faint">
-                      {variant.code}
-                    </span>
+                  <li key={variant.code}>
+                    {/* Each copy is bought separately on AmiAmi, so each row
+                        goes straight to that copy rather than to the product. */}
+                    <a
+                      href={shopUrl(variant.code, item.provider)}
+                      target="_blank"
+                      rel="noreferrer"
+                      className="-mx-2 flex flex-wrap items-center gap-x-3 gap-y-1 rounded-control px-2 py-2 text-sm hover:bg-raised focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent"
+                    >
+                      <span className="font-semibold tabular-nums">
+                        {money(variant.price, item.currency)}
+                      </span>
+                      {variant.item_grade && (
+                        <Badge tone={variant.item_grade === 'S' || variant.item_grade === 'A' ? 'positive' : 'neutral'}>
+                          Figure {variant.item_grade}
+                        </Badge>
+                      )}
+                      {variant.box_grade && <Badge>Box {variant.box_grade}</Badge>}
+                      {variant.price === item.price && <Badge tone="accent">Cheapest</Badge>}
+                      <span className="ml-auto flex items-center gap-1.5 font-mono text-[11px] text-faint">
+                        {variant.code}
+                        <Icon name="external" className="h-3 w-3" />
+                      </span>
+                    </a>
                   </li>
                 ))}
               </ul>

@@ -38,7 +38,7 @@ It also answers the question the shop price does not: **what will this actually 
 ### 💶 The price you really pay
 - Live **JPY → EUR** conversion from two keyless sources, with the last good rate cached
 - **Shipping from AmiAmi's own published rate charts** — all five zones, small packet through EMS, converted from yen at the live rate
-- **Weight estimated** from the product's spec sheet or its type, plus a packaging allowance you can set
+- **Weight estimated** from the product's spec sheet or its type, calibrated against parcels actually paid for, plus a packaging allowance and a dial for when your postage keeps coming out wrong
 - **Customs duty and import VAT** modelled properly, including the EU duty-free threshold
 - Every landed figure comes with a **full breakdown** on hover — nothing is a magic number
 - Per watch: compare against the **shop price** or the **delivered total**

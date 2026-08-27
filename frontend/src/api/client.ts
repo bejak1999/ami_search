@@ -263,6 +263,12 @@ export const api = {
     generateVapid: () => post<MessageResponse>('/admin/vapid/generate'),
     catalog: () => get<MessageResponse>('/admin/catalog'),
     shelfLife: () => get<MessageResponse>('/admin/shelf-life'),
+    behaviour: () => get<MessageResponse>('/admin/behaviour'),
+    setBehaviour: (body: Record<string, boolean>) =>
+      request<MessageResponse>('/admin/behaviour', {
+        method: 'PUT',
+        body: JSON.stringify(body),
+      }),
     runShelfSampler: (seconds = 30) =>
       post<MessageResponse>(`/admin/shelf-life/run${qs({ seconds })}`),
     downloadBackup: (includeImages: boolean, includeSecrets: boolean) =>

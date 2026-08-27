@@ -64,7 +64,13 @@ export function CollectionButton({ item, compact }: { item: Item; compact?: bool
           onClick={() => setStatus.mutate(current ? null : 'wishlist')}
           disabled={setStatus.isPending}
           aria-pressed={Boolean(current)}
-          title={current ? `Remove from your collection (${current})` : 'Add to your wishlist'}
+          title={
+            item.saved_via_counterpart
+              ? `Saved as the ${item.condition === 'preowned' ? 'new' : 'pre-owned'} listing (${current}). A wishlist entry covers the figure, not one listing.`
+              : current
+                ? `Remove from your collection (${current})`
+                : 'Add to your wishlist'
+          }
           className={clsx(
             'btn-ghost rounded-r-none border-r-0',
             compact ? 'px-2.5 py-1.5 text-xs' : '',

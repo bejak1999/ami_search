@@ -311,7 +311,7 @@ class PollingEngine:
     def run_enrichment(self) -> None:
         try:
             with session_scope() as db:
-                outcome = enrich.run_batch(db, limit=settings.mfc_batch_size)
+                outcome = enrich.run_batch(db, limit=settings.mfc_effective_batch_size)
             self.last_enrichment = outcome
         except Exception:  # noqa: BLE001
             log.exception("MFC enrichment batch failed")

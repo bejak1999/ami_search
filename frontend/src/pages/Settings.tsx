@@ -402,6 +402,26 @@ function CostTab() {
           </Field>
         </div>
 
+        <Field
+          label="Weight estimate"
+          hint="Real parcels for figures of much the same size arrive anywhere between 1.0 and 1.5 kg, so no table gets everyone right. Nudge the whole estimate if your postage keeps coming out wrong."
+        >
+          <div className="flex items-center gap-3">
+            <input
+              type="range"
+              min={0.5}
+              max={2}
+              step={0.05}
+              value={current.weight_scale}
+              onChange={(e) => set({ weight_scale: Number(e.target.value) })}
+              className="flex-1 accent-accent"
+            />
+            <span className="w-16 text-right font-mono text-sm tabular-nums">
+              {current.weight_scale.toFixed(2)}&times;
+            </span>
+          </div>
+        </Field>
+
         <Toggle
           checked={current.consolidate_shipping}
           onChange={(consolidate_shipping) => set({ consolidate_shipping })}

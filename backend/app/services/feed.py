@@ -23,6 +23,7 @@ from ..models import (
     Condition,
     Item,
     ItemTag,
+    Tag,
     User,
     Watch,
     WatchSeenItem,
@@ -81,7 +82,14 @@ def _taste(db: Session, user: User) -> dict[str, list]:
     )
 
     if not item_ids:
-        return {"item_ids": [], "series": [], "characters": [], "makers": [], "tag_ids": []}
+        return {
+            "item_ids": [],
+            "series": [],
+            "characters": [],
+            "makers": [],
+            "tag_ids": [],
+            "tag_slugs": [],
+        }
 
     rows = db.execute(select(Item).where(Item.id.in_(item_ids))).scalars().all()
     series = {r.series for r in rows if r.series}
@@ -100,12 +108,23 @@ def _taste(db: Session, user: User) -> dict[str, list]:
         .all()
     )
 
+    # The slugs as well as the ids: search filters by slug, so a rail that
+    # wants to hand its own definition over to the search page needs both.
+    tag_slugs = (
+        list(
+            db.execute(select(Tag.slug).where(Tag.id.in_(tag_ids))).scalars().all()
+        )
+        if tag_ids
+        else []
+    )
+
     return {
         "item_ids": list(item_ids),
         "series": sorted(series),
         "characters": sorted(characters),
         "makers": sorted(makers),
         "tag_ids": tag_ids,
+        "tag_slugs": tag_slugs,
     }
 
 
@@ -193,6 +212,10 @@ def build(db: Session, user: User, provider: str | None = None) -> list[Rail]:
                     subtitle="Sharing the most MyFigureCollection tags with your list",
                     icon="tag",
                     items=items,
+                    explore={
+                        "tag": taste["tag_slugs"][:6],
+                        "tagmode": "any",
+                    },
                 )
             )
 

@@ -21,7 +21,7 @@ from ..models import (
     WatchSeenItem,
 )
 from ..schemas import DashboardStats
-from ..services import fx
+from ..services import catalog, fx
 from .serializers import alert_out, item_out, register_images
 
 router = APIRouter(prefix="/dashboard", tags=["dashboard"])
@@ -91,18 +91,10 @@ def dashboard(
         converted = fx.convert(db, entry.item.current_price, entry.item.currency, display)
         owned_value += (converted or 0.0) * entry.quantity
 
-    cheapest_rows = db.execute(
-        select(Item)
-        .join(CollectionEntry, CollectionEntry.item_id == Item.id)
-        .where(
-            CollectionEntry.user_id == user.id,
-            CollectionEntry.status == CollectionStatus.wishlist,
-            Item.in_stock.is_(True),
-        )
-        .order_by(Item.current_price.asc().nulls_last())
-        .limit(6)
-    ).scalars()
-    cheapest = list(cheapest_rows)
+    # Saved figures that are buyable in either condition. Matching only the
+    # listing that was saved meant a figure you wishlisted as new never showed
+    # up here when it came back second-hand, which is most of the time.
+    cheapest = catalog.wishlist_available(db, user.id, limit=6)
     register_images(db, cheapest)
 
     recent = db.execute(

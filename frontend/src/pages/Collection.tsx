@@ -9,8 +9,7 @@ import { money, relativeTime, tidyName } from '@/lib/format'
 import { useToast } from '@/lib/toast'
 import clsx from 'clsx'
 
-const STATUSES: { value: CollectionStatus | 'all'; label: string }[] = [
-  { value: 'all', label: 'Everything' },
+const STATUSES: { value: CollectionStatus; label: string }[] = [
   { value: 'wishlist', label: 'Wishlist' },
   { value: 'ordered', label: 'Ordered' },
   { value: 'owned', label: 'Owned' },
@@ -23,14 +22,16 @@ export function CollectionPage() {
   const navigate = useNavigate()
   const toast = useToast()
   const queryClient = useQueryClient()
-  const [status, setStatus] = useState<CollectionStatus | 'all'>('all')
+  // Opens on the wishlist: what you are still hunting is the question worth
+  // asking most often, and what you already own does not change day to day.
+  const [status, setStatus] = useState<CollectionStatus>('wishlist')
   const [adding, setAdding] = useState(false)
   const [addInput, setAddInput] = useState('')
   const [addStatus, setAddStatus] = useState<CollectionStatus>('owned')
 
   const entries = useQuery({
     queryKey: ['collection', status],
-    queryFn: () => api.collection.list(status === 'all' ? {} : { status }),
+    queryFn: () => api.collection.list({ status }),
   })
   const summary = useQuery({ queryKey: ['collection', 'summary'], queryFn: api.collection.summary })
 
@@ -200,7 +201,7 @@ export function CollectionPage() {
                   }
                   className="field py-1 text-xs"
                 >
-                  {STATUSES.filter((s) => s.value !== 'all').map((s) => (
+                  {STATUSES.map((s) => (
                     <option key={s.value} value={s.value}>
                       {s.label}
                     </option>
@@ -285,10 +286,7 @@ export function CollectionPage() {
             <SegmentedControl
               value={addStatus}
               onChange={setAddStatus}
-              options={STATUSES.filter((s) => s.value !== 'all').map((s) => ({
-                value: s.value as CollectionStatus,
-                label: s.label,
-              }))}
+              options={STATUSES}
             />
           </Field>
         </div>

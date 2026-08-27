@@ -97,6 +97,7 @@ class CostProfileOut(ORMModel):
     shipping_table: list[ShippingBracket] = []
     default_weight_grams: int
     packaging_grams: int
+    weight_scale: float
     category_weights: dict = {}
     consolidate_shipping: bool
     fx_markup: float
@@ -129,6 +130,8 @@ class CostProfileUpdate(BaseModel):
     # 10 kg of bubble wrap would be absurd, but the cap keeps a typo from
     # silently pushing every quote off the end of the rate charts.
     packaging_grams: int | None = Field(default=None, ge=0, le=10000)
+    # Half to double. Beyond that the table itself is wrong, not the dial.
+    weight_scale: float | None = Field(default=None, ge=0.5, le=2.0)
     category_weights: dict[str, int] | None = None
     consolidate_shipping: bool | None = None
     fx_markup: float | None = Field(default=None, ge=0, le=0.2)
@@ -231,6 +234,9 @@ class ItemOut(ItemBase):
     #: product is often sold pre-owned while the new listing is still open, so
     #: the two price histories are worth comparing side by side.
     counterpart: dict | None = None
+    #: True when the figure is on a list under its other condition, so the UI
+    #: can say "saved as new" rather than pretending you saved this listing.
+    saved_via_counterpart: bool = False
     #: Typical days a copy of this product stays listed before it sells, with
     #: the method that produced it so the UI can say how much to trust it.
     dwell_days: float | None = None
@@ -339,8 +345,12 @@ class LocalSearchRequest(BaseModel):
     #: point of the filter is urgency: show me the things I cannot sit on.
     sells_within_days: float | None = Field(default=None, gt=0, le=3650)
 
+    #: Fold the new and pre-owned listings of one figure into a single row.
+    combine_conditions: bool = False
+
     sort: Literal[
         "newest",
+        "changed",
         "oldest",
         "price_asc",
         "price_desc",
@@ -609,6 +619,9 @@ class PublicConfig(BaseModel):
     default_currency: str
     min_poll_interval_seconds: int
     version: str
+    #: Opening an item asks the shop for its current state straight away.
+    #: Instance-wide, because it spends the shared request budget.
+    refresh_on_open: bool = False
 
 
 class MessageResponse(BaseModel):
