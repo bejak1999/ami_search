@@ -98,6 +98,8 @@ class CostProfileOut(ORMModel):
     default_weight_grams: int
     packaging_grams: int
     weight_scale: float
+    blocked_terms: list[str] = []
+    blocked_tags: list[str] = []
     category_weights: dict = {}
     consolidate_shipping: bool
     fx_markup: float
@@ -132,6 +134,8 @@ class CostProfileUpdate(BaseModel):
     packaging_grams: int | None = Field(default=None, ge=0, le=10000)
     # Half to double. Beyond that the table itself is wrong, not the dial.
     weight_scale: float | None = Field(default=None, ge=0.5, le=2.0)
+    blocked_terms: list[str] | None = None
+    blocked_tags: list[str] | None = None
     category_weights: dict[str, int] | None = None
     consolidate_shipping: bool | None = None
     fx_markup: float | None = Field(default=None, ge=0, le=0.2)
@@ -337,9 +341,23 @@ class LocalSearchRequest(BaseModel):
     #: Only items whose current price equals the lowest ever recorded here.
     at_lowest_ever: bool = False
 
-    maker: str | None = None
-    series: str | None = None
-    character: str | None = None
+    # Lists, because a Discover rail is defined by every series or character
+    # on your list rather than by one of them. Handing over only the first was
+    # why "see all" showed a fraction of the rail it came from.
+    maker: list[str] = []
+    series: list[str] = []
+    character: list[str] = []
+    #: Show things the profile blocks anyway, for the one search where you
+    #: actually do want to see them.
+    ignore_blocklist: bool = False
+    #: Filled in from the signed-in profile, never from the request body.
+    blocked_terms: list[str] = Field(default=[], exclude=True)
+    blocked_tags: list[str] = Field(default=[], exclude=True)
+    #: Only items priced at or below this fraction of their own average, which
+    #: is what the "below their usual price" rail actually selects on.
+    below_average_ratio: float | None = Field(default=None, gt=0, le=1)
+    #: Only items at least this far under the maker's list price.
+    min_discount_pct: float | None = Field(default=None, ge=0, le=100)
 
     #: Only products whose copies typically sell within this many days. The
     #: point of the filter is urgency: show me the things I cannot sit on.
@@ -468,6 +486,8 @@ class AlertOut(ORMModel):
     watch_id: int | None
     item_id: int | None
     trigger: TriggerType
+    #: Every reason this alert qualified, so filters find it by any of them.
+    reasons: list[str] = []
     title: str
     body: str
     price: float | None

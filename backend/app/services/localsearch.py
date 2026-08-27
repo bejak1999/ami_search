@@ -95,6 +95,16 @@ def _apply_filters(stmt: Select, db: Session, req) -> Select:
             Item.current_price <= Item.lowest_price * 1.001,
         )
 
+    terms = [] if getattr(req, "ignore_blocklist", False) else (
+        getattr(req, "blocked_terms", None) or []
+    )
+    for term in terms:
+        cleaned = str(term).strip()
+        if cleaned:
+            # Matched against the name only. Blocking "nendoroid" should not
+            # also lose a scale figure whose maker happens to be Good Smile.
+            stmt = stmt.where(~Item.name.ilike(f"%{cleaned}%"))
+
     if req.sells_within_days:
         stmt = stmt.where(
             Item.dwell_days.is_not(None), Item.dwell_days <= req.sells_within_days
@@ -105,8 +115,31 @@ def _apply_filters(stmt: Select, db: Session, req) -> Select:
         (Item.series, req.series),
         (Item.character, req.character),
     ):
-        if value:
-            stmt = stmt.where(field.ilike(f"%{value.strip()}%"))
+        # A Discover rail draws on every series or character on your list, so
+        # these arrive as lists. A bare string is still accepted, because a
+        # hand-written link or an older client will send one.
+        wanted = [value] if isinstance(value, str) else list(value or [])
+        terms = [term.strip() for term in wanted if term and term.strip()]
+        if terms:
+            stmt = stmt.where(or_(*[field.ilike(f"%{term}%") for term in terms]))
+
+    if req.below_average_ratio:
+        # The same test the "below their usual price" rail applies, so its
+        # "see all" shows that rail rather than the whole catalogue sorted.
+        stmt = stmt.where(
+            Item.average_price.is_not(None),
+            Item.average_price > 0,
+            Item.current_price.is_not(None),
+            Item.current_price <= Item.average_price * req.below_average_ratio,
+        )
+
+    if req.min_discount_pct:
+        stmt = stmt.where(
+            Item.list_price.is_not(None),
+            Item.list_price > 0,
+            Item.current_price.is_not(None),
+            Item.current_price <= Item.list_price * (1.0 - req.min_discount_pct / 100.0),
+        )
 
     return stmt
 
@@ -124,7 +157,12 @@ def _apply_tags(stmt: Select, db: Session, req) -> Select | None:
         if req.tag_mode == "all":
             stmt = stmt.having(func.count(func.distinct(ItemTag.tag_id)) == len(wanted))
 
-    unwanted = _tag_ids(db, req.exclude_tags)
+    excluded = list(req.exclude_tags or [])
+    # Whatever the profile blocks outright, unless this search says otherwise.
+    if not getattr(req, "ignore_blocklist", False):
+        excluded += list(getattr(req, "blocked_tags", None) or [])
+
+    unwanted = _tag_ids(db, excluded)
     if unwanted:
         # "None of these", which is what excluding nendoroids while hunting
         # a scale figure actually means.

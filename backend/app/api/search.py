@@ -141,6 +141,10 @@ def search_local(
     import time
 
     started = time.monotonic()
+    # The blocklist comes from the signed-in profile, never from the request,
+    # so a crafted body cannot widen someone else's filter or narrow theirs.
+    payload.blocked_terms = list(profile.blocked_terms or [])
+    payload.blocked_tags = list(profile.blocked_tags or [])
     result = localsearch.search(db, payload)
     from .serializers import item_out, register_images
 

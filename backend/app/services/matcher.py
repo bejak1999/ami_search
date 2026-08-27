@@ -201,13 +201,19 @@ def value_item(db: Session, item: Item, watch: Watch, user: User) -> Valuation:
     )
 
 
-def decide_trigger(
+def decide_triggers(
     watch: Watch,
     item: Item,
     seen: WatchSeenItem | None,
     valuation: Valuation,
-) -> TriggerType | None:
-    """Pick the single most important reason to alert, or None to stay quiet."""
+) -> list[TriggerType]:
+    """Every reason to alert about this item, most important first.
+
+    One poll produces at most one notification - three messages about the same
+    figure is spam - but an item can genuinely qualify several ways at once,
+    and the ones that did not win the headline are still true. They are all
+    returned so the alert can carry them and be found by any of them later.
+    """
     candidates: set[TriggerType] = set()
     target = watch.target_price
     price = valuation.compare_price
@@ -258,10 +264,18 @@ def decide_trigger(
         if buyable and (target is None or hit_target):
             candidates.add(TriggerType.new_match)
 
-    for trigger in TRIGGER_PRIORITY:
-        if trigger in candidates:
-            return trigger
-    return None
+    return [trigger for trigger in TRIGGER_PRIORITY if trigger in candidates]
+
+
+def decide_trigger(
+    watch: Watch,
+    item: Item,
+    seen: WatchSeenItem | None,
+    valuation: Valuation,
+) -> TriggerType | None:
+    """The single most important reason, or None to stay quiet."""
+    found = decide_triggers(watch, item, seen, valuation)
+    return found[0] if found else None
 
 
 def _cooled_down(watch: Watch, seen: WatchSeenItem | None, trigger: TriggerType) -> bool:
@@ -299,6 +313,7 @@ def _build_alert(
     valuation: Valuation,
     seen: WatchSeenItem | None,
     shop_name: str,
+    reasons: list[TriggerType] | None = None,
 ) -> Alert:
     extra = {
         "item_name": item.name,
@@ -363,6 +378,7 @@ def _build_alert(
         watch_id=watch.id,
         item_id=item.id,
         trigger=trigger,
+        reasons=[r.value for r in (reasons or [trigger])],
         title=_alert_title(trigger, item),
         body=body,
         price=valuation.shop_price if valuation.shop_price is not None else item.current_price,
@@ -712,7 +728,8 @@ def run_watch(db: Session, watch: Watch) -> RunOutcome:
             )
         ).scalar_one_or_none()
 
-        trigger = decide_trigger(watch, item, seen, valuation)
+        reasons = decide_triggers(watch, item, seen, valuation)
+        trigger = reasons[0] if reasons else None
         fired: TriggerType | None = None
 
         if trigger is not None:
@@ -725,7 +742,9 @@ def run_watch(db: Session, watch: Watch) -> RunOutcome:
                 # Roll the tail into one summary instead of a burst of pushes.
                 deferred.append((item, trigger, valuation))
             else:
-                alert = _build_alert(watch, item, trigger, valuation, seen, shop_name)
+                alert = _build_alert(
+                    watch, item, trigger, valuation, seen, shop_name, reasons
+                )
                 db.add(alert)
                 db.commit()
                 notify.deliver(db, alert, user, watch=watch, shop_name=shop_name)

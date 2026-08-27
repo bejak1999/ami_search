@@ -126,7 +126,11 @@ export function DiscoverPage() {
   function explore(params: Record<string, unknown>) {
     const search = new URLSearchParams()
     for (const [key, value] of Object.entries(params)) {
-      if (value !== undefined && value !== null) search.set(key, String(value))
+      if (value === undefined || value === null) continue
+      // A rail is defined by every series or tag it was built from, not one
+      // of them, so a list has to become repeated parameters.
+      if (Array.isArray(value)) value.forEach((entry) => search.append(key, String(entry)))
+      else search.set(key, String(value))
     }
     navigate(`/search?${search.toString()}`)
   }

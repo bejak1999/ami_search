@@ -184,6 +184,8 @@ export interface Watch {
 }
 
 export interface Alert {
+  /** Every reason this alert qualified, most important first. */
+  reasons: string[]
   id: number
   watch_id: number | null
   item_id: number | null
@@ -292,6 +294,10 @@ export interface CostProfile {
   default_weight_grams: number
   packaging_grams: number
   weight_scale: number
+  /** Words never shown while browsing, matched anywhere in a product name. */
+  blocked_terms: string[]
+  /** MyFigureCollection tag slugs never shown while browsing. */
+  blocked_tags: string[]
   category_weights: Record<string, number>
   consolidate_shipping: boolean
   fx_markup: number

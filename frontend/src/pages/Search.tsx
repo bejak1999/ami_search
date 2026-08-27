@@ -23,9 +23,12 @@ interface Filters {
   combine: boolean
   // Handed over by a Discover rail so "see all" actually shows that rail
   // rather than dropping you on an unfiltered search page.
-  series: string
-  character: string
-  maker: string
+  series: string[]
+  character: string[]
+  maker: string[]
+  belowAverage: string
+  minDiscount: string
+  ignoreBlocklist: boolean
   minPrice: string
   maxPrice: string
   atLowestEver: boolean
@@ -40,9 +43,12 @@ const EMPTY: Filters = {
   sort: 'newest',
   sellsWithin: '',
   combine: false,
-  series: '',
-  character: '',
-  maker: '',
+  series: [],
+  character: [],
+  maker: [],
+  belowAverage: '',
+  minDiscount: '',
+  ignoreBlocklist: false,
   minPrice: '',
   maxPrice: '',
   atLowestEver: false,
@@ -90,9 +96,12 @@ export function SearchPage() {
     sort: params.get('sort') || 'newest',
     sellsWithin: params.get('sells_within') || '',
     combine: params.get('combine') === '1',
-    series: params.get('series') ?? '',
-    character: params.get('character') ?? '',
-    maker: params.get('maker') ?? '',
+    series: params.getAll('series'),
+    character: params.getAll('character'),
+    maker: params.getAll('maker'),
+    belowAverage: params.get('below_average_ratio') ?? '',
+    minDiscount: params.get('min_discount_pct') ?? '',
+    ignoreBlocklist: params.get('unblock') === '1',
     minPrice: params.get('min') ?? '',
     maxPrice: params.get('max') ?? '',
     atLowestEver: params.get('lowest') === '1',
@@ -132,9 +141,12 @@ export function SearchPage() {
     if (f.sort !== 'newest') search.set('sort', f.sort)
     if (f.sellsWithin) search.set('sells_within', f.sellsWithin)
     if (f.combine) search.set('combine', '1')
-    if (f.series) search.set('series', f.series)
-    if (f.character) search.set('character', f.character)
-    if (f.maker) search.set('maker', f.maker)
+    f.series.forEach((v) => search.append('series', v))
+    f.character.forEach((v) => search.append('character', v))
+    f.maker.forEach((v) => search.append('maker', v))
+    if (f.belowAverage) search.set('below_average_ratio', f.belowAverage)
+    if (f.minDiscount) search.set('min_discount_pct', f.minDiscount)
+    if (f.ignoreBlocklist) search.set('unblock', '1')
     if (f.minPrice) search.set('min', f.minPrice)
     if (f.maxPrice) search.set('max', f.maxPrice)
     if (f.atLowestEver) search.set('lowest', '1')
@@ -185,9 +197,14 @@ export function SearchPage() {
             at_lowest_ever: applied.atLowestEver,
             sells_within_days: applied.sellsWithin ? Number(applied.sellsWithin) : undefined,
             combine_conditions: applied.combine,
-            series: applied.series || undefined,
-            character: applied.character || undefined,
-            maker: applied.maker || undefined,
+            series: applied.series,
+            character: applied.character,
+            maker: applied.maker,
+            below_average_ratio: applied.belowAverage
+              ? Number(applied.belowAverage)
+              : undefined,
+            min_discount_pct: applied.minDiscount ? Number(applied.minDiscount) : undefined,
+            ignore_blocklist: applied.ignoreBlocklist,
           })
         : api.search.run({
             q: applied.q,
@@ -251,9 +268,11 @@ export function SearchPage() {
     (applied.atLowestEver ? 1 : 0) +
     (applied.sellsWithin ? 1 : 0) +
     (applied.combine ? 1 : 0) +
-    (applied.series ? 1 : 0) +
-    (applied.character ? 1 : 0) +
-    (applied.maker ? 1 : 0) +
+    applied.series.length +
+    applied.character.length +
+    applied.maker.length +
+    (applied.belowAverage ? 1 : 0) +
+    (applied.minDiscount ? 1 : 0) +
     (applied.exclude ? 1 : 0) +
     (applied.onSale ? 1 : 0) +
     tags.include.length +
@@ -303,27 +322,44 @@ export function SearchPage() {
       {/* Arriving from a Discover rail means the results are narrowed to
           something the search box does not show. Saying so, with a way out,
           beats wondering why half the catalogue is missing. */}
-      {(applied.series || applied.character || applied.maker) && (
+      {(applied.series.length > 0 ||
+        applied.character.length > 0 ||
+        applied.maker.length > 0 ||
+        applied.belowAverage ||
+        applied.minDiscount) && (
         <div className="flex flex-wrap items-center gap-2 rounded-card border border-accent/40 bg-accent/5 px-3 py-2 text-sm">
           <Icon name="filter" className="h-4 w-4 text-accent" />
           <span className="text-muted">Narrowed to</span>
-          {(
-            [
-              ['series', applied.series],
-              ['character', applied.character],
-              ['maker', applied.maker],
-            ] as const
-          )
-            .filter(([, value]) => value)
-            .map(([key, value]) => (
-              <span key={key} className="font-medium text-ink">
+          {[
+            ...applied.series,
+            ...applied.character,
+            ...applied.maker,
+            ...(applied.belowAverage ? ['well under their usual price'] : []),
+            ...(applied.minDiscount ? [`${applied.minDiscount}% or more off list`] : []),
+          ]
+            .slice(0, 6)
+            .map((value) => (
+              <span key={value} className="font-medium text-ink">
                 {value}
               </span>
             ))}
+          {applied.series.length + applied.character.length + applied.maker.length > 6 && (
+            <span className="text-faint">
+              and {applied.series.length + applied.character.length + applied.maker.length - 6}{' '}
+              more
+            </span>
+          )}
           <button
             onClick={() =>
               navigateTo({
-                filters: { ...applied, series: '', character: '', maker: '' },
+                filters: {
+                  ...applied,
+                  series: [],
+                  character: [],
+                  maker: [],
+                  belowAverage: '',
+                  minDiscount: '',
+                },
                 page: 1,
               })
             }
@@ -464,6 +500,12 @@ export function SearchPage() {
                       onChange={(atLowestEver) => setDraft({ ...draft, atLowestEver })}
                       label="Only items at their lowest price ever"
                       hint="Measured against every price this instance has recorded, including listings the shop has since deleted."
+                    />
+                    <Toggle
+                      checked={draft.ignoreBlocklist}
+                      onChange={(ignoreBlocklist) => setDraft({ ...draft, ignoreBlocklist })}
+                      label="Include things I have blocked"
+                      hint="For the one search where you do want to see them, without emptying your blocklist."
                     />
                     <Toggle
                       checked={draft.combine}

@@ -141,6 +141,19 @@ export function AlertsPage() {
                 <div className="min-w-0 flex-1">
                   <div className="flex flex-wrap items-center gap-2">
                     <Badge tone={meta.tone}>{meta.label}</Badge>
+                    {/* An item can qualify several ways at once. One message,
+                        named after the most important reason, with the rest
+                        shown so nothing looks like it was missed. */}
+                    {(alert.reasons ?? [])
+                      .filter((reason) => reason !== alert.trigger)
+                      .map((reason) => {
+                        const extra = TRIGGER_META[reason as TriggerType]
+                        return extra ? (
+                          <Badge key={reason} tone="neutral">
+                            {extra.label}
+                          </Badge>
+                        ) : null
+                      })}
                     {alert.watch_label && (
                       <span className="truncate text-[11px] text-faint">{alert.watch_label}</span>
                     )}

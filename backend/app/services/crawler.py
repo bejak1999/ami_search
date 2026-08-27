@@ -20,7 +20,7 @@ import time
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 
-from sqlalchemy import func, or_, select
+from sqlalchemy import Integer, func, or_, select
 from sqlalchemy.orm import Session
 
 from ..config import settings
@@ -42,6 +42,20 @@ SCOPE_FILTERS: dict[str, str] = {
     "figures_all": "all",
 }
 
+#: The slices overlap on purpose, and it is worth being clear about how.
+#:
+#: "All figures" is the only complete one - every other slice is a filtered
+#: view of the same shop, so the same listing is genuinely reached twice. That
+#: is not waste: the narrow slices are fast lanes that revisit the part of the
+#: catalogue that changes, while the full sweep is what keeps the long tail
+#: honest and eventually corrects a status nothing else has rechecked.
+#:
+#: One thing the head pages cannot do is catch changes. The shop's default
+#: order is roughly "orderable first, by release date", not "recently
+#: changed", so a price moving on a figure that came out last year happens
+#: somewhere around page sixty and no head pass will ever see it. The head
+#: pages are for finding listings that are new; the full sweep and the
+#: shelf-life sampler are for noticing that something moved.
 DEFAULT_SCOPES: list[dict] = [
     {
         "scope": "figures_preowned",
@@ -49,6 +63,9 @@ DEFAULT_SCOPES: list[dict] = [
         "priority": 10,
         "query": {"category_id": 1, "condition": "preowned"},
         "head_pages": 20,
+        # The one slice that genuinely turns over hour to hour: a used copy
+        # can be listed and sold inside a morning.
+        "recheck_interval_minutes": 30,
     },
     {
         "scope": "figures_in_stock",
@@ -56,6 +73,10 @@ DEFAULT_SCOPES: list[dict] = [
         "priority": 20,
         "query": {"category_id": 1, "stock_filter": "in_stock"},
         "head_pages": 15,
+        # First-hand stock does not appear and vanish the way used copies do,
+        # and its head pages are the same listings the full sweep covers, so
+        # twice a day is plenty and leaves the budget for work that pays.
+        "recheck_interval_minutes": 720,
     },
     {
         "scope": "figures_preorder",
@@ -63,6 +84,9 @@ DEFAULT_SCOPES: list[dict] = [
         "priority": 30,
         "query": {"category_id": 1, "stock_filter": "preorder"},
         "head_pages": 10,
+        # Pre-orders are announced, not restocked. A day's granularity loses
+        # nothing except requests.
+        "recheck_interval_minutes": 1440,
     },
     {
         "scope": "figures_all",
@@ -70,6 +94,7 @@ DEFAULT_SCOPES: list[dict] = [
         "priority": 90,
         "query": {"category_id": 1},
         "head_pages": 30,
+        "recheck_interval_minutes": 180,
     },
 ]
 
@@ -119,6 +144,7 @@ def ensure_scopes(db: Session, provider: str = "amiami") -> int:
                 priority=spec["priority"],
                 query=spec["query"],
                 head_pages=spec["head_pages"],
+                recheck_interval_minutes=spec.get("recheck_interval_minutes", 30),
             )
         )
         created += 1
@@ -407,6 +433,67 @@ def local_count(db: Session, scope: str, provider_id: str) -> int:
     elif kind == "preorder":
         stmt = stmt.where(Item.is_preorder.is_(True))
     return int(db.execute(stmt).scalar_one() or 0)
+
+
+def activity_profile(db: Session, provider_id: str = "amiami", days: int = 30) -> dict:
+    """When the shop is actually busy, by hour of day and day of week.
+
+    Built from timestamps already recorded rather than a new counter: an item
+    row knows when it first appeared here, and a price point knows when
+    something moved. Both are in UTC and are returned as UTC buckets, because
+    only the browser knows what the reader's clock says.
+
+    One honest caveat, which the view repeats: what this measures is when *we*
+    noticed, so it is blurred by the polling interval and it cannot show
+    activity during a stretch when nothing was polling at all. It is good
+    enough to find the daily rhythm - Japanese business hours are a strong
+    signal - and that is what it is for.
+    """
+    since = datetime.now(timezone.utc) - timedelta(days=max(1, days))
+
+    def buckets(column, expression: str, extra=None) -> dict[int, int]:
+        stmt = select(
+            func.cast(func.strftime(expression, column), Integer).label("bucket"),
+            func.count().label("n"),
+        ).where(column >= since)
+        if extra is not None:
+            stmt = stmt.where(extra)
+        stmt = stmt.group_by("bucket")
+        return {
+            int(bucket): int(count)
+            for bucket, count in db.execute(stmt).all()
+            if bucket is not None
+        }
+
+    from ..models import PricePoint
+
+    listings_hour = buckets(Item.first_seen_at, "%H", Item.provider == provider_id)
+    listings_day = buckets(Item.first_seen_at, "%w", Item.provider == provider_id)
+    changes_hour = buckets(PricePoint.recorded_at, "%H")
+    changes_day = buckets(PricePoint.recorded_at, "%w")
+
+    def series(data: dict[int, int], size: int) -> list[int]:
+        return [data.get(index, 0) for index in range(size)]
+
+    observed = int(
+        db.execute(
+            select(func.count(Item.id)).where(
+                Item.provider == provider_id, Item.first_seen_at >= since
+            )
+        ).scalar_one()
+        or 0
+    )
+    return {
+        "days": days,
+        "new_listings": observed,
+        "price_changes": sum(changes_hour.values()),
+        # Index 0 is midnight UTC; index 0 of the weekday series is Sunday,
+        # matching strftime's %w.
+        "listings_by_hour_utc": series(listings_hour, 24),
+        "changes_by_hour_utc": series(changes_hour, 24),
+        "listings_by_weekday": series(listings_day, 7),
+        "changes_by_weekday": series(changes_day, 7),
+    }
 
 
 def progress(db: Session, provider_id: str = "amiami") -> dict:

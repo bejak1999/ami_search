@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { api } from '@/api/client'
 import type { CostProfile, CostProfilePreview, ShippingService } from '@/api/types'
+import { Blocklist } from '@/components/Blocklist'
 import { ChannelManager } from '@/components/ChannelManager'
 import { Icon } from '@/components/Icon'
 import { Card, Field, SegmentedControl, Spinner, Toggle } from '@/components/ui'
@@ -421,6 +422,39 @@ function CostTab() {
             </span>
           </div>
         </Field>
+
+        <div className="space-y-4 border-t border-line pt-5">
+          <div>
+            <h4 className="text-sm font-semibold">Never show me</h4>
+            <p className="mt-0.5 max-w-2xl text-xs text-muted">
+              Applied to search results and the discovery feed. Your watches are left alone: you
+              asked for those by name, and hiding their results would be a silent failure rather
+              than a tidy list.
+            </p>
+          </div>
+          <Field
+            label="Words in the product name"
+            hint="Matched anywhere in the name, so 'nendoroid' hides the nendoroids without touching a scale figure by the same maker."
+          >
+            <Blocklist
+              values={current.blocked_terms}
+              onChange={(blocked_terms) => set({ blocked_terms })}
+              placeholder="nendoroid"
+              empty="Nothing blocked by name."
+            />
+          </Field>
+          <Field
+            label="MyFigureCollection tags"
+            hint="Tag slugs as they appear on MFC, for instance 'chibi'. Only reaches figures that have been cross-referenced."
+          >
+            <Blocklist
+              values={current.blocked_tags}
+              onChange={(blocked_tags) => set({ blocked_tags })}
+              placeholder="chibi"
+              empty="Nothing blocked by tag."
+            />
+          </Field>
+        </div>
 
         <Toggle
           checked={current.consolidate_shipping}

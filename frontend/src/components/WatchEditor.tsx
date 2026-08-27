@@ -508,29 +508,39 @@ export function WatchEditor({ open, onClose, onSaved, watch, seedItem }: WatchEd
           </Field>
 
           <div className="space-y-3 rounded-control border border-line bg-raised p-3.5">
-            <p className="text-xs font-medium uppercase tracking-wide text-muted">Alert me when</p>
+            <div>
+              <p className="text-xs font-medium uppercase tracking-wide text-muted">
+                Alert me when
+              </p>
+              <p className="mt-1 text-xs leading-relaxed text-faint">
+                Each switch is a separate reason to be told. An item can meet several at once
+                and you still get one message, named after the most important of them, with the
+                others listed underneath. Turning one off means that reason alone never wakes
+                you; the item can still reach you through another.
+              </p>
+            </div>
             <Toggle
               checked={form.notify_on_price_below}
               onChange={(v) => set('notify_on_price_below', v)}
               label="The price crosses below my target"
-              hint="Fires on the crossing, not on every check while it sits below."
+              hint="Fires the moment it comes down across your target, not on every check while it sits below. Something already cheaper than your target when the watch was made is not news, so it stays quiet until it moves. Needs a target price."
               disabled={!form.target_price}
             />
             <Toggle
               checked={form.notify_on_restock}
               onChange={(v) => set('notify_on_restock', v)}
               label="Something comes back in stock"
-              hint="Pre-owned listings on AmiAmi are deleted when they sell, so this catches genuine restocks."
+              hint="Only when a listing this watch already knew about was out of stock and now is not. On a pre-owned product that means a fresh copy has been taken in, because AmiAmi deletes a copy the moment it sells rather than marking it gone."
             />
             <Toggle
               checked={form.notify_on_new_match}
               onChange={(v) => set('notify_on_new_match', v)}
               label="A new listing matches"
-              hint="Only listings that did not exist at the previous check."
+              hint="A listing that did not exist at the previous check, is actually buyable, and is within your target if you set one. This is the one that finds figures you were not already watching, so it is the switch to leave on for a search and to turn off for a single item you already know about."
             />
             <Field
               label="Also alert on any drop of at least"
-              hint="Leave empty to ignore drops that stay above your target."
+              hint="A percentage off whatever it cost at the previous check. Independent of your target, so it catches a listing falling from far above it - useful for watching something drift down towards a price you would accept. Leave empty to ignore drops that stay above your target."
             >
               <div className="relative w-32">
                 <input

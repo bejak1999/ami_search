@@ -6,6 +6,7 @@ import { Icon } from '@/components/Icon'
 import { LookupMenu } from '@/components/LookupMenu'
 import { CollectionButton } from '@/components/CollectionButton'
 import { PriceChart } from '@/components/PriceChart'
+import { Lightbox } from '@/components/Lightbox'
 import { ShelfLifePanel } from '@/components/ShelfLife'
 import { shopUrl } from '@/lib/shop'
 import { WatchEditor } from '@/components/WatchEditor'
@@ -33,6 +34,7 @@ export function ItemDetailPage() {
   const [range, setRange] = useState('365')
   const [activeImage, setActiveImage] = useState(0)
   const [watchOpen, setWatchOpen] = useState(false)
+  const [zoomed, setZoomed] = useState(false)
   // Which listing's history the chart is showing. A figure is often sold
   // pre-owned while its new listing is still open, so the two are worth
   // comparing rather than picking one.
@@ -146,6 +148,15 @@ export function ItemDetailPage() {
 
   return (
     <div className="space-y-6">
+      {zoomed && (
+        <Lightbox
+          images={images}
+          index={activeImage}
+          onIndexChange={setActiveImage}
+          onClose={() => setZoomed(false)}
+          alt={item.name}
+        />
+      )}
       <button onClick={() => navigate(-1)} className="btn-quiet -ml-2 text-sm">
         <Icon name="chevronLeft" />
         Back
@@ -156,11 +167,18 @@ export function ItemDetailPage() {
           <Card className="overflow-hidden">
             <div className="aspect-square bg-raised">
               {images[activeImage] ? (
-                <img
-                  src={images[activeImage]}
-                  alt={item.name}
-                  className="h-full w-full object-contain"
-                />
+                <button
+                  type="button"
+                  onClick={() => setZoomed(true)}
+                  aria-label="View this photo full size"
+                  className="group h-full w-full cursor-zoom-in"
+                >
+                  <img
+                    src={images[activeImage]}
+                    alt={item.name}
+                    className="h-full w-full object-contain"
+                  />
+                </button>
               ) : (
                 <div className="grid h-full place-items-center text-faint">
                   <Icon name="box" className="h-10 w-10" />
@@ -239,6 +257,14 @@ export function ItemDetailPage() {
                     <span className="font-medium tabular-nums text-ink">
                       {money(item.price_max, item.currency)}
                     </span>
+                  </p>
+                )}
+                {item.display_price !== null && item.display_currency !== item.currency && (
+                  <p className="mt-1.5 text-sm text-muted">
+                    <span className="font-medium tabular-nums text-ink">
+                      {money(item.display_price, item.display_currency ?? 'EUR')}
+                    </span>{' '}
+                    at today&apos;s exchange rate, before shipping and import
                   </p>
                 )}
                 {item.landed && (

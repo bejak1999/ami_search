@@ -229,17 +229,29 @@ export function ItemCard({ item, onOpen, onWatch, onWishlist, compact }: ItemCar
             </p>
           )}
 
-          {item.landed && (
-            <Tooltip content={<LandedTooltip item={item} />}>
-              <span className="mt-0.5 inline-flex cursor-help items-center gap-1 text-xs text-muted">
-                <Icon name="box" className="h-3 w-3" />
-                <span className="tabular-nums">
-                  {money(item.landed.total, item.landed.currency)}
+          {/* Two different numbers, and people want both: what the shop
+              charges converted at today's rate, and what it costs once it has
+              actually arrived. The wrapper lifts them above the full-card
+              link, which would otherwise swallow the tooltip's hover. */}
+          <div className="relative z-20 mt-0.5 w-fit space-y-0.5">
+            {item.display_price !== null && item.display_currency !== item.currency && (
+              <p className="text-xs text-muted tabular-nums">
+                {money(item.display_price, item.display_currency ?? 'EUR')}
+                <span className="ml-1 text-faint">at today&apos;s rate</span>
+              </p>
+            )}
+            {item.landed && (
+              <Tooltip content={<LandedTooltip item={item} />}>
+                <span className="inline-flex cursor-help items-center gap-1 text-xs text-muted">
+                  <Icon name="box" className="h-3 w-3" />
+                  <span className="tabular-nums">
+                    {money(item.landed.total, item.landed.currency)}
+                  </span>
+                  <span className="text-faint">landed</span>
                 </span>
-                <span className="text-faint">landed</span>
-              </span>
-            </Tooltip>
-          )}
+              </Tooltip>
+            )}
+          </div>
 
           {item.lowest_price !== null && item.price !== null && item.lowest_price < item.price && (
             <p className="mt-0.5 text-[11px] text-faint">

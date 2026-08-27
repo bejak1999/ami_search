@@ -264,6 +264,7 @@ export const api = {
     catalog: () => get<MessageResponse>('/admin/catalog'),
     shelfLife: () => get<MessageResponse>('/admin/shelf-life'),
     behaviour: () => get<MessageResponse>('/admin/behaviour'),
+    activity: (days = 30) => get<MessageResponse>(`/admin/activity${qs({ days })}`),
     setBehaviour: (body: Record<string, boolean>) =>
       request<MessageResponse>('/admin/behaviour', {
         method: 'PUT',

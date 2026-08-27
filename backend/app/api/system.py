@@ -274,6 +274,25 @@ def run_catalog_crawl(
     )
 
 
+@admin.get("/activity", response_model=MessageResponse)
+def shop_activity(
+    days: int = Query(default=30, ge=1, le=365),
+    provider: str = "amiami",
+    db: Session = Depends(get_db),
+    _admin: User = Depends(admin_user),
+) -> MessageResponse:
+    """When new listings and price changes actually arrive.
+
+    So the polling schedule can follow the shop's rhythm instead of hitting it
+    uniformly around the clock.
+    """
+    from ..services import crawler
+
+    return MessageResponse(
+        message="ok", detail=crawler.activity_profile(db, provider, days=days)
+    )
+
+
 @admin.get("/shelf-life", response_model=MessageResponse)
 def shelf_coverage(
     provider: str = "amiami",

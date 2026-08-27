@@ -135,6 +135,25 @@ def _fetch(db: Session, stmt: Select, exclude: set[int], limit: int = MAX_PER_RA
     return list(db.execute(stmt.limit(limit)).scalars().unique().all())
 
 
+def _blocked(db: Session, user: User) -> tuple[list[str], list[int]]:
+    """Words and tags this person never wants suggested to them."""
+    from ..models import CostProfile, Tag
+
+    profile = db.execute(
+        select(CostProfile).where(CostProfile.user_id == user.id)
+    ).scalar_one_or_none()
+    if profile is None:
+        return [], []
+    terms = [str(t).strip() for t in (profile.blocked_terms or []) if str(t).strip()]
+    slugs = [str(s).strip() for s in (profile.blocked_tags or []) if str(s).strip()]
+    tag_ids = (
+        list(db.execute(select(Tag.id).where(Tag.slug.in_(slugs))).scalars().all())
+        if slugs
+        else []
+    )
+    return terms, tag_ids
+
+
 def build(db: Session, user: User, provider: str | None = None) -> list[Rail]:
     """Assemble the feed. Empty rails are dropped rather than shown bare."""
     taste = _taste(db, user)
@@ -151,9 +170,24 @@ def build(db: Session, user: User, provider: str | None = None) -> list[Rail]:
     seen: set[int] = set(owned)
     rails: list[Rail] = []
 
+    blocked_terms, blocked_tag_ids = _blocked(db, user)
+
     def base() -> Select:
         stmt = _buyable(select(Item))
-        return stmt.where(Item.provider == provider) if provider else stmt
+        if provider:
+            stmt = stmt.where(Item.provider == provider)
+        # Suggestions are the one place a blocklist matters most: a feed that
+        # keeps offering the thing you said you did not want is worse than no
+        # feed at all.
+        for term in blocked_terms:
+            stmt = stmt.where(~Item.name.ilike(f"%{term}%"))
+        if blocked_tag_ids:
+            stmt = stmt.where(
+                Item.id.not_in(
+                    select(ItemTag.item_id).where(ItemTag.tag_id.in_(blocked_tag_ids))
+                )
+            )
+        return stmt
 
     # --- drawn from what the person already wants -------------------------
     if taste["series"]:
@@ -170,7 +204,7 @@ def build(db: Session, user: User, provider: str | None = None) -> list[Rail]:
                     subtitle="New to the catalogue, from series already on your list",
                     icon="sparkle",
                     items=items,
-                    explore={"series": taste["series"][0]},
+                    explore={"series": taste["series"][:40]},
                 )
             )
 
@@ -188,15 +222,18 @@ def build(db: Session, user: User, provider: str | None = None) -> list[Rail]:
                     subtitle="Cheapest first",
                     icon="heart",
                     items=items,
-                    explore={"character": taste["characters"][0]},
+                    explore={"character": taste["characters"][:40], "sort": "price_asc"},
                 )
             )
 
     if taste["tag_ids"]:
         # Figures sharing the descriptive tags of things already wanted, which
         # is the only rail MyFigureCollection makes possible.
+        # Through base() like every other rail, so the blocklist reaches it
+        # too: this is the rail most likely to surface the very thing someone
+        # blocked, since it works by similarity.
         stmt = (
-            _buyable(select(Item))
+            base()
             .join(ItemTag, ItemTag.item_id == Item.id)
             .where(ItemTag.tag_id.in_(taste["tag_ids"]))
             .group_by(Item.id)
@@ -261,7 +298,7 @@ def build(db: Session, user: User, provider: str | None = None) -> list[Rail]:
                 subtitle="Copies of these have measurably short shelf lives here",
                 icon="clock",
                 items=items,
-                explore={"condition": "preowned", "sort": "sells_fastest"},
+                explore={"condition": "preowned", "sells_within_days": 7, "sort": "sells_fastest"},
             )
         )
 
@@ -287,7 +324,7 @@ def build(db: Session, user: User, provider: str | None = None) -> list[Rail]:
                 subtitle="Measured against every price recorded here, not the shop's list price",
                 icon="down",
                 items=items,
-                explore={"sort": "lowest_ever"},
+                explore={"below_average_ratio": 0.85, "sort": "lowest_ever"},
             )
         )
 
@@ -306,7 +343,7 @@ def build(db: Session, user: User, provider: str | None = None) -> list[Rail]:
                 subtitle="At least 40% off what the maker asked",
                 icon="yen",
                 items=items,
-                explore={"sort": "discount"},
+                explore={"min_discount_pct": 40, "sort": "discount"},
             )
         )
 

@@ -27,10 +27,37 @@ from sqlalchemy import (
     UniqueConstraint,
 )
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
+from sqlalchemy.types import TypeDecorator
 
 
 def utcnow() -> datetime:
     return datetime.now(timezone.utc)
+
+
+class UTCDateTime(TypeDecorator):
+    """A timestamp that still knows it is UTC when it comes back out.
+
+    SQLite has no timezone type, so ``UTCDateTime`` accepts an
+    aware value on the way in and hands back a naive one on the way out.
+    Everything downstream then has to remember to re-attach UTC, and the place
+    that forgot was the API itself: it emitted timestamps with no offset
+    suffix, and a browser reads those as local time. Every date in the
+    interface was therefore wrong by the viewer's own offset - which is why a
+    slice that had just run reported having run two hours ago, for ever.
+
+    Fixing it at the column means nothing above has to think about it.
+    """
+
+    impl = DateTime
+    cache_ok = True
+
+    def load_dialect_impl(self, dialect):
+        return dialect.type_descriptor(DateTime(timezone=True))
+
+    def process_result_value(self, value, dialect):
+        if value is not None and value.tzinfo is None:
+            return value.replace(tzinfo=timezone.utc)
+        return value
 
 
 class Base(DeclarativeBase):
@@ -139,8 +166,8 @@ class User(Base):
     password_hash: Mapped[str] = mapped_column(String(255))
     role: Mapped[UserRole] = mapped_column(Enum(UserRole), default=UserRole.user)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
-    last_login_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utcnow)
+    last_login_at: Mapped[datetime | None] = mapped_column(UTCDateTime)
 
     # Presentation and landed-cost preferences live on the user so a shared
     # instance can serve people in different countries.
@@ -173,6 +200,14 @@ class CostProfile(Base):
     user_id: Mapped[int] = mapped_column(
         ForeignKey("users.id", ondelete="CASCADE"), unique=True, index=True
     )
+
+    #: Things you never want to see. Words are matched anywhere in a product
+    #: name; tags are MyFigureCollection slugs. Applied to browsing - search
+    #: results and the discovery feed - and never to a watch, because a watch
+    #: is something you asked for by name and hiding its results would be a
+    #: silent failure rather than a tidy list.
+    blocked_terms: Mapped[list] = mapped_column(JSON, default=list)
+    blocked_tags: Mapped[list] = mapped_column(JSON, default=list)
 
     country: Mapped[str] = mapped_column(String(2), default="DE")
     vat_rate: Mapped[float] = mapped_column(Float, default=0.19)
@@ -222,8 +257,8 @@ class AuthSession(Base):
     token_id: Mapped[str] = mapped_column(String(64), unique=True, index=True)
     user_agent: Mapped[str] = mapped_column(String(255), default="")
     ip: Mapped[str] = mapped_column(String(64), default="")
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
-    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utcnow)
+    expires_at: Mapped[datetime] = mapped_column(UTCDateTime)
     revoked: Mapped[bool] = mapped_column(Boolean, default=False)
 
 
@@ -290,19 +325,19 @@ class Item(Base):
     order_closed: Mapped[bool] = mapped_column(Boolean, default=False)
     sale_status: Mapped[str | None] = mapped_column(String(64))
     release_date: Mapped[str | None] = mapped_column(String(32))
-    release_date_parsed: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    release_date_parsed: Mapped[datetime | None] = mapped_column(UTCDateTime)
 
     spec: Mapped[str | None] = mapped_column(Text)
     remarks: Mapped[str | None] = mapped_column(Text)
     raw: Mapped[dict] = mapped_column(JSON, default=dict)
 
-    first_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
-    last_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
-    last_detail_fetch_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    first_seen_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utcnow)
+    last_seen_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utcnow)
+    last_detail_fetch_at: Mapped[datetime | None] = mapped_column(UTCDateTime)
     # The fetch before that one. Without it a copy that appeared between two
     # polls has no upper bound on how long it had been listed, and the whole
     # shelf-life figure becomes a lower bound with no ceiling.
-    prev_detail_fetch_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    prev_detail_fetch_at: Mapped[datetime | None] = mapped_column(UTCDateTime)
     detail_loaded: Mapped[bool] = mapped_column(Boolean, default=False)
 
     # -- Shelf life -----------------------------------------------------
@@ -311,9 +346,9 @@ class Item(Base):
     # intake rate without following a single copy, and intake rate plus shelf
     # depth is all Little's Law needs to estimate how long a copy sits.
     intake_first_seq: Mapped[int | None] = mapped_column(Integer)
-    intake_first_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    intake_first_at: Mapped[datetime | None] = mapped_column(UTCDateTime)
     intake_last_seq: Mapped[int | None] = mapped_column(Integer)
-    intake_last_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    intake_last_at: Mapped[datetime | None] = mapped_column(UTCDateTime)
     #: Copies on the shelf at the last detail fetch, denormalized for sorting.
     listing_count: Mapped[int] = mapped_column(Integer, default=0)
     #: Shelf depth smoothed across fetches. Little's Law wants the average
@@ -334,14 +369,14 @@ class Item(Base):
     #: When this product is next due a detail fetch for shelf tracking. One
     #: column drives the whole sampler: a price range that moved on a cheap
     #: list sweep simply sets it to now, jumping the product to the front.
-    shelf_due_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
+    shelf_due_at: Mapped[datetime | None] = mapped_column(UTCDateTime, index=True)
     #: hot | warm | cold, cached from the last scheduling decision so the
     #: admin panel can show where the request budget is going.
     shelf_tier: Mapped[str | None] = mapped_column(String(8))
     #: Last time a catalogue list sweep still found this product on sale. The
     #: head pages are re-read every half hour, so for the newest listings this
     #: is a far tighter signal than the detail fetches and costs nothing.
-    last_listed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_listed_at: Mapped[datetime | None] = mapped_column(UTCDateTime)
 
     # MyFigureCollection cross-reference. The JAN barcode gives an exact match;
     # a title search is the fallback and is flagged as such so the UI can say
@@ -350,7 +385,7 @@ class Item(Base):
     mfc_matched_by: Mapped[str | None] = mapped_column(String(16))
     mfc_url: Mapped[str | None] = mapped_column(Text)
     mfc_confidence: Mapped[float | None] = mapped_column(Float)
-    mfc_fetched_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
+    mfc_fetched_at: Mapped[datetime | None] = mapped_column(UTCDateTime, index=True)
     mfc_attempts: Mapped[int] = mapped_column(Integer, default=0)
     # The entry was identified, but MyFigureCollection withholds the page from
     # signed-out visitors, so no tags could be imported for it.
@@ -383,7 +418,7 @@ class PricePoint(Base):
     listing_id: Mapped[int | None] = mapped_column(
         ForeignKey("listings.id", ondelete="SET NULL"), index=True
     )
-    recorded_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    recorded_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utcnow)
     price: Mapped[float | None] = mapped_column(Float)
     currency: Mapped[str] = mapped_column(String(3), default="JPY")
     in_stock: Mapped[bool] = mapped_column(Boolean, default=False)
@@ -452,10 +487,10 @@ class Listing(Base):
     item_grade: Mapped[str | None] = mapped_column(String(8))
     box_grade: Mapped[str | None] = mapped_column(String(8))
 
-    appeared_after: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    first_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
-    last_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
-    vanished_before: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    appeared_after: Mapped[datetime | None] = mapped_column(UTCDateTime)
+    first_seen_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utcnow)
+    last_seen_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utcnow)
+    vanished_before: Mapped[datetime | None] = mapped_column(UTCDateTime)
 
     status: Mapped[ListingStatus] = mapped_column(
         Enum(ListingStatus), default=ListingStatus.live, index=True
@@ -521,9 +556,9 @@ class Watch(Base):
     # Empty list means: use every enabled channel the user owns.
     channel_ids: Mapped[list] = mapped_column(JSON, default=list)
 
-    next_run_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
-    last_run_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    last_success_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    next_run_at: Mapped[datetime | None] = mapped_column(UTCDateTime, index=True)
+    last_run_at: Mapped[datetime | None] = mapped_column(UTCDateTime)
+    last_success_at: Mapped[datetime | None] = mapped_column(UTCDateTime)
     last_error: Mapped[str | None] = mapped_column(Text)
     consecutive_errors: Mapped[int] = mapped_column(Integer, default=0)
     run_count: Mapped[int] = mapped_column(Integer, default=0)
@@ -532,7 +567,7 @@ class Watch(Base):
     # The first poll only records what already exists. Without this, creating a
     # watch for a broad query would immediately fire one alert per result.
     baselined: Mapped[bool] = mapped_column(Boolean, default=False)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utcnow)
 
     user: Mapped[User] = relationship(back_populates="watches")
     alerts: Mapped[list["Alert"]] = relationship(
@@ -554,15 +589,15 @@ class WatchSeenItem(Base):
     id: Mapped[int] = mapped_column(primary_key=True)
     watch_id: Mapped[int] = mapped_column(ForeignKey("watches.id", ondelete="CASCADE"), index=True)
     item_id: Mapped[int] = mapped_column(ForeignKey("items.id", ondelete="CASCADE"), index=True)
-    first_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
-    last_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    first_seen_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utcnow)
+    last_seen_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utcnow)
     last_price: Mapped[float | None] = mapped_column(Float)
     # The same observation expressed in the watch's comparison basis, which
     # may be a different currency and may include import costs. Target-price
     # crossings must be judged against this, never against last_price.
     last_compare_price: Mapped[float | None] = mapped_column(Float)
     last_in_stock: Mapped[bool] = mapped_column(Boolean, default=False)
-    last_alert_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_alert_at: Mapped[datetime | None] = mapped_column(UTCDateTime)
     last_trigger: Mapped[str | None] = mapped_column(String(32))
 
     watch: Mapped[Watch] = relationship(back_populates="seen")
@@ -578,6 +613,11 @@ class Alert(Base):
     item_id: Mapped[int | None] = mapped_column(ForeignKey("items.id", ondelete="SET NULL"))
 
     trigger: Mapped[TriggerType] = mapped_column(Enum(TriggerType))
+    #: Every reason this alert qualified, not only the one that named it.
+    #: One item can be a new listing, under your target and back in stock all
+    #: at once; sending three notifications would be spam, but throwing two of
+    #: the reasons away meant filtering by them found nothing.
+    reasons: Mapped[list] = mapped_column(JSON, default=list)
     title: Mapped[str] = mapped_column(Text)
     body: Mapped[str] = mapped_column(Text, default="")
     price: Mapped[float | None] = mapped_column(Float)
@@ -589,9 +629,9 @@ class Alert(Base):
     image_url: Mapped[str | None] = mapped_column(Text)
     extra: Mapped[dict] = mapped_column(JSON, default=dict)
 
-    read_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    read_at: Mapped[datetime | None] = mapped_column(UTCDateTime)
     created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), default=utcnow, index=True
+        UTCDateTime, default=utcnow, index=True
     )
 
     watch: Mapped[Watch | None] = relationship(back_populates="alerts")
@@ -615,8 +655,8 @@ class AlertDelivery(Base):
     )
     error: Mapped[str | None] = mapped_column(Text)
     attempts: Mapped[int] = mapped_column(Integer, default=0)
-    sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    sent_at: Mapped[datetime | None] = mapped_column(UTCDateTime)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utcnow)
 
     alert: Mapped[Alert] = relationship(back_populates="deliveries")
 
@@ -638,10 +678,10 @@ class NotificationChannel(Base):
     enabled: Mapped[bool] = mapped_column(Boolean, default=True)
     is_default: Mapped[bool] = mapped_column(Boolean, default=True)
     send_digest: Mapped[bool] = mapped_column(Boolean, default=False)
-    last_used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_used_at: Mapped[datetime | None] = mapped_column(UTCDateTime)
     last_error: Mapped[str | None] = mapped_column(Text)
     failure_count: Mapped[int] = mapped_column(Integer, default=0)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utcnow)
 
     user: Mapped[User] = relationship(back_populates="channels")
 
@@ -667,12 +707,12 @@ class CollectionEntry(Base):
     tags: Mapped[list] = mapped_column(JSON, default=list)
     paid_price: Mapped[float | None] = mapped_column(Float)
     paid_currency: Mapped[str] = mapped_column(String(3), default="JPY")
-    purchased_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    purchased_at: Mapped[datetime | None] = mapped_column(UTCDateTime)
     quantity: Mapped[int] = mapped_column(Integer, default=1)
     mfc_url: Mapped[str | None] = mapped_column(Text)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), default=utcnow, onupdate=utcnow
+        UTCDateTime, default=utcnow, onupdate=utcnow
     )
 
     user: Mapped[User] = relationship(back_populates="collection")
@@ -693,7 +733,7 @@ class FxRate(Base):
     quote: Mapped[str] = mapped_column(String(3))
     rate: Mapped[float] = mapped_column(Float)
     source: Mapped[str] = mapped_column(String(64), default="")
-    fetched_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    fetched_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utcnow)
 
 
 class AppSetting(Base):
@@ -702,7 +742,7 @@ class AppSetting(Base):
     key: Mapped[str] = mapped_column(String(64), primary_key=True)
     value: Mapped[dict] = mapped_column(JSON, default=dict)
     updated_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), default=utcnow, onupdate=utcnow
+        UTCDateTime, default=utcnow, onupdate=utcnow
     )
 
 
@@ -722,7 +762,7 @@ class ProviderStat(Base):
     items_seen: Mapped[int] = mapped_column(Integer, default=0)
     last_error: Mapped[str | None] = mapped_column(Text)
     updated_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), default=utcnow, onupdate=utcnow
+        UTCDateTime, default=utcnow, onupdate=utcnow
     )
 
 
@@ -762,7 +802,7 @@ class Tag(Base):
     #: How many local items carry this tag. Drives ranking in the tag picker.
     usage_count: Mapped[int] = mapped_column(Integer, default=0)
     is_auto: Mapped[bool] = mapped_column(Boolean, default=False)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utcnow)
 
     items: Mapped[list["Item"]] = relationship(secondary="item_tags", back_populates="tags")
 
@@ -774,7 +814,7 @@ class ItemTag(Base):
     id: Mapped[int] = mapped_column(primary_key=True)
     item_id: Mapped[int] = mapped_column(ForeignKey("items.id", ondelete="CASCADE"), index=True)
     tag_id: Mapped[int] = mapped_column(ForeignKey("tags.id", ondelete="CASCADE"), index=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utcnow)
 
 
 class DiscoverySeed(Base):
@@ -802,7 +842,7 @@ class DiscoverySeed(Base):
         ForeignKey("items.id", ondelete="SET NULL")
     )
     lookup_state: Mapped[str] = mapped_column(String(16), default="pending")
-    fetched_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    fetched_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utcnow)
 
 
 # ---------------------------------------------------------------------------
@@ -860,7 +900,7 @@ class CatalogCrawl(Base):
     #: how one slice accumulated 43 passes in an afternoon.
     recheck_interval_minutes: Mapped[int] = mapped_column(Integer, default=30)
     full_sweep_interval_days: Mapped[int] = mapped_column(Integer, default=7)
-    last_full_sweep_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_full_sweep_at: Mapped[datetime | None] = mapped_column(UTCDateTime)
     cycles_completed: Mapped[int] = mapped_column(Integer, default=0)
 
     pages_fetched: Mapped[int] = mapped_column(Integer, default=0)
@@ -868,12 +908,12 @@ class CatalogCrawl(Base):
     items_new: Mapped[int] = mapped_column(Integer, default=0)
     items_changed: Mapped[int] = mapped_column(Integer, default=0)
 
-    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    last_run_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    started_at: Mapped[datetime | None] = mapped_column(UTCDateTime)
+    last_run_at: Mapped[datetime | None] = mapped_column(UTCDateTime)
+    finished_at: Mapped[datetime | None] = mapped_column(UTCDateTime)
     last_error: Mapped[str | None] = mapped_column(Text)
     consecutive_errors: Mapped[int] = mapped_column(Integer, default=0)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utcnow)
 
 
 # ---------------------------------------------------------------------------
@@ -909,8 +949,8 @@ class CachedImage(Base):
     width: Mapped[int | None] = mapped_column(Integer)
     height: Mapped[int | None] = mapped_column(Integer)
 
-    fetched_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    last_used_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    fetched_at: Mapped[datetime | None] = mapped_column(UTCDateTime)
+    last_used_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utcnow)
     use_count: Mapped[int] = mapped_column(Integer, default=0)
 
     #: Set when the origin no longer serves it, so we stop retrying and the UI
@@ -918,4 +958,4 @@ class CachedImage(Base):
     gone: Mapped[bool] = mapped_column(Boolean, default=False)
     attempts: Mapped[int] = mapped_column(Integer, default=0)
     last_error: Mapped[str | None] = mapped_column(Text)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utcnow)

@@ -1082,6 +1082,129 @@ def test_search_can_fold_conditions() -> None:
     db.close()
 
 
+def test_timestamps_keep_their_zone() -> None:
+    print("\n== Timestamps say which zone they are in ==")
+    from app.db import SessionLocal, init_db
+    from app.models import Item
+
+    init_db()
+    db = SessionLocal()
+    db.add(Item(provider="amiami", code="TZ-1", name="Timezone test"))
+    db.commit()
+    db.expire_all()
+
+    row = db.query(Item).filter(Item.code == "TZ-1").one()
+    check("a stored timestamp comes back aware", row.first_seen_at.tzinfo is not None)
+
+    # This is the whole point: a naive timestamp serialises without an offset,
+    # and a browser reads that as its own local time. Every date in the
+    # interface was therefore wrong by the viewer's offset, which is how a
+    # slice that had just run reported having run two hours ago for ever.
+    import json
+
+    from app.api.serializers import item_out
+
+    emitted = json.loads(item_out(db, row).model_dump_json())["first_seen_at"]
+    check(
+        "and serialises with its offset attached",
+        emitted.endswith("Z") or "+" in emitted[10:],
+        emitted,
+    )
+
+    _purge(db, "TZ-1")
+    db.close()
+
+
+def test_blocklist_hides_things_while_browsing() -> None:
+    print("\n== A blocklist hides things while browsing ==")
+    from app.db import SessionLocal, init_db
+    from app.models import Item
+    from app.schemas import LocalSearchRequest
+    from app.services import localsearch
+
+    init_db()
+    db = SessionLocal()
+    names = {
+        "BLK-1": "Nendoroid Hatsune Miku",
+        "BLK-2": "Hatsune Miku 1/7 Scale Figure",
+        "BLK-3": "figma Kagamine Rin",
+    }
+    for code, name in names.items():
+        db.add(Item(provider="amiami", code=code, name=name))
+    db.commit()
+
+    def found(**kwargs):
+        result = localsearch.search(db, LocalSearchRequest(q="BLK", **kwargs))
+        return {item.code for item in result.items}
+
+    def by_name(**kwargs):
+        result = localsearch.search(db, LocalSearchRequest(**kwargs))
+        return {i.code for i in result.items if i.code in names}
+
+    check("everything shows with nothing blocked", by_name() == set(names))
+    check(
+        "a blocked word hides its figures",
+        by_name(blocked_terms=["nendoroid"]) == {"BLK-2", "BLK-3"},
+        by_name(blocked_terms=["nendoroid"]),
+    )
+    check(
+        "blocking is case-insensitive",
+        by_name(blocked_terms=["NENDOROID"]) == {"BLK-2", "BLK-3"},
+    )
+    check(
+        "several words can be blocked at once",
+        by_name(blocked_terms=["nendoroid", "figma"]) == {"BLK-2"},
+    )
+    check(
+        "and one search can see past the list",
+        by_name(blocked_terms=["nendoroid"], ignore_blocklist=True) == set(names),
+    )
+    check(
+        "a word that matches nothing hides nothing",
+        by_name(blocked_terms=["gundam"]) == set(names),
+    )
+
+    _purge(db, *names)
+    db.close()
+
+
+def test_rail_filters_take_lists() -> None:
+    print("\n== A rail hands over everything it was built from ==")
+    from app.db import SessionLocal, init_db
+    from app.models import Item
+    from app.schemas import LocalSearchRequest
+    from app.services import localsearch
+
+    init_db()
+    db = SessionLocal()
+    rows = {
+        "RAIL-1": "Vocaloid",
+        "RAIL-2": "Fate/Grand Order",
+        "RAIL-3": "Azur Lane",
+    }
+    for code, series in rows.items():
+        db.add(Item(provider="amiami", code=code, name="Rail test " + code, series=series))
+    db.commit()
+
+    def found(**kwargs):
+        result = localsearch.search(db, LocalSearchRequest(q="Rail test", **kwargs))
+        return {item.code for item in result.items}
+
+    # A Discover rail draws on every series you follow. Handing over only the
+    # first was why "see all" showed a fraction of the rail it came from.
+    check("one series still works", found(series=["Vocaloid"]) == {"RAIL-1"})
+    check(
+        "several series come back together",
+        found(series=["Vocaloid", "Azur Lane"]) == {"RAIL-1", "RAIL-3"},
+        found(series=["Vocaloid", "Azur Lane"]),
+    )
+    check("an empty list filters nothing", found(series=[]) == set(rows))
+    check("an unknown series matches nothing", found(series=["Nothing At All"]) == set())
+
+    _purge(db, *rows)
+    db.close()
+
+
 def _valuation(compare: float | None):
     from app.services.matcher import Valuation
 
@@ -2217,6 +2340,9 @@ def main() -> int:
     test_shelf_tiers()
     test_wishlist_covers_both_conditions()
     test_search_can_fold_conditions()
+    test_timestamps_keep_their_zone()
+    test_blocklist_hides_things_while_browsing()
+    test_rail_filters_take_lists()
     test_history_pruning_keeps_the_irreplaceable()
     test_deleting_a_copy_keeps_its_prices()
     test_image_prune_protects_the_unfetchable()

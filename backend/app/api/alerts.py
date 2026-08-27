@@ -6,7 +6,7 @@ import contextlib
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from fastapi.responses import StreamingResponse
-from sqlalchemy import delete, func, select
+from sqlalchemy import Text, delete, func, or_, select
 from sqlalchemy.orm import Session
 
 from ..db import get_db
@@ -35,7 +35,15 @@ def list_alerts(
     if unread_only:
         stmt = stmt.where(Alert.read_at.is_(None))
     if trigger is not None:
-        stmt = stmt.where(Alert.trigger == trigger)
+        # An alert can qualify several ways at once and is named after the
+        # most important. Filtering only on that name hid alerts that really
+        # did meet the reason being asked for, so the stored list is searched
+        # as well. LIKE on a JSON array is crude but portable, and the quotes
+        # stop "restock" matching "restock_preowned".
+        needle = f'"{trigger.value}"'
+        stmt = stmt.where(
+            or_(Alert.trigger == trigger, Alert.reasons.cast(Text).like(f"%{needle}%"))
+        )
     if watch_id is not None:
         stmt = stmt.where(Alert.watch_id == watch_id)
     rows = db.execute(

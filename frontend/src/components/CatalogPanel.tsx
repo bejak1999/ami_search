@@ -3,6 +3,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { api } from '@/api/client'
 import { useToast } from '@/lib/toast'
 import { duration, relativeTime } from '@/lib/format'
+import { ActivityPanel } from './ActivityPanel'
 import { BackupPanel } from './BackupPanel'
 import { Icon } from './Icon'
 import { Badge, Card, Field, SectionTitle, Spinner, Toggle } from './ui'
@@ -252,7 +253,7 @@ function Slice({
         {slice.first_pass_done && <Badge tone="positive">Complete</Badge>}
         <span className="ml-auto text-xs tabular-nums text-muted">
           {slice.total_results
-            ? `${slice.items_local.toLocaleString('en-GB')} of ~${slice.total_results.toLocaleString('en-GB')} in the shop`
+            ? `${Math.min(slice.items_local, slice.total_results).toLocaleString('en-GB')} of ~${slice.total_results.toLocaleString('en-GB')} in the shop`
             : 'not started'}
         </span>
       </div>
@@ -266,6 +267,16 @@ function Slice({
         <span className="font-medium text-muted">
           {slice.coverage_percent}% of the catalogue held
         </span>
+        {/* A status slice can hold more rows than the shop currently lists,
+            because a listing marked in stock here stays that way until
+            something rechecks it. Saying so beats printing "12,888 of 2,847"
+            and leaving the reader to work out what went wrong. */}
+        {slice.total_results > 0 && slice.items_local > slice.total_results && (
+          <span className="text-warning">
+            {(slice.items_local - slice.total_results).toLocaleString('en-GB')} held here no
+            longer match, awaiting a re-check
+          </span>
+        )}
         {slice.pages_this_cycle ? (
           <span>
             this pass: page {slice.cursor_page.toLocaleString('en-GB')} of{' '}
@@ -649,6 +660,7 @@ export function CatalogPanel() {
         </Card>
       </div>
 
+      <ActivityPanel />
       <BehaviourPanel />
       <BackupPanel />
       <ShelfLifePanel />

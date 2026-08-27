@@ -86,6 +86,9 @@ def init_db() -> None:
     grouped = backfill_figure_codes()
     if grouped:
         log.info("Grouped %s item(s) by figure", grouped)
+    eased = ease_quiet_slices()
+    if eased:
+        log.info("Eased the re-read interval on %s slow-moving slice(s)", eased)
     log.info("Database ready at %s", settings.resolved_database_url.split("://", 1)[0])
 
 
@@ -158,6 +161,42 @@ def backfill_figure_codes() -> int:
             .values(figure_code=derived)
         )
     return pending
+
+
+def ease_quiet_slices() -> int:
+    """Stop re-reading slices that do not change every half hour.
+
+    Every slice started on the same thirty-minute cadence, which is right for
+    used copies - one can be listed and sold inside a morning - and wasteful
+    for first-hand stock and pre-orders, whose head pages hold the same
+    listings from one day to the next. Only slices still sitting on that
+    original default are moved, so a deliberately chosen interval is left
+    exactly as its owner set it.
+    """
+    from . import models
+    from .services.crawler import DEFAULT_SCOPES
+
+    OLD_DEFAULT = 30
+    wanted = {
+        spec["scope"]: spec["recheck_interval_minutes"]
+        for spec in DEFAULT_SCOPES
+        if spec.get("recheck_interval_minutes", OLD_DEFAULT) != OLD_DEFAULT
+    }
+    if not wanted:
+        return 0
+
+    changed = 0
+    with session_scope() as db:
+        try:
+            crawls = db.query(models.CatalogCrawl).all()
+        except Exception:  # pragma: no cover - table may not exist yet
+            return 0
+        for crawl in crawls:
+            target = wanted.get(crawl.scope)
+            if target and (crawl.recheck_interval_minutes or OLD_DEFAULT) == OLD_DEFAULT:
+                crawl.recheck_interval_minutes = target
+                changed += 1
+    return changed
 
 
 def _backup_sqlite() -> Path | None:
