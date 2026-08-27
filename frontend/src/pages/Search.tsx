@@ -282,7 +282,7 @@ export function SearchPage() {
               <>
                 <span>
                   <strong className="text-ink tabular-nums">
-                    {search.data.total.toLocaleString()}
+                    {search.data.total.toLocaleString('en-GB')}
                   </strong>{' '}
                   results
                 </span>
@@ -333,7 +333,7 @@ export function SearchPage() {
                 Previous
               </button>
               <span className="px-3 text-sm text-muted tabular-nums">
-                Page {submitted.page} of {search.data.pages.toLocaleString()}
+                Page {submitted.page} of {search.data.pages.toLocaleString('en-GB')}
               </span>
               <button
                 onClick={() => goToPage(submitted.page + 1)}

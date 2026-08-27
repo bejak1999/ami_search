@@ -96,6 +96,13 @@ def upsert_item(db: Session, normalized: NormalizedItem, commit: bool = True) ->
         item.last_detail_fetch_at = utcnow()
         item.raw = normalized.raw
 
+    # Record which photos exist so they can be served and fetched later. The
+    # public route is a hash of the source URL and cannot be reversed, so
+    # without this the image endpoint has no idea what to go and get.
+    from . import images as image_cache
+
+    image_cache.register(db, image_cache.urls_for_item(item))
+
     price_moved = normalized.price is not None and normalized.price != previous_price
     stock_moved = normalized.in_stock != previous_stock
     changed = created or price_moved or stock_moved

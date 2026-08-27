@@ -1,5 +1,15 @@
 /** Formatting helpers shared across the UI. */
 
+/**
+ * The interface is written in English, so its dates and numbers are formatted
+ * in English too. Following the browser's locale instead produced sentences
+ * like "ran vor 2 Stunden" sitting inside an otherwise English page.
+ *
+ * Currency and date *values* are still locale-correct for en-GB conventions;
+ * only the language is pinned.
+ */
+const LOCALE = 'en-GB'
+
 const NO_DECIMAL_CURRENCIES = new Set(['JPY', 'KRW', 'VND'])
 
 export function money(amount: number | null | undefined, currency = 'JPY'): string {
@@ -7,7 +17,7 @@ export function money(amount: number | null | undefined, currency = 'JPY'): stri
   const code = currency.toUpperCase()
   const fractionDigits = NO_DECIMAL_CURRENCIES.has(code) ? 0 : 2
   try {
-    return new Intl.NumberFormat(undefined, {
+    return new Intl.NumberFormat(LOCALE, {
       style: 'currency',
       currency: code,
       minimumFractionDigits: fractionDigits,
@@ -22,7 +32,7 @@ export function compactMoney(amount: number | null | undefined, currency = 'JPY'
   if (amount === null || amount === undefined) return '—'
   if (Math.abs(amount) < 10000) return money(amount, currency)
   const code = currency.toUpperCase()
-  return `${new Intl.NumberFormat(undefined, { notation: 'compact', maximumFractionDigits: 1 }).format(amount)} ${code}`
+  return `${new Intl.NumberFormat(LOCALE, { notation: 'compact', maximumFractionDigits: 1 }).format(amount)} ${code}`
 }
 
 export function percent(value: number | null | undefined, digits = 0): string {
@@ -30,7 +40,7 @@ export function percent(value: number | null | undefined, digits = 0): string {
   return `${value >= 0 ? '' : ''}${value.toFixed(digits)}%`
 }
 
-const RELATIVE = new Intl.RelativeTimeFormat(undefined, { numeric: 'auto' })
+const RELATIVE = new Intl.RelativeTimeFormat(LOCALE, { numeric: 'auto' })
 const UNITS: [Intl.RelativeTimeFormatUnit, number][] = [
   ['year', 31536000],
   ['month', 2592000],
@@ -58,14 +68,14 @@ export function dateTime(value: string | Date | null | undefined): string {
   if (!value) return '—'
   const date = typeof value === 'string' ? new Date(value) : value
   if (Number.isNaN(date.getTime())) return '—'
-  return new Intl.DateTimeFormat(undefined, { dateStyle: 'medium', timeStyle: 'short' }).format(date)
+  return new Intl.DateTimeFormat(LOCALE, { dateStyle: 'medium', timeStyle: 'short' }).format(date)
 }
 
 export function shortDate(value: string | Date | null | undefined): string {
   if (!value) return '—'
   const date = typeof value === 'string' ? new Date(value) : value
   if (Number.isNaN(date.getTime())) return '—'
-  return new Intl.DateTimeFormat(undefined, { month: 'short', day: 'numeric' }).format(date)
+  return new Intl.DateTimeFormat(LOCALE, { month: 'short', day: 'numeric' }).format(date)
 }
 
 export function duration(seconds: number | null | undefined): string {

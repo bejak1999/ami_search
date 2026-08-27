@@ -198,6 +198,157 @@ function MfcSession() {
   )
 }
 
+/**
+ * One shop slice.
+ *
+ * Two numbers that were previously conflated are now kept apart, because
+ * mixing them produced the reading "52,691 of ~10,475": how much of the slice
+ * this instance holds, counted from the database, and how far the current
+ * pass has got through its pages. The cumulative listings-checked figure grows
+ * by fifty per page on every pass forever and is labelled as such.
+ */
+function Slice({
+  slice,
+  onToggle,
+  onRestart,
+}: {
+  slice: any
+  onToggle: (enabled: boolean) => void
+  onRestart: () => void
+}) {
+  const toast = useToast()
+  const queryClient = useQueryClient()
+  const [open, setOpen] = useState(false)
+
+  const save = useMutation({
+    mutationFn: (body: Record<string, unknown>) =>
+      api.admin.updateCatalogSlice(slice.scope, body),
+    onSuccess: () => {
+      toast.success('Slice settings saved')
+      void queryClient.invalidateQueries({ queryKey: ['admin', 'catalog'] })
+    },
+  })
+
+  const resting = slice.next_run_in_seconds > 0
+
+  return (
+    <div>
+      <div className="mb-1.5 flex flex-wrap items-center gap-2">
+        <span className="text-sm font-medium">{slice.label}</span>
+        <Badge
+          tone={
+            slice.state === 'running'
+              ? 'accent'
+              : slice.state === 'completed'
+                ? 'positive'
+                : slice.state === 'failed'
+                  ? 'danger'
+                  : 'neutral'
+          }
+        >
+          {resting ? 'resting' : slice.state}
+        </Badge>
+        {slice.first_pass_done && <Badge tone="positive">Complete</Badge>}
+        <span className="ml-auto text-xs tabular-nums text-muted">
+          {slice.total_results
+            ? `${slice.items_local.toLocaleString('en-GB')} of ~${slice.total_results.toLocaleString('en-GB')} in the shop`
+            : 'not started'}
+        </span>
+      </div>
+
+      <Bar
+        percent={slice.coverage_percent}
+        tone={slice.coverage_percent >= 95 ? 'positive' : 'accent'}
+      />
+
+      <div className="mt-1.5 flex flex-wrap items-center gap-x-4 gap-y-1 text-[11px] text-faint">
+        <span className="font-medium text-muted">
+          {slice.coverage_percent}% of the catalogue held
+        </span>
+        {slice.pages_this_cycle ? (
+          <span>
+            this pass: page {slice.cursor_page.toLocaleString('en-GB')} of{' '}
+            {slice.pages_this_cycle.toLocaleString('en-GB')} ({slice.pass_percent}%)
+          </span>
+        ) : null}
+        <span>{slice.items_changed.toLocaleString('en-GB')} price changes recorded</span>
+        {resting ? (
+          <span>next pass in {duration(slice.next_run_in_seconds)}</span>
+        ) : !slice.first_pass_done && slice.eta_seconds ? (
+          <span>first pass done in {eta(slice.eta_seconds)}</span>
+        ) : null}
+        {slice.last_run_at && <span>ran {relativeTime(slice.last_run_at)}</span>}
+
+        <span className="ml-auto flex items-center gap-2">
+          <button onClick={() => setOpen((v) => !v)} className="hover:text-ink">
+            settings
+          </button>
+          <button onClick={onRestart} className="hover:text-ink" title="Rewind to page 1">
+            rewind
+          </button>
+          <Toggle checked={slice.enabled} onChange={onToggle} label={slice.enabled ? 'on' : 'off'} />
+        </span>
+      </div>
+
+      {open && (
+        <div className="mt-2 grid gap-3 rounded-control border border-line bg-raised p-3 sm:grid-cols-3">
+          <Field
+            label="Re-check every"
+            hint="How long to wait before reading the newest pages again."
+          >
+            <div className="flex items-center gap-2">
+              <input
+                type="number"
+                min={5}
+                max={10080}
+                defaultValue={slice.recheck_minutes}
+                onBlur={(e) =>
+                  save.mutate({ recheck_interval_minutes: Number(e.target.value) })
+                }
+                className="field w-24 tabular-nums"
+              />
+              <span className="text-xs text-faint">minutes</span>
+            </div>
+          </Field>
+          <Field label="Pages per re-check" hint="50 listings per page, newest first.">
+            <input
+              type="number"
+              min={1}
+              max={500}
+              defaultValue={slice.head_pages ?? 20}
+              onBlur={(e) => save.mutate({ head_pages: Number(e.target.value) })}
+              className="field w-24 tabular-nums"
+            />
+          </Field>
+          <Field label="Full sweep every" hint="Occasionally re-read the whole slice.">
+            <div className="flex items-center gap-2">
+              <input
+                type="number"
+                min={1}
+                max={365}
+                defaultValue={slice.full_sweep_interval_days ?? 7}
+                onBlur={(e) =>
+                  save.mutate({ full_sweep_interval_days: Number(e.target.value) })
+                }
+                className="field w-24 tabular-nums"
+              />
+              <span className="text-xs text-faint">days</span>
+            </div>
+          </Field>
+          <p className="text-[11px] leading-relaxed text-faint sm:col-span-3">
+            {slice.cycles_completed.toLocaleString('en-GB')} pass(es) so far,{' '}
+            {slice.listings_checked.toLocaleString('en-GB')} listings checked in total. That
+            counter accumulates across every pass, so it climbs well past the number of items
+            the slice actually contains.
+          </p>
+        </div>
+      )}
+
+      {slice.last_error && <p className="mt-1 text-[11px] text-danger">{slice.last_error}</p>}
+    </div>
+  )
+}
+
 export function CatalogPanel() {
   const toast = useToast()
   const queryClient = useQueryClient()
@@ -267,68 +418,12 @@ export function CatalogPanel() {
           ) : (
             <div className="space-y-4">
               {(data?.slices ?? []).map((slice: any) => (
-                <div key={slice.scope}>
-                  <div className="mb-1.5 flex flex-wrap items-center gap-2">
-                    <span className="text-sm font-medium">{slice.label}</span>
-                    <Badge
-                      tone={
-                        slice.state === 'running'
-                          ? 'accent'
-                          : slice.state === 'completed'
-                            ? 'positive'
-                            : slice.state === 'failed'
-                              ? 'danger'
-                              : 'neutral'
-                      }
-                    >
-                      {slice.state}
-                    </Badge>
-                    {slice.first_pass_done && <Badge tone="positive">First pass done</Badge>}
-                    {slice.cycles_completed > 0 && (
-                      <span className="text-[11px] text-faint">
-                        {slice.cycles_completed} pass(es)
-                      </span>
-                    )}
-                    <span className="ml-auto text-xs tabular-nums text-muted">
-                      {slice.total_results
-                        ? `${slice.items_seen.toLocaleString()} of ~${slice.total_results.toLocaleString()}`
-                        : 'not started'}
-                    </span>
-                  </div>
-
-                  <Bar percent={slice.percent} tone={slice.first_pass_done ? 'positive' : 'accent'} />
-
-                  <div className="mt-1.5 flex flex-wrap items-center gap-x-4 gap-y-1 text-[11px] text-faint">
-                    <span>
-                      page {slice.cursor_page.toLocaleString()} of{' '}
-                      {slice.pages_this_cycle ? slice.pages_this_cycle.toLocaleString() : '?'}
-                    </span>
-                    <span>{slice.items_new.toLocaleString()} new</span>
-                    <span>{slice.items_changed.toLocaleString()} price changes</span>
-                    {!slice.first_pass_done && slice.eta_seconds ? (
-                      <span>finishes in {eta(slice.eta_seconds)}</span>
-                    ) : null}
-                    {slice.last_run_at && <span>ran {relativeTime(slice.last_run_at)}</span>}
-                    <span className="ml-auto flex items-center gap-2">
-                      <button
-                        onClick={() => restart.mutate(slice.scope)}
-                        className="hover:text-ink"
-                        title="Rewind this slice to page 1"
-                      >
-                        rewind
-                      </button>
-                      <Toggle
-                        checked={slice.enabled}
-                        onChange={(enabled) => toggleSlice.mutate({ scope: slice.scope, enabled })}
-                        label={slice.enabled ? 'on' : 'off'}
-                      />
-                    </span>
-                  </div>
-
-                  {slice.last_error && (
-                    <p className="mt-1 text-[11px] text-danger">{slice.last_error}</p>
-                  )}
-                </div>
+                <Slice
+                  key={slice.scope}
+                  slice={slice}
+                  onToggle={(enabled) => toggleSlice.mutate({ scope: slice.scope, enabled })}
+                  onRestart={() => restart.mutate(slice.scope)}
+                />
               ))}
             </div>
           )}
@@ -339,16 +434,16 @@ export function CatalogPanel() {
           <p className="mb-1 flex items-baseline justify-between text-xs">
             <span className="text-muted">Linked to MyFigureCollection</span>
             <span className="font-medium tabular-nums">
-              {(data?.items_linked_to_mfc ?? 0).toLocaleString()} /{' '}
-              {(data?.items_known ?? 0).toLocaleString()}
+              {(data?.items_linked_to_mfc ?? 0).toLocaleString('en-GB')} /{' '}
+              {(data?.items_known ?? 0).toLocaleString('en-GB')}
             </span>
           </p>
           <Bar percent={linkedPercent} />
 
           <dl className="mt-4 space-y-1.5 text-xs">
             {[
-              ['Still queued', (mfc.pending_items ?? 0).toLocaleString()],
-              ['Known tags', (mfc.tags ?? 0).toLocaleString()],
+              ['Still queued', (mfc.pending_items ?? 0).toLocaleString('en-GB')],
+              ['Known tags', (mfc.tags ?? 0).toLocaleString('en-GB')],
               ['Rate', `${mfc.requests_per_minute ?? '—'} req/min`],
               ['Finishes in', eta(mfc.eta_seconds)],
             ].map(([label, value]) => (
@@ -457,7 +552,7 @@ function ImageCache() {
           </p>
           <Bar percent={d.percent_of_budget} tone={d.percent_of_budget > 90 ? 'accent' : 'positive'} />
           <p className="mt-1.5 text-[11px] text-faint">
-            {d.count.toLocaleString()} photos, {bytes(d.average_bytes)} each on average
+            {d.count.toLocaleString('en-GB')} photos, {bytes(d.average_bytes)} each on average
           </p>
         </div>
 
@@ -465,7 +560,7 @@ function ImageCache() {
           <p className="mb-1 flex items-baseline justify-between text-xs">
             <span className="text-muted">Catalogue covered</span>
             <span className="font-medium tabular-nums">
-              {d.count.toLocaleString()} / {d.expected_images.toLocaleString()}
+              {d.count.toLocaleString('en-GB')} / {d.expected_images.toLocaleString('en-GB')}
             </span>
           </p>
           <Bar percent={d.coverage_percent} />
@@ -481,14 +576,14 @@ function ImageCache() {
           <div key={kind} className="flex justify-between gap-3">
             <dt className="text-muted">{kind === 'thumb' ? 'Thumbnails' : 'Full images'}</dt>
             <dd className="tabular-nums">
-              {info.count.toLocaleString()} · {bytes(info.bytes)}
+              {info.count.toLocaleString('en-GB')} · {bytes(info.bytes)}
             </dd>
           </div>
         ))}
         {d.gone_upstream > 0 && (
           <div className="flex justify-between gap-3">
             <dt className="text-muted">Gone from the shop</dt>
-            <dd className="tabular-nums text-warning">{d.gone_upstream.toLocaleString()}</dd>
+            <dd className="tabular-nums text-warning">{d.gone_upstream.toLocaleString('en-GB')}</dd>
           </div>
         )}
         <div className="flex justify-between gap-3">

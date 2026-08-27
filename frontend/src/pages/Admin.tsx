@@ -59,14 +59,14 @@ export function AdminPage() {
         />
         <Stat
           label="Checks run"
-          value={(scheduler?.runs_total ?? 0).toLocaleString()}
+          value={(scheduler?.runs_total ?? 0).toLocaleString('en-GB')}
           sub={`${scheduler?.errors_total ?? 0} errors · ${scheduler?.alerts_total ?? 0} alerts`}
           icon="refresh"
         />
         <Stat
           label="Catalogue"
-          value={(status.data?.items ?? 0).toLocaleString()}
-          sub={`${(status.data?.price_points ?? 0).toLocaleString()} price observations`}
+          value={(status.data?.items ?? 0).toLocaleString('en-GB')}
+          sub={`${(status.data?.price_points ?? 0).toLocaleString('en-GB')} price observations`}
           icon="box"
         />
         <Stat

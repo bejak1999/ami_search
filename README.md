@@ -50,7 +50,7 @@ It also answers the question the shop price does not: **what will this actually 
 
 ### 🖼️ Photos that outlive the listing
 - AmiAmi removes a pre-owned listing's pictures the moment it sells, so every other fact about the figure would survive here next to a broken frame
-- Both sizes are kept on disk: a **4 KB thumbnail** for grids and alerts, an **80 KB full image** for the item page
+- Grids and the item page both show AmiAmi's **600x600 image**; its 300x300 thumbnail is visibly soft, and on a page whose whole purpose is judging figures by eye that trade goes the wrong way
 - Cached on first view, then filled in by a background job that does wishlists and watched items first
 - Content-addressed and sharded, with an LRU budget; photos of items you actually track are never evicted
 - When the figure is listed pre-owned again, the row is already here and only its price changes — the picture is still there too
@@ -73,6 +73,7 @@ It also answers the question the shop price does not: **what will this actually 
 - **Irregular by design.** Gaps are drawn from a log-normal distribution with occasional long breaks and an overnight slowdown, because a request every six seconds on the dot is the most recognisable thing a crawler can do
 - **Alerts always win.** The crawl stops the instant one of your watches is due
 - Resumable cursors, so a restart continues instead of starting over. After the first pass only the newest pages are re-read, with a full sweep every so often
+- **Per-slice settings** in Administration: how often to re-check, how deep, how often to sweep the lot
 - Progress, rates and estimates are all visible in **Administration**
 
 ### 🏷️ Discovery by MyFigureCollection tag
@@ -242,6 +243,7 @@ Measured against a real catalogue, not estimated:
 | + full detail | 4.0 KB |
 | + MyFigureCollection tags (37 of them) | 3.4 KB |
 | + both photos (4 KB thumbnail, 80 KB full) | 81 KB |
+| photos alone, full images only | 80 KB |
 | each recorded price change | 95 B |
 
 For the whole figure catalogue of about 68,000 items:
@@ -333,7 +335,7 @@ Then add it in `backend/app/providers/registry.py`. The database already keys ev
 ```bash
 cd backend
 
-python tests/test_offline.py       # 196 assertions, no network
+python tests/test_offline.py       # 208 assertions, no network
 python tests/test_migration.py     # 15 assertions: upgrading an old database
 python tests/smoke_e2e.py          # 68 assertions against the live AmiAmi API
 python tests/smoke_discovery.py    # 25 assertions across AmiAmi and MFC

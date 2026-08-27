@@ -20,17 +20,20 @@ from ..services import fx, landed_cost
 from ..services import images as image_cache
 
 
-def _thumb(url: str | None) -> str | None:
-    """Prefer the small version of a photo for list views.
+def _card_image(url: str | None) -> str | None:
+    """The photo a grid tile should show.
 
-    Which size an item carries depends on where it was seen: search gives a
-    thumbnail, the detail endpoint gives the full image. Without this, a grid
-    of items that happen to have been detail-loaded pulls 80 KB per tile
-    instead of 4 KB.
+    The full image, not the thumbnail. AmiAmi's 300px thumbnails are visibly
+    soft, and on a page whose entire purpose is judging figures by eye that
+    trade is the wrong way round: the bandwidth is cheap once cached locally,
+    the detail is not.
+
+    Normalising to one size also stops tiles looking inconsistent depending on
+    whether an item was last seen in search results or fetched in detail.
     """
     if not url:
         return url
-    return image_cache.thumbnail_of(url) or url
+    return image_cache.full_of(url) or url
 
 
 def _discount(price: float | None, list_price: float | None) -> float | None:
@@ -73,8 +76,7 @@ def item_from_normalized(
         list_price=normalized.list_price,
         # Point at the local copy: AmiAmi removes a pre-owned listing's photos
         # when it sells, and by then this row is the only record left.
-        # Cards want the small version; the gallery keeps the large ones.
-        image_url=image_cache.public_url(_thumb(normalized.image_url)),
+        image_url=image_cache.public_url(_card_image(normalized.image_url)),
         images=[image_cache.public_url(u) for u in normalized.images if u],
         maker=normalized.maker,
         series=normalized.series,
@@ -144,7 +146,7 @@ def item_out(
         price_max=item.price_max,
         variants=item.variants or [],
         list_price=item.list_price,
-        image_url=image_cache.public_url(_thumb(item.image_url)),
+        image_url=image_cache.public_url(_card_image(item.image_url)),
         images=[image_cache.public_url(u) for u in (item.images or []) if u],
         maker=item.maker,
         series=item.series,

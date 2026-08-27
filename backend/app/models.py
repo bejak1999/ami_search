@@ -681,6 +681,10 @@ class CatalogCrawl(Base):
     #: After a first full sweep, later cycles only re-read the newest pages,
     #: because the shop lists newest first and the tail rarely changes.
     head_pages: Mapped[int] = mapped_column(Integer, default=20)
+    #: How long to wait before re-reading the newest pages. Without a pause the
+    #: crawler simply loops over the same first pages continuously, which is
+    #: how one slice accumulated 43 passes in an afternoon.
+    recheck_interval_minutes: Mapped[int] = mapped_column(Integer, default=30)
     full_sweep_interval_days: Mapped[int] = mapped_column(Integer, default=7)
     last_full_sweep_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     cycles_completed: Mapped[int] = mapped_column(Integer, default=0)

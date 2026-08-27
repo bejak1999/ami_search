@@ -33,6 +33,15 @@ log = logging.getLogger(__name__)
 
 #: The slices we build, best first. Pre-owned moves fastest and is what people
 #: actually hunt, so it fills in before the much larger long tail.
+#: How each slice's membership is expressed as a local query, so coverage can
+#: be counted from the database instead of from a counter that only ever grows.
+SCOPE_FILTERS: dict[str, str] = {
+    "figures_preowned": "preowned",
+    "figures_in_stock": "in_stock",
+    "figures_preorder": "preorder",
+    "figures_all": "all",
+}
+
 DEFAULT_SCOPES: list[dict] = [
     {
         "scope": "figures_preowned",
@@ -189,23 +198,52 @@ def _page_limit(crawl: CatalogCrawl) -> int:
     return min(pages_total, max(1, crawl.head_pages or 20))
 
 
+def _cooldown_remaining(crawl: CatalogCrawl) -> int:
+    """Seconds until this slice is allowed to start its next pass.
+
+    Only applies between cycles. A pass already under way always continues, so
+    the cooldown never leaves a slice stranded half-finished.
+    """
+    if (crawl.cursor_page or 1) > 1:
+        return 0  # mid-pass
+    if not (crawl.cycles_completed or 0):
+        return 0  # never run
+    finished = crawl.finished_at
+    if finished is None:
+        return 0
+    if finished.tzinfo is None:
+        finished = finished.replace(tzinfo=timezone.utc)
+    wait = timedelta(minutes=max(1, crawl.recheck_interval_minutes or 30))
+    remaining = (finished + wait) - datetime.now(timezone.utc)
+    return max(0, int(remaining.total_seconds()))
+
+
 def _select_crawl(db: Session, provider: str) -> CatalogCrawl | None:
-    return db.execute(
-        select(CatalogCrawl)
-        .where(
-            CatalogCrawl.provider == provider,
-            CatalogCrawl.enabled.is_(True),
-            CatalogCrawl.consecutive_errors < 5,
+    candidates = list(
+        db.execute(
+            select(CatalogCrawl)
+            .where(
+                CatalogCrawl.provider == provider,
+                CatalogCrawl.enabled.is_(True),
+                CatalogCrawl.consecutive_errors < 5,
+            )
+            .order_by(
+                # Anything mid-sweep finishes before a fresh slice starts, so
+                # progress is visible rather than spread thinly everywhere.
+                (CatalogCrawl.state == CrawlState.running).desc(),
+                CatalogCrawl.priority.asc(),
+                CatalogCrawl.last_run_at.asc().nulls_first(),
+            )
         )
-        .order_by(
-            # Anything mid-sweep finishes before a fresh slice starts, so
-            # progress is visible rather than spread thinly everywhere.
-            (CatalogCrawl.state == CrawlState.running).desc(),
-            CatalogCrawl.priority.asc(),
-            CatalogCrawl.last_run_at.asc().nulls_first(),
-        )
-        .limit(1)
-    ).scalar_one_or_none()
+        .scalars()
+        .all()
+    )
+    # Skip slices still resting between passes, so the budget goes to a slice
+    # that has work to do instead of re-reading the same first pages.
+    for crawl in candidates:
+        if _cooldown_remaining(crawl) == 0:
+            return crawl
+    return None
 
 
 def run_once(db: Session, provider_id: str = "amiami", budget_seconds: int | None = None) -> CrawlRun:
@@ -351,6 +389,26 @@ def _complete_cycle(db: Session, crawl: CatalogCrawl) -> None:
     )
 
 
+def local_count(db: Session, scope: str, provider_id: str) -> int:
+    """How many distinct items this slice has actually put in the database.
+
+    Counting rows beats trusting a counter: ``items_seen`` accumulates fifty
+    per page on every pass forever, so after a few dozen head passes it read
+    "52,691 of ~10,475", which is not a ratio of anything.
+    """
+    from ..models import Condition
+
+    stmt = select(func.count(Item.id)).where(Item.provider == provider_id)
+    kind = SCOPE_FILTERS.get(scope, "all")
+    if kind == "preowned":
+        stmt = stmt.where(Item.condition == Condition.preowned)
+    elif kind == "in_stock":
+        stmt = stmt.where(Item.in_stock.is_(True))
+    elif kind == "preorder":
+        stmt = stmt.where(Item.is_preorder.is_(True))
+    return int(db.execute(stmt).scalar_one() or 0)
+
+
 def progress(db: Session, provider_id: str = "amiami") -> dict:
     """Everything the admin view needs to show how the build is going."""
     crawls = list(
@@ -367,18 +425,29 @@ def progress(db: Session, provider_id: str = "amiami") -> dict:
     for crawl in crawls:
         limit = _page_limit(crawl) if crawl.pages_total else 0
         done = min((crawl.cursor_page or 1) - 1, limit) if limit else 0
+        local = local_count(db, crawl.scope, provider_id)
+        upstream = crawl.total_results or 0
         slices.append(
             {
                 "scope": crawl.scope,
+                "coverage_percent": (
+                    round(min(local, upstream) / upstream * 100, 1) if upstream else 0.0
+                ),
                 "label": crawl.label or crawl.scope,
                 "state": crawl.state.value,
                 "enabled": crawl.enabled,
                 "cursor_page": crawl.cursor_page,
                 "pages_total": crawl.pages_total,
                 "pages_this_cycle": limit,
-                "percent": round(done / limit * 100, 1) if limit else 0.0,
+                # Two different things, kept apart because conflating them is
+                # what produced the nonsense ratio: how far through the
+                # current pass we are, and how much of the slice we hold.
+                "pass_percent": round(done / limit * 100, 1) if limit else 0.0,
                 "total_results": crawl.total_results,
-                "items_seen": crawl.items_seen,
+                # Distinct items this slice holds locally, counted now.
+                "items_local": local,
+                # Cumulative across every pass ever run, hence separate.
+                "listings_checked": crawl.items_seen,
                 "items_new": crawl.items_new,
                 "items_changed": crawl.items_changed,
                 "cycles_completed": crawl.cycles_completed,
@@ -387,6 +456,10 @@ def progress(db: Session, provider_id: str = "amiami") -> dict:
                 "last_full_sweep_at": crawl.last_full_sweep_at,
                 "last_error": crawl.last_error,
                 "eta_seconds": _eta_seconds(limit - done),
+                "next_run_in_seconds": _cooldown_remaining(crawl),
+                "recheck_minutes": crawl.recheck_interval_minutes,
+                "head_pages": crawl.head_pages,
+                "full_sweep_interval_days": crawl.full_sweep_interval_days,
             }
         )
 

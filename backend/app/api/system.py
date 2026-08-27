@@ -266,6 +266,20 @@ def update_catalog_slice(
         crawl.state = CrawlState.idle
         crawl.consecutive_errors = 0
         crawl.last_error = None
+        crawl.finished_at = None
+
+    # How often this slice re-reads the shop's newest pages, and how deep.
+    if "recheck_interval_minutes" in payload:
+        crawl.recheck_interval_minutes = max(
+            5, min(int(payload["recheck_interval_minutes"]), 60 * 24 * 7)
+        )
+    if "head_pages" in payload:
+        crawl.head_pages = max(1, min(int(payload["head_pages"]), 500))
+    if "full_sweep_interval_days" in payload:
+        crawl.full_sweep_interval_days = max(1, min(int(payload["full_sweep_interval_days"]), 365))
+    if "priority" in payload:
+        crawl.priority = max(0, min(int(payload["priority"]), 1000))
+
     db.commit()
     return MessageResponse(message=f"Slice {scope} updated")
 

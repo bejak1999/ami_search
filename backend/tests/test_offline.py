@@ -805,6 +805,87 @@ def test_crawler_cycles() -> None:
     )
 
 
+def test_crawler_cooldown() -> None:
+    print()
+    print("== Resting between passes ==")
+    from datetime import timedelta as td
+
+    from app.models import CatalogCrawl
+    from app.services.crawler import _cooldown_remaining
+
+    now = datetime.now(timezone.utc)
+
+    never_run = CatalogCrawl(provider="amiami", scope="s", cursor_page=1, cycles_completed=0)
+    check("a slice that never ran starts immediately", _cooldown_remaining(never_run) == 0)
+
+    mid_pass = CatalogCrawl(
+        provider="amiami", scope="s", cursor_page=7, cycles_completed=3,
+        finished_at=now, recheck_interval_minutes=30,
+    )
+    check("a pass under way is never held back", _cooldown_remaining(mid_pass) == 0)
+
+    just_finished = CatalogCrawl(
+        provider="amiami", scope="s", cursor_page=1, cycles_completed=3,
+        finished_at=now, recheck_interval_minutes=30,
+    )
+    remaining = _cooldown_remaining(just_finished)
+    check("a finished pass rests", 1700 <= remaining <= 1800, remaining)
+
+    rested = CatalogCrawl(
+        provider="amiami", scope="s", cursor_page=1, cycles_completed=3,
+        finished_at=now - td(minutes=31), recheck_interval_minutes=30,
+    )
+    check("and starts again once the interval has passed", _cooldown_remaining(rested) == 0)
+
+    # The interval is what stops a slice looping over its first pages: without
+    # it, one slice managed 43 passes in an afternoon.
+    slow = CatalogCrawl(
+        provider="amiami", scope="s", cursor_page=1, cycles_completed=1,
+        finished_at=now, recheck_interval_minutes=240,
+    )
+    check("a longer interval rests longer", _cooldown_remaining(slow) > 14000, _cooldown_remaining(slow))
+
+    missing = CatalogCrawl(provider="amiami", scope="s", cursor_page=1, cycles_completed=1)
+    check("no recorded finish means no wait", _cooldown_remaining(missing) == 0)
+
+
+def test_crawler_coverage_counting() -> None:
+    print()
+    print("== Coverage counts rows, not page reads ==")
+    from app.db import SessionLocal, init_db
+    from app.models import Condition, Item
+    from app.services.crawler import local_count
+
+    init_db()
+    db = SessionLocal()
+    try:
+        for n in range(7):
+            db.add(
+                Item(
+                    provider="amiami",
+                    code=f"COVER-{n}",
+                    name=f"Item {n}",
+                    condition=Condition.preowned if n < 4 else Condition.new,
+                    in_stock=n % 2 == 0,
+                    is_preorder=n == 6,
+                )
+            )
+        db.commit()
+
+        check("pre-owned slice counts pre-owned rows", local_count(db, "figures_preowned", "amiami") == 4)
+        check("in-stock slice counts stocked rows", local_count(db, "figures_in_stock", "amiami") == 4)
+        check("pre-order slice counts pre-orders", local_count(db, "figures_preorder", "amiami") == 1)
+        check("the catch-all counts everything", local_count(db, "figures_all", "amiami") == 7)
+        check("another provider counts nothing here", local_count(db, "figures_all", "mandarake") == 0)
+
+        # The point of the change: re-reading pages cannot inflate this.
+        before = local_count(db, "figures_preowned", "amiami")
+        after = local_count(db, "figures_preowned", "amiami")
+        check("counting twice gives the same answer", before == after == 4)
+    finally:
+        db.close()
+
+
 def test_crawler_yields_to_watches() -> None:
     print()
     print("== The crawl stands aside for watches ==")
@@ -1071,6 +1152,8 @@ def main() -> int:
     test_rate_limiting()
     test_pacing()
     test_crawler_cycles()
+    test_crawler_cooldown()
+    test_crawler_coverage_counting()
     test_crawler_yields_to_watches()
     test_mfc_cookie_parsing()
     test_health_detection()

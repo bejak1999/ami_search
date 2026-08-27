@@ -131,6 +131,36 @@ def _download(url: str) -> tuple[bytes, str]:
     return content, content_type
 
 
+def register(db: Session, urls: list[str], *, commit: bool = False) -> int:
+    """Note that these photos exist, without downloading them.
+
+    The public route is a hash of the source URL, which cannot be reversed, so
+    the server has to have been told the mapping before it can serve or fetch
+    anything. Recording it when the item is stored means one write per photo
+    ever, rather than a lookup on every page render.
+    """
+    if not settings.image_cache_enabled:
+        return 0
+
+    wanted = {key_for(u): u for u in urls if u and u.startswith("http")}
+    if not wanted:
+        return 0
+
+    known = set(
+        db.execute(select(CachedImage.key).where(CachedImage.key.in_(wanted))).scalars().all()
+    )
+    added = 0
+    for key, url in wanted.items():
+        if key in known:
+            continue
+        db.add(CachedImage(key=key, source_url=url, kind=kind_for(url)))
+        added += 1
+
+    if added and commit:
+        db.commit()
+    return added
+
+
 def fetch(db: Session, url: str, *, touch: bool = True) -> StoredImage | None:
     """Return the local copy, downloading it first if need be.
 
