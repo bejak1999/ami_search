@@ -47,7 +47,12 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
   const response = await fetch(`/api${path}`, {
     credentials: 'include',
     headers: {
-      ...(init.body ? { 'Content-Type': 'application/json' } : {}),
+      // FormData carries its own multipart content type with a generated
+      // boundary. Declaring JSON over the top of it makes the body
+      // unparseable at the other end, which is a confusing way to fail.
+      ...(init.body && !(init.body instanceof FormData)
+        ? { 'Content-Type': 'application/json' }
+        : {}),
       ...(init.headers || {}),
     },
     ...init,
@@ -83,6 +88,50 @@ const post = <T>(path: string, body?: unknown) =>
 const patch = <T>(path: string, body: unknown) =>
   request<T>(path, { method: 'PATCH', body: JSON.stringify(body) })
 const del = <T>(path: string) => request<T>(path, { method: 'DELETE' })
+
+/**
+ * Save a response to disk under the filename the server chose.
+ *
+ * A backup can be gigabytes, so the whole thing goes through a blob rather
+ * than any kind of string, and the object URL is released once the click has
+ * been handed to the browser.
+ */
+async function download(path: string, fallbackName: string): Promise<void> {
+  const response = await fetch(`/api${path}`, { credentials: 'include' })
+  if (response.status === 401) {
+    onUnauthorized?.()
+    throw new ApiError(401, 'Your session expired. Please sign in again.')
+  }
+  if (!response.ok) {
+    let detail = `Download failed with status ${response.status}`
+    try {
+      const payload = await response.json()
+      if (typeof payload?.detail === 'string') detail = payload.detail
+    } catch {
+      /* keep the generic message */
+    }
+    throw new ApiError(response.status, detail)
+  }
+
+  const disposition = response.headers.get('content-disposition') || ''
+  const match = /filename="?([^"]+)"?/.exec(disposition)
+  const blob = await response.blob()
+  const url = URL.createObjectURL(blob)
+  const anchor = document.createElement('a')
+  anchor.href = url
+  anchor.download = match?.[1] ?? fallbackName
+  document.body.appendChild(anchor)
+  anchor.click()
+  anchor.remove()
+  URL.revokeObjectURL(url)
+}
+
+/** Multipart upload. Content-Type is left to the browser so it can set the boundary. */
+async function upload<T>(path: string, file: File): Promise<T> {
+  const form = new FormData()
+  form.append('file', file)
+  return request<T>(path, { method: 'POST', body: form })
+}
 
 function qs(params: Record<string, unknown>): string {
   const search = new URLSearchParams()
@@ -216,6 +265,20 @@ export const api = {
     shelfLife: () => get<MessageResponse>('/admin/shelf-life'),
     runShelfSampler: (seconds = 30) =>
       post<MessageResponse>(`/admin/shelf-life/run${qs({ seconds })}`),
+    downloadBackup: (includeImages: boolean, includeSecrets: boolean) =>
+      download(
+        `/admin/backup${qs({ include_images: includeImages, include_secrets: includeSecrets })}`,
+        'amisearch-backup.zip',
+      ),
+    inspectBackup: (file: File) => upload<MessageResponse>('/admin/backup/inspect', file),
+    restoreBackup: (file: File, restoreImages: boolean) =>
+      upload<MessageResponse>(`/admin/restore${qs({ restore_images: restoreImages })}`, file),
+    exportConfig: (includeSecrets: boolean) =>
+      download(
+        `/admin/config/export${qs({ include_secrets: includeSecrets })}`,
+        'amisearch-config.json',
+      ),
+    importConfig: (file: File) => upload<MessageResponse>('/admin/config/import', file),
     images: () => get<MessageResponse>('/admin/images'),
     prefetchImages: (limit = 40) =>
       post<MessageResponse>(`/admin/images/prefetch${qs({ limit })}`),

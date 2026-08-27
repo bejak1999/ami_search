@@ -3,6 +3,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { api } from '@/api/client'
 import { useToast } from '@/lib/toast'
 import { duration, relativeTime } from '@/lib/format'
+import { BackupPanel } from './BackupPanel'
 import { Icon } from './Icon'
 import { Badge, Card, Field, SectionTitle, Spinner, Toggle } from './ui'
 import clsx from 'clsx'
@@ -606,6 +607,7 @@ export function CatalogPanel() {
         </Card>
       </div>
 
+      <BackupPanel />
       <ShelfLifePanel />
       <ImageCache />
       <MfcSession />

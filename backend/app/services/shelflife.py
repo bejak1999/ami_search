@@ -352,7 +352,20 @@ def reconcile(
         if code:
             seen[code] = variant
 
-    existing = {row.code: row for row in item.listings}
+    # Looked up by (provider, code) rather than through item.listings, because
+    # the unique constraint is global. If the shop ever re-keys a product, a
+    # copy could arrive here already owned by a different item, and inserting a
+    # second row for it would raise and take the whole poll down with it.
+    existing = {
+        row.code: row
+        for row in db.execute(
+            select(Listing).where(
+                Listing.provider == item.provider, Listing.code.in_(list(seen))
+            )
+        ).scalars()
+    }
+    for row in item.listings:
+        existing.setdefault(row.code, row)
     live_before = [row for row in item.listings if row.status == ListingStatus.live]
 
     for code, variant in seen.items():
@@ -380,6 +393,13 @@ def reconcile(
             result.appeared.append(listing)
             continue
 
+        if listing.item_id is not None and listing.item_id != item.id:
+            # The same copy under a different product. Follow the shop rather
+            # than keeping a duplicate that can never be reconciled again.
+            log.info(
+                "Copy %s moved from item %s to %s", code, listing.item_id, item.id
+            )
+            listing.item = item
         if listing.status == ListingStatus.gone:
             # Back on the shelf. Its earlier spell is over and measured; this
             # is a new one, so the clock restarts rather than spanning the gap.

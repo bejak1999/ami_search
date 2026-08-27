@@ -368,9 +368,11 @@ class PricePoint(Base):
     id: Mapped[int] = mapped_column(primary_key=True)
     item_id: Mapped[int] = mapped_column(ForeignKey("items.id", ondelete="CASCADE"), index=True)
     #: Set when the point belongs to one individual copy rather than to the
-    #: product as a whole, so both histories share one table.
+    #: product as a whole, so both histories share one table. Deliberately
+    #: SET NULL rather than CASCADE: the observation is part of the item's
+    #: price history and has to outlive the copy row it came from.
     listing_id: Mapped[int | None] = mapped_column(
-        ForeignKey("listings.id", ondelete="CASCADE"), index=True
+        ForeignKey("listings.id", ondelete="SET NULL"), index=True
     )
     recorded_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     price: Mapped[float | None] = mapped_column(Float)
@@ -454,8 +456,11 @@ class Listing(Base):
     observations: Mapped[int] = mapped_column(Integer, default=1)
 
     item: Mapped[Item] = relationship(back_populates="listings")
+    # No delete-orphan here on purpose. These rows belong to the item's price
+    # history first and to the copy second, so losing the copy must not lose
+    # the prices we recorded through it.
     prices: Mapped[list["PricePoint"]] = relationship(
-        back_populates="listing", cascade="all, delete-orphan", passive_deletes=True
+        back_populates="listing", passive_deletes=True
     )
 
 

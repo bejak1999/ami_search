@@ -5,7 +5,7 @@ import logging
 from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import func, select
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, aliased
 
 from ..models import Condition, Item, PricePoint, utcnow
 from ..providers import NormalizedItem
@@ -71,7 +71,15 @@ def upsert_item(db: Session, normalized: NormalizedItem, commit: bool = True) ->
 
     item.product_url = normalized.url or item.product_url
     item.currency = normalized.currency or item.currency
-    item.current_price = normalized.price
+    if normalized.price is not None:
+        item.current_price = normalized.price
+    elif item.current_price is not None and normalized.order_closed:
+        # Sold out upstream. Keep the last price we saw: for a deleted
+        # pre-owned listing this instance is the only place it still exists.
+        pass
+    else:
+        item.current_price = None
+        item.price_max = None
     if normalized.price_max is not None:
         item.price_max = normalized.price_max
     if normalized.variants:
@@ -260,11 +268,69 @@ def price_stats(db: Session, item_id: int) -> dict:
 
 
 def prune_history(db: Session, retention_days: int) -> int:
+    """Trim old price observations, keeping everything that cannot be re-read.
+
+    The premise of this application is that it remembers what the shop
+    deletes, so an unqualified "delete everything older than N days" would
+    throw away the only surviving record of prices nobody can look up any
+    more. Four kinds of point are therefore never pruned, however old:
+
+      * anything belonging to an item the shop no longer lists, since there is
+        nowhere left to fetch it from again
+      * anything attached to an individual copy, which is the per-copy sale
+        record and is small besides
+      * each item's first and last observation, which bracket its history
+      * each item's cheapest and dearest, which the lowest-ever views rest on
+
+    What is left prunable is the middle of a long series for something still
+    on sale, which is the genuinely redundant part.
+    """
     cutoff = datetime.now(timezone.utc) - timedelta(days=retention_days)
-    deleted = (
-        db.query(PricePoint).filter(PricePoint.recorded_at < cutoff).delete(synchronize_session=False)
+    other = aliased(PricePoint)
+
+    def edge_ids(aggregate) -> set[int]:
+        """One row per item: the earliest point holding its extreme price."""
+        return set(
+            db.execute(
+                select(func.min(PricePoint.id))
+                .where(
+                    PricePoint.price.is_not(None),
+                    PricePoint.price
+                    == select(aggregate(other.price))
+                    .where(other.item_id == PricePoint.item_id)
+                    .scalar_subquery(),
+                )
+                .group_by(PricePoint.item_id)
+            )
+            .scalars()
+            .all()
+        )
+
+    protected: set[int] = set()
+    for aggregate in (func.min, func.max):
+        protected |= edge_ids(aggregate)
+    # First and last observation per item, whatever the price was.
+    for aggregate in (func.min, func.max):
+        protected |= set(
+            db.execute(
+                select(aggregate(PricePoint.id)).group_by(PricePoint.item_id)
+            )
+            .scalars()
+            .all()
+        )
+
+    query = db.query(PricePoint).filter(
+        PricePoint.recorded_at < cutoff,
+        # A copy's own price trail is the sale record; never touch it.
+        PricePoint.listing_id.is_(None),
+        # Gone from the shop means we are the last copy of this information.
+        PricePoint.item_id.not_in(select(Item.id).where(Item.order_closed.is_(True))),
     )
+    if protected:
+        query = query.filter(PricePoint.id.not_in(protected))
+
+    deleted = query.delete(synchronize_session=False)
     db.commit()
     if deleted:
-        log.info("Pruned %s price points older than %s days", deleted, retention_days)
+        log.info("Pruned %s redundant price points older than %s days", deleted, retention_days)
     return int(deleted or 0)

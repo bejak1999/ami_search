@@ -43,6 +43,13 @@ It also answers the question the shop price does not: **what will this actually 
 - Every landed figure comes with a **full breakdown** on hover — nothing is a magic number
 - Per watch: compare against the **shop price** or the **delivered total**
 
+### 💾 Your data stays yours
+- **Download the whole instance** from Administration as one zip — with or without the photos, since the database is the small irreplaceable half
+- **Restore it back** through the same page; the archive is integrity-checked before anything is touched, and the database it replaces is kept on the server rather than deleted
+- A backup from an **older release restores fine** — it is migrated forward on the way in
+- **Settings travel on their own** as JSON, for standing a second instance up somewhere else without carrying the catalogue
+- Nothing that cannot be fetched again is ever pruned: history for delisted items, per-copy sale records and the photos of vanished listings are all exempt from cleanup
+
 ### ⏳ How long a copy actually lasts
 - AmiAmi deletes a pre-owned copy the moment it sells, so **every copy gets its own row** here and a vanished listing becomes a recorded sale
 - A **timeline per product**: which copy, at what price, in what condition, for how many days

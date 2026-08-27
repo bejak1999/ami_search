@@ -9,6 +9,7 @@ jobs being rescheduled constantly.
 from __future__ import annotations
 
 import logging
+from contextlib import contextmanager
 import threading
 import time
 from concurrent.futures import Future, ThreadPoolExecutor
@@ -344,6 +345,34 @@ class PollingEngine:
                 digest.prune_alerts(db, settings.alert_retention_days)
         except Exception:  # noqa: BLE001
             log.exception("Housekeeping failed")
+
+    @contextmanager
+    def paused(self):
+        """Hold every background job still for the duration of the block.
+
+        Used while the database file is being swapped out from under the
+        application. Jobs already running are asked to stop at their next safe
+        boundary through the same flag a container shutdown uses, and the
+        scheduler is told not to start any more.
+        """
+        was_running = self._started and self.scheduler.running
+        previous = self.stopping
+        self.stopping = True
+        if was_running:
+            try:
+                self.scheduler.pause()
+            except Exception:  # noqa: BLE001 - pausing must never be fatal
+                log.warning("Could not pause the scheduler", exc_info=True)
+                was_running = False
+        try:
+            yield
+        finally:
+            self.stopping = previous
+            if was_running:
+                try:
+                    self.scheduler.resume()
+                except Exception:  # noqa: BLE001
+                    log.exception("Could not resume the scheduler after a pause")
 
     # -- introspection -----------------------------------------------------
     def status(self) -> dict:

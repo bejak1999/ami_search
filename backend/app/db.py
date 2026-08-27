@@ -132,13 +132,29 @@ def _backup_sqlite() -> Path | None:
 
     stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
     target = source.with_name(f"{source.stem}.pre-migration-{stamp}{source.suffix}")
+    # Write under a temporary name and rename on success. A backup interrupted
+    # half way would otherwise sit there looking like a real one, and be the
+    # file someone reaches for on the worst day of the year.
+    staging = target.with_suffix(target.suffix + ".partial")
     try:
         # sqlite3's backup API is safe against a live connection, unlike a
-        # plain file copy while WAL pages are outstanding.
-        with sqlite3.connect(str(source)) as src, sqlite3.connect(str(target)) as dst:
-            src.backup(dst)
+        # plain file copy while WAL pages are outstanding. Note that "with" on
+        # a sqlite3 connection commits a transaction, it does not close the
+        # handle, so both are closed explicitly - on Windows a leaked handle
+        # keeps the file locked.
+        src = sqlite3.connect(str(source))
+        try:
+            dst = sqlite3.connect(str(staging))
+            try:
+                src.backup(dst)
+            finally:
+                dst.close()
+        finally:
+            src.close()
+        staging.replace(target)
     except Exception:  # noqa: BLE001 - never let a backup failure block startup
         log.warning("Could not back up the database before migrating", exc_info=True)
+        staging.unlink(missing_ok=True)
         return None
 
     _prune_backups(source)
@@ -147,8 +163,14 @@ def _backup_sqlite() -> Path | None:
 
 
 def _prune_backups(source: Path, keep: int = 5) -> None:
+    """Keep the most recent few pre-migration copies, discard older ones."""
     backups = sorted(
-        source.parent.glob(f"{source.stem}.pre-migration-*{source.suffix}"),
+        (
+            path
+            for path in source.parent.glob(f"{source.stem}.pre-migration-*{source.suffix}")
+            # Never count an interrupted write as one of the copies we keep.
+            if path.suffix == source.suffix and path.stat().st_size > 0
+        ),
         key=lambda p: p.name,
         reverse=True,
     )

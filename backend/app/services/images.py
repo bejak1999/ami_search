@@ -339,9 +339,17 @@ def prefetch(db: Session, limit: int | None = None) -> dict:
 def prune(db: Session, budget_bytes: int | None = None) -> dict:
     """Drop the least recently shown images once past the budget.
 
-    Photos of items nobody has on a wishlist or a watch go first, because a
-    catalogue thumbnail can always be fetched again while a sold-out listing's
-    picture cannot.
+    The rule that matters is replaceability. A thumbnail of something still on
+    sale can be fetched again any time; the photo of a sold pre-owned listing
+    cannot, because AmiAmi deleted the listing and this instance now holds the
+    only copy. Those are protected outright, along with anything on a wishlist
+    or under a watch, and eviction works through the replaceable images
+    oldest-first until the cache is back inside its budget.
+
+    If that is not enough on its own the cache stays over budget rather than
+    destroying the irreplaceable half, and says so in the returned figures. A
+    cache that is too small is a configuration problem; a cache that quietly
+    ate the only record of a listing is not recoverable.
     """
     budget = budget_bytes or int(settings.image_cache_max_gb * 1024**3)
     total = int(db.execute(select(func.coalesce(func.sum(CachedImage.bytes), 0))).scalar_one())
@@ -357,6 +365,11 @@ def prune(db: Session, budget_bytes: int | None = None) -> dict:
         .scalars()
         .all()
     )
+    # The ones the docstring is really about: the shop has dropped these, so
+    # nothing can be re-fetched and we are the last place they exist.
+    protected |= set(
+        db.execute(select(Item.id).where(Item.order_closed.is_(True))).scalars().all()
+    )
     protected_urls: set[str] = set()
     if protected:
         for item in db.execute(select(Item).where(Item.id.in_(protected))).scalars():
@@ -364,25 +377,40 @@ def prune(db: Session, budget_bytes: int | None = None) -> dict:
     protected_keys = {key_for(u) for u in protected_urls}
 
     freed = pruned = 0
-    candidates = db.execute(
-        select(CachedImage).order_by(CachedImage.last_used_at.asc())
-    ).scalars()
+    # Materialised rather than streamed: rows are deleted inside the loop, and
+    # mutating the session while iterating its own result is asking for
+    # trouble on some drivers.
+    candidates = list(
+        db.execute(select(CachedImage).order_by(CachedImage.last_used_at.asc())).scalars()
+    )
 
+    kept_irreplaceable = 0
     for row in candidates:
         if total - freed <= budget:
             break
         if row.key in protected_keys:
+            kept_irreplaceable += 1
             continue
         path = path_for(row.key, row.content_type)
         try:
             path.unlink(missing_ok=True)
         except OSError:
+            log.warning("Could not remove cached image %s", row.key, exc_info=True)
             continue
         freed += row.bytes
         pruned += 1
         db.delete(row)
 
     db.commit()
+    if total - freed > budget:
+        log.warning(
+            "Image cache is %.1f GB over its %.1f GB budget after pruning; "
+            "%s protected image(s) were kept because they cannot be fetched again. "
+            "Raise IMAGE_CACHE_MAX_GB if this persists.",
+            (total - freed - budget) / 1024**3,
+            budget / 1024**3,
+            kept_irreplaceable,
+        )
     if pruned:
         log.info("Pruned %s cached image(s), freeing %.0f MB", pruned, freed / 1024 / 1024)
     return {
@@ -390,6 +418,8 @@ def prune(db: Session, budget_bytes: int | None = None) -> dict:
         "freed_bytes": freed,
         "total_bytes": total - freed,
         "budget_bytes": budget,
+        "protected_kept": kept_irreplaceable,
+        "over_budget": max(0, (total - freed) - budget),
     }
 
 

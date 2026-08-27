@@ -1,9 +1,25 @@
 """Public config, health, status and administration."""
 from __future__ import annotations
 
+import json
+import shutil
+import tempfile
 import time
+from datetime import datetime, timezone
+from pathlib import Path
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import (
+    APIRouter,
+    BackgroundTasks,
+    Depends,
+    File,
+    HTTPException,
+    Query,
+    UploadFile,
+    status,
+)
+from fastapi.encoders import jsonable_encoder
+from fastapi.responses import FileResponse, JSONResponse
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
@@ -28,6 +44,23 @@ from .search import provider_info
 router = APIRouter(tags=["system"])
 
 VERSION = "1.0.0"
+
+
+#: Uploaded archives can be gigabytes, so they are spooled to disk in chunks
+#: rather than read into memory in one go.
+UPLOAD_CHUNK = 4 * 1024 * 1024
+
+
+async def _spool_upload(file: UploadFile, workdir: Path) -> Path:
+    """Write an upload to disk without holding it all in memory at once."""
+    target = workdir / "upload.zip"
+    with target.open("wb") as out:
+        while chunk := await file.read(UPLOAD_CHUNK):
+            out.write(chunk)
+    if target.stat().st_size == 0:
+        raise ValueError("The uploaded file is empty")
+    return target
+
 _STARTED_AT = time.time()
 
 
@@ -521,3 +554,173 @@ def generate_vapid(_admin: User = Depends(admin_user)) -> MessageResponse:
             "VAPID_PRIVATE_KEY": keys["private_key_der"],
         },
     )
+
+
+@admin.get("/backup")
+def download_backup(
+    background: BackgroundTasks,
+    include_images: bool = Query(default=False),
+    include_secrets: bool = Query(default=True),
+    db: Session = Depends(get_db),
+    _admin: User = Depends(admin_user),
+):
+    """Download the whole instance as a zip.
+
+    Without images this is small and quick: the database is where the years of
+    price history and every deleted listing actually live. With images it is
+    the full picture and can run to gigabytes, since the photos of sold
+    pre-owned listings exist nowhere else once AmiAmi drops them.
+
+    The archive is built on disk rather than in memory and removed once the
+    download has been sent.
+    """
+    from ..services import backup
+
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+    suffix = "full" if include_images else "db"
+    workdir = Path(tempfile.mkdtemp(prefix="amisearch-backup-", dir=str(settings.data_dir)))
+    target = workdir / f"amisearch-{suffix}-{stamp}.zip"
+
+    try:
+        backup.create_archive(
+            db, target, include_images=include_images, include_secrets=include_secrets
+        )
+    except Exception as exc:  # noqa: BLE001
+        shutil.rmtree(workdir, ignore_errors=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Could not build the backup: {exc}",
+        ) from exc
+
+    background.add_task(shutil.rmtree, workdir, ignore_errors=True)
+    return FileResponse(
+        target,
+        media_type="application/zip",
+        filename=target.name,
+        background=background,
+    )
+
+
+@admin.post("/backup/inspect", response_model=MessageResponse)
+async def inspect_backup(
+    file: UploadFile = File(...),
+    _admin: User = Depends(admin_user),
+) -> MessageResponse:
+    """Read an uploaded archive's manifest without applying any of it.
+
+    So the confirmation step can say what is actually in the file - when it
+    was taken, how big the database is, whether photos are included - rather
+    than asking someone to overwrite their instance on faith.
+    """
+    from ..services import backup
+
+    workdir = Path(tempfile.mkdtemp(prefix="amisearch-inspect-", dir=str(settings.data_dir)))
+    try:
+        staged = await _spool_upload(file, workdir)
+        manifest = backup.inspect_archive(staged)
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+    finally:
+        shutil.rmtree(workdir, ignore_errors=True)
+    return MessageResponse(message="Archive looks readable", detail=manifest)
+
+
+@admin.post("/restore", response_model=MessageResponse)
+async def restore_backup(
+    file: UploadFile = File(...),
+    restore_images: bool = Query(default=True),
+    _admin: User = Depends(admin_user),
+) -> MessageResponse:
+    """Replace this instance's data with an uploaded archive.
+
+    Background jobs are held still for the duration, and the database being
+    replaced is renamed rather than deleted, so it is still on disk afterwards
+    if the restore turns out to be the wrong one.
+    """
+    from ..scheduler.engine import engine as polling_engine
+    from ..services import backup
+
+    workdir = Path(tempfile.mkdtemp(prefix="amisearch-restore-", dir=str(settings.data_dir)))
+    try:
+        staged = await _spool_upload(file, workdir)
+        with polling_engine.paused():
+            result = backup.restore_archive(staged, restore_images=restore_images)
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+    finally:
+        shutil.rmtree(workdir, ignore_errors=True)
+
+    taken = result.manifest.get("created_at", "an unknown date")
+    return MessageResponse(
+        message=(
+            f"Restored the backup taken {taken}. "
+            f"{result.images_restored} image(s) written, "
+            f"{len(result.migrated_columns)} column(s) migrated. "
+            f"Your previous database was kept as {result.previous_database or 'nothing'}."
+        ),
+        detail=result.as_dict(),
+    )
+
+
+@admin.get("/config/export")
+def export_configuration(
+    include_secrets: bool = Query(default=False),
+    db: Session = Depends(get_db),
+    _admin: User = Depends(admin_user),
+):
+    """Download the settings on their own, for setting up a second instance.
+
+    Cost profiles, notification channels and crawl tuning are fiddly to redo by
+    hand and tiny to carry. Channels hold bot tokens and webhook URLs in plain
+    text, so they only travel when explicitly asked for.
+    """
+    from ..services import backup
+
+    payload = backup.export_config(db, include_secrets=include_secrets)
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+    return JSONResponse(
+        content=jsonable_encoder(payload),
+        headers={
+            "Content-Disposition": f'attachment; filename="amisearch-config-{stamp}.json"'
+        },
+    )
+
+
+@admin.post("/config/import", response_model=MessageResponse)
+async def import_configuration(
+    file: UploadFile = File(...),
+    db: Session = Depends(get_db),
+    _admin: User = Depends(admin_user),
+) -> MessageResponse:
+    """Apply an exported settings file to this instance.
+
+    Only ever adds or updates. Anything it cannot match - a user who does not
+    exist here, a channel exported without its credentials - is reported back
+    rather than being papered over.
+    """
+    from ..services import backup
+
+    raw = await file.read()
+    try:
+        payload = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="That file is not readable JSON",
+        ) from exc
+
+    try:
+        result = backup.import_config(db, payload)
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+
+    parts = [
+        f"{result.app_settings} setting(s)",
+        f"{result.cost_profiles} cost profile(s)",
+        f"{result.channels} channel(s)",
+        f"{result.crawl_slices} crawl slice(s)",
+    ]
+    message = "Applied " + ", ".join(parts) + "."
+    if result.skipped:
+        message += f" {len(result.skipped)} item(s) skipped."
+    return MessageResponse(message=message, detail=result.as_dict())

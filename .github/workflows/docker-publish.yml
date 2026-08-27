@@ -52,6 +52,13 @@ jobs:
           SCHEDULER_ENABLED: 'false'
         run: python tests/test_migration.py
 
+      - name: Backup and restore
+        working-directory: backend
+        env:
+          SECRET_KEY: ci-secret
+          SCHEDULER_ENABLED: 'false'
+        run: python tests/test_backup.py
+
   frontend:
     name: Frontend build
     runs-on: ubuntu-latest

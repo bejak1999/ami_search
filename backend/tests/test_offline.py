@@ -440,6 +440,46 @@ def test_shelf_reconciliation() -> None:
     db.close()
 
 
+def test_copy_claimed_by_another_product() -> None:
+    print("\n== The same copy turning up under a different product ==")
+    from app.db import SessionLocal, init_db
+    from app.models import Listing
+    from app.services import shelflife
+
+    init_db()
+    db = SessionLocal()
+    base = datetime(2026, 4, 1, tzinfo=timezone.utc)
+    first = _shelf_item(db, "FIGURE-555001-R")
+    second = _shelf_item(db, "FIGURE-555002-R")
+
+    shared = _copy(11, 3000)
+    shared["code"] = "FIGURE-555001-R011"
+
+    _observe(db, first, 0, [shared], base)
+    check("the copy lands on the first product", db.query(Listing).filter(
+        Listing.code == "FIGURE-555001-R011").one().item_id == first.id)
+
+    # The shop now serves the very same copy code under another product. A
+    # second row is impossible - provider plus code is unique - so this used
+    # to be an integrity error that took the whole poll down.
+    crashed = False
+    try:
+        _observe(db, second, 1, [shared], base)
+    except Exception as exc:  # noqa: BLE001
+        crashed = True
+        print(f"         raised {type(exc).__name__}: {str(exc)[:70]}")
+    check("reconciling does not blow up", not crashed)
+
+    if not crashed:
+        row = db.query(Listing).filter(Listing.code == "FIGURE-555001-R011").one()
+        check("the copy follows the shop to the new product", row.item_id == second.id)
+        check("and there is still only one of it",
+              db.query(Listing).filter(Listing.code == "FIGURE-555001-R011").count() == 1)
+
+    _purge(db, "FIGURE-555001-R", "FIGURE-555002-R")
+    db.close()
+
+
 def test_shelf_wholesale_disappearance() -> None:
     print("\n== A shelf that empties all at once ==")
     from app.db import SessionLocal, init_db
@@ -638,6 +678,240 @@ def test_shelf_tiers() -> None:
     db.delete(user)
     db.commit()
     _purge(db, "FIGURE-800001-R", "FIGURE-800002-R", "FIGURE-800003-R", "FIG-NEW-1")
+    db.close()
+
+
+def test_history_pruning_keeps_the_irreplaceable() -> None:
+    print("\n== Pruning never eats what cannot be fetched again ==")
+    from app.db import SessionLocal, init_db
+    from app.models import Condition, Item, Listing, ListingStatus, PricePoint
+    from app.services import catalog
+
+    init_db()
+    db = SessionLocal()
+    old = datetime.now(timezone.utc) - timedelta(days=2000)
+
+    def series(item, prices, listing=None):
+        for offset, price in enumerate(prices):
+            db.add(
+                PricePoint(
+                    item=item,
+                    listing=listing,
+                    recorded_at=old + timedelta(days=offset),
+                    price=float(price),
+                    currency="JPY",
+                    in_stock=True,
+                )
+            )
+
+    live = Item(provider="amiami", code="PRUNE-LIVE", name="Still on sale",
+                condition=Condition.preowned, order_closed=False)
+    gone = Item(provider="amiami", code="PRUNE-GONE", name="Deleted upstream",
+                condition=Condition.preowned, order_closed=True)
+    withcopy = Item(provider="amiami", code="PRUNE-COPY", name="Has a copy trail",
+                    condition=Condition.preowned, order_closed=False)
+    db.add_all([live, gone, withcopy])
+    db.commit()
+
+    copy = Listing(item=withcopy, provider="amiami", code="PRUNE-COPY-R7",
+                   sequence=7, price=1000.0, last_price=900.0, currency="JPY",
+                   status=ListingStatus.gone)
+    db.add(copy)
+    db.commit()
+
+    series(live, [500, 400, 700, 300, 650, 550])
+    series(gone, [900, 800, 1100])
+    series(withcopy, [200, 210])
+    series(withcopy, [1000, 950, 900], listing=copy)
+    db.commit()
+
+    before = db.query(PricePoint).count()
+    removed = catalog.prune_history(db, retention_days=365)
+    check("something old was removed", removed > 0, removed)
+
+    kept = db.query(PricePoint).filter(PricePoint.item_id == gone.id).count()
+    check("a delisted item keeps its whole history", kept == 3, kept)
+
+    copy_points = db.query(PricePoint).filter(PricePoint.listing_id == copy.id).count()
+    check("a copy's own price trail is untouched", copy_points == 3, copy_points)
+
+    live_prices = sorted(
+        p.price
+        for p in db.query(PricePoint).filter(
+            PricePoint.item_id == live.id, PricePoint.listing_id.is_(None)
+        )
+    )
+    check("the cheapest observation survives", 300.0 in live_prices, live_prices)
+    check("so does the dearest", 700.0 in live_prices, live_prices)
+    check("and the first", 500.0 in live_prices, live_prices)
+    check("and the last", 550.0 in live_prices, live_prices)
+    check("but redundant middles went", len(live_prices) < 6, live_prices)
+
+    # Every item must still be able to answer "what did this ever cost".
+    stats = catalog.price_stats(db, live.id)
+    check("the lowest ever is still reportable", stats["lowest"] == 300.0, stats)
+    check("and the highest", stats["highest"] == 700.0, stats)
+
+    check(
+        "nothing was removed from an item we are the last record of",
+        db.query(PricePoint).count() == before - removed,
+    )
+
+    for row in (live, gone, withcopy):
+        db.delete(row)
+    db.commit()
+    db.close()
+
+
+def test_deleting_a_copy_keeps_its_prices() -> None:
+    print("\n== Losing a copy row must not lose the item's history ==")
+    from app.db import SessionLocal, init_db
+    from app.models import Condition, Item, Listing, ListingStatus, PricePoint
+
+    init_db()
+    db = SessionLocal()
+    item = Item(provider="amiami", code="ORPHAN-1", name="Orphan test",
+                condition=Condition.preowned)
+    db.add(item)
+    db.commit()
+
+    copy = Listing(item=item, provider="amiami", code="ORPHAN-1-R3", sequence=3,
+                   price=5000.0, last_price=4500.0, currency="JPY",
+                   status=ListingStatus.gone)
+    db.add(copy)
+    db.commit()
+    for price in (5000.0, 4700.0, 4500.0):
+        db.add(
+            PricePoint(item=item, listing=copy, price=price, currency="JPY", in_stock=True)
+        )
+    db.commit()
+    copy_id = copy.id
+
+    check("three observations recorded through the copy",
+          db.query(PricePoint).filter(PricePoint.listing_id == copy_id).count() == 3)
+
+    db.delete(copy)
+    db.commit()
+
+    survivors = db.query(PricePoint).filter(PricePoint.item_id == item.id).all()
+    check("the prices outlive the copy", len(survivors) == 3, len(survivors))
+    check(
+        "and simply forget which copy they came from",
+        all(p.listing_id is None for p in survivors),
+        [p.listing_id for p in survivors],
+    )
+
+    db.delete(item)
+    db.commit()
+    db.close()
+
+
+def test_image_prune_protects_the_unfetchable() -> None:
+    print("\n== Image eviction leaves deleted listings alone ==")
+    from app.db import SessionLocal, init_db
+    from app.models import CachedImage, Condition, Item
+    from app.services import images
+
+    init_db()
+    db = SessionLocal()
+
+    live = Item(provider="amiami", code="IMG-LIVE", name="On sale", order_closed=False,
+                condition=Condition.preowned,
+                image_url="https://img.amiami.com/images/product/main/live.jpg")
+    gone = Item(provider="amiami", code="IMG-GONE", name="Deleted upstream", order_closed=True,
+                condition=Condition.preowned,
+                image_url="https://img.amiami.com/images/product/main/gone.jpg")
+    db.add_all([live, gone])
+    db.commit()
+
+    keys = {}
+    for item, age in ((gone, 100), (live, 1)):
+        for url in images.urls_for_item(item):
+            key = images.key_for(url)
+            keys.setdefault(item.code, set()).add(key)
+            db.add(
+                CachedImage(
+                    key=key,
+                    source_url=url,
+                    content_type="image/jpeg",
+                    bytes=5_000_000,
+                    last_used_at=datetime.now(timezone.utc) - timedelta(days=age),
+                )
+            )
+    db.commit()
+
+    # A budget far under what is stored, so eviction has to do something.
+    result = images.prune(db, budget_bytes=1_000_000)
+    remaining = {row.key for row in db.query(CachedImage).all()}
+
+    check(
+        "the deleted listing's photos are still there",
+        keys["IMG-GONE"] <= remaining,
+        sorted(remaining),
+    )
+    check(
+        "even though they were the least recently used",
+        result["protected_kept"] >= len(keys["IMG-GONE"]),
+        result,
+    )
+    check(
+        "the still-buyable ones were the ones evicted",
+        not (keys["IMG-LIVE"] & remaining),
+        sorted(remaining),
+    )
+    check(
+        "and staying over budget is reported rather than hidden",
+        result["over_budget"] > 0,
+        result,
+    )
+
+    db.query(CachedImage).delete()
+    for row in (live, gone):
+        db.delete(row)
+    db.commit()
+    db.close()
+
+
+def test_price_survives_a_quiet_response() -> None:
+    print("\n== A shop response with no price does not erase one ==")
+    from app.db import SessionLocal, init_db
+    from app.providers import NormalizedItem
+    from app.services import catalog
+
+    init_db()
+    db = SessionLocal()
+
+    def push(price, price_max=None, closed=False, in_stock=True):
+        return catalog.upsert_item(
+            db,
+            NormalizedItem(
+                provider="amiami",
+                code="QUIET-1",
+                name="Quiet response",
+                url="https://www.amiami.com/eng/detail/?gcode=QUIET-1",
+                currency="JPY",
+                price=price,
+                price_max=price_max,
+                condition="preowned",
+                in_stock=in_stock,
+                order_closed=closed,
+            ),
+        )[0]
+
+    item = push(4200.0, 5200.0)
+    check("the price is recorded", item.current_price == 4200.0)
+
+    item = push(None, None, closed=True, in_stock=False)
+    check(
+        "a sold-out response keeps the last price we saw",
+        item.current_price == 4200.0,
+        item.current_price,
+    )
+    check("and its range", item.price_max == 5200.0, item.price_max)
+    check("while availability does move", item.order_closed is True)
+
+    db.delete(item)
+    db.commit()
     db.close()
 
 
@@ -1769,9 +2043,14 @@ def main() -> int:
     test_shelf_sequences()
     test_kaplan_meier()
     test_shelf_reconciliation()
+    test_copy_claimed_by_another_product()
     test_shelf_wholesale_disappearance()
     test_shelf_intake_estimate()
     test_shelf_tiers()
+    test_history_pruning_keeps_the_irreplaceable()
+    test_deleting_a_copy_keeps_its_prices()
+    test_image_prune_protects_the_unfetchable()
+    test_price_survives_a_quiet_response()
     test_trigger_rules()
     test_trigger_switches()
     test_grade_parsing()
