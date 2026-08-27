@@ -151,6 +151,22 @@ class AmiAmiProvider(ShopProvider):
         return match.group(1) if match else None
 
     @staticmethod
+    def normalise_watch_code(code: str) -> str:
+        """Reduce a product code to something worth watching long-term.
+
+        A code names a listing, not a product. FIGURE-x is the first-hand
+        listing and FIGURE-x-R the pre-owned one, but a link copied after
+        clicking a buying choice carries a third form, FIGURE-x-R032, which
+        identifies one specific graded copy. Watching that would stop working
+        the moment that copy sells, which is exactly when the watch mattered.
+        """
+        cleaned = (code or "").strip().upper()
+        if not cleaned:
+            return cleaned
+        # Strip the per-copy suffix, keeping the pre-owned marker itself.
+        return re.sub(r"-R\d+$", "-R", cleaned)
+
+    @staticmethod
     def _abs_image(path: str | None) -> str | None:
         if not path:
             return None

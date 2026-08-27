@@ -9,6 +9,22 @@ import { Icon } from './Icon'
 import { Badge, Field, Modal, SegmentedControl, Spinner, Toggle, Tooltip } from './ui'
 import clsx from 'clsx'
 
+/**
+ * A product code names a listing, not a product. AmiAmi sells the first-hand
+ * copy under FIGURE-x and every pre-owned copy under FIGURE-x-R, and the
+ * trailing digits on a link (FIGURE-x-R032) identify one graded copy of it.
+ */
+function isPreownedCode(code: string): boolean {
+  return /-R(\d+)?$/i.test(code.trim())
+}
+
+function toListingCode(code: string, which: 'new' | 'preowned'): string {
+  // Drop any single-copy suffix first: watching one graded copy would stop
+  // working the moment that particular copy sells.
+  const base = code.trim().replace(/-R\d+$/i, '-R').replace(/-R$/i, '')
+  return which === 'preowned' ? `${base}-R` : base
+}
+
 // AmiAmi grades the figure and its box separately, best first.
 const GRADES: Grade[] = ['S', 'A', 'B+', 'B', 'C', 'D']
 
@@ -252,17 +268,44 @@ export function WatchEditor({ open, onClose, onSaved, watch, seedItem }: WatchEd
           )}
 
           {form.kind === 'item' ? (
-            <Field
-              label="Product code or link"
-              hint="Paste an amiami.com URL and the code is extracted for you."
-            >
-              <input
-                value={form.item_code}
-                onChange={(e) => set('item_code', e.target.value)}
-                className="field font-mono text-sm"
-                placeholder="FIGURE-153570-R"
-              />
-            </Field>
+            <>
+              <Field
+                label="Product code or link"
+                hint="Paste an amiami.com URL and the code is extracted for you."
+              >
+                <input
+                  value={form.item_code}
+                  onChange={(e) => set('item_code', e.target.value)}
+                  className="field font-mono text-sm"
+                  placeholder="FIGURE-153570-R"
+                />
+              </Field>
+
+              {/* A product code is a listing, not a product: AmiAmi sells the
+                  new copy under FIGURE-x and the pre-owned ones under
+                  FIGURE-x-R. Choosing here rewrites the code, because a
+                  condition filter on a single listing would be a setting that
+                  silently does nothing. */}
+              <Field
+                label="Which listing"
+                hint={
+                  isPreownedCode(form.item_code)
+                    ? 'Watching the pre-owned listing, which covers every graded copy on offer.'
+                    : 'Watching the first-hand listing.'
+                }
+              >
+                <SegmentedControl
+                  value={isPreownedCode(form.item_code) ? 'preowned' : 'new'}
+                  onChange={(which) =>
+                    set('item_code', toListingCode(form.item_code, which as 'new' | 'preowned'))
+                  }
+                  options={[
+                    { value: 'new', label: 'New' },
+                    { value: 'preowned', label: 'Pre-owned' },
+                  ]}
+                />
+              </Field>
+            </>
           ) : (
             <Field
               label="Search terms"
@@ -287,18 +330,20 @@ export function WatchEditor({ open, onClose, onSaved, watch, seedItem }: WatchEd
           </Field>
 
           <div className="grid gap-4 sm:grid-cols-2">
-            <Field label="Condition">
-              <SegmentedControl
-                size="sm"
-                value={form.condition}
-                onChange={(condition) => set('condition', condition)}
-                options={[
-                  { value: 'any', label: 'Any' },
-                  { value: 'new', label: 'New' },
-                  { value: 'preowned', label: 'Pre-owned' },
-                ]}
-              />
-            </Field>
+            {form.kind === 'search' && (
+              <Field label="Condition">
+                <SegmentedControl
+                  size="sm"
+                  value={form.condition}
+                  onChange={(condition) => set('condition', condition)}
+                  options={[
+                    { value: 'any', label: 'Any' },
+                    { value: 'new', label: 'New' },
+                    { value: 'preowned', label: 'Pre-owned' },
+                  ]}
+                />
+              </Field>
+            )}
             <Field label="Availability">
               <SegmentedControl
                 size="sm"

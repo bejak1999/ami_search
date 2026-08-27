@@ -64,29 +64,70 @@ export function SearchPage() {
   const queryClient = useQueryClient()
   const [params, setParams] = useSearchParams()
 
-  const [source, setSource] = useState<Source>('local')
-  const [draft, setDraft] = useState<Filters>({ ...EMPTY, q: params.get('q') ?? '' })
-  const [applied, setApplied] = useState<Filters>({ ...EMPTY, q: params.get('q') ?? '' })
-  const [tags, setTags] = useState<TagSelection>(EMPTY_TAGS)
-  const [page, setPage] = useState(1)
+  // The search state lives in the URL rather than in component state, so
+  // opening an item and pressing back returns to the page you were on instead
+  // of dumping you at the first one.
+  const readFilters = (): Filters => ({
+    ...EMPTY,
+    q: params.get('q') ?? '',
+    condition: (params.get('condition') as Filters['condition']) || 'any',
+    availability: (params.get('availability') as Filters['availability']) || 'any',
+    sort: params.get('sort') || 'newest',
+    minPrice: params.get('min') ?? '',
+    maxPrice: params.get('max') ?? '',
+    atLowestEver: params.get('lowest') === '1',
+    exclude: params.get('exclude') ?? '',
+    onSale: params.get('sale') === '1',
+  })
+
+  const source: Source = params.get('src') === 'shop' ? 'shop' : 'local'
+  const page = Math.max(1, Number(params.get('page') || 1))
+  const applied = readFilters()
+  const tags: TagSelection = {
+    include: params.getAll('tag'),
+    exclude: params.getAll('nottag'),
+    mode: params.get('tagmode') === 'any' ? 'any' : 'all',
+  }
+
+  const [draft, setDraft] = useState<Filters>(readFilters)
   const [showFilters, setShowFilters] = useState(false)
   const [watchSeed, setWatchSeed] = useState<Partial<Item> | null>(null)
 
+  /** Write the whole search state into the URL, replacing or pushing. */
+  function navigateTo(
+    next: { filters?: Filters; tags?: TagSelection; page?: number; source?: Source },
+    replace = false,
+  ) {
+    const f = next.filters ?? applied
+    const t = next.tags ?? tags
+    const p = next.page ?? page
+    const src = next.source ?? source
+
+    const search = new URLSearchParams()
+    if (f.q.trim()) search.set('q', f.q.trim())
+    if (src !== 'local') search.set('src', src)
+    if (p > 1) search.set('page', String(p))
+    if (f.condition !== 'any') search.set('condition', f.condition)
+    if (f.availability !== 'any') search.set('availability', f.availability)
+    if (f.sort !== 'newest') search.set('sort', f.sort)
+    if (f.minPrice) search.set('min', f.minPrice)
+    if (f.maxPrice) search.set('max', f.maxPrice)
+    if (f.atLowestEver) search.set('lowest', '1')
+    if (f.exclude) search.set('exclude', f.exclude)
+    if (f.onSale) search.set('sale', '1')
+    for (const slug of t.include) search.append('tag', slug)
+    for (const slug of t.exclude) search.append('nottag', slug)
+    if (t.mode !== 'all') search.set('tagmode', t.mode)
+
+    setParams(search, { replace })
+  }
+
   const wishlist = useWishlistToggle()
 
-  // A tag arriving from an item page should apply straight away.
+  // Keep the filter form in step when the URL changes from outside, which is
+  // what going back or following a rail's "see all" link does.
   useEffect(() => {
-    const incoming = params.getAll('tag')
-    if (incoming.length) {
-      setTags((prev) => ({ ...prev, include: incoming }))
-      setSource('local')
-    }
-    const q = params.get('q')
-    if (q !== null && q !== applied.q) {
-      setDraft((d) => ({ ...d, q }))
-      setApplied((a) => ({ ...a, q }))
-    }
-    // Only react to the URL changing from outside this component.
+    setDraft(readFilters())
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [params])
 
@@ -149,18 +190,26 @@ export function SearchPage() {
       resolve.mutate(term)
       return
     }
-    setApplied(draft)
-    setPage(1)
-    setParams(term ? { q: term } : {}, { replace: true })
+    // Applying a filter replaces the entry rather than pushing one, so the
+    // back button leaves the search rather than stepping through every tweak.
+    navigateTo({ filters: draft, page: 1 }, true)
+  }
+
+  function setTags(next: TagSelection) {
+    navigateTo({ tags: next, page: 1 }, true)
+  }
+
+  function setPage(next: number) {
+    navigateTo({ page: next })
+    window.scrollTo({ top: 0, behavior: 'smooth' })
   }
 
   function switchSource(next: Source) {
-    setSource(next)
-    setPage(1)
     // "Newest" means different things either side, and the rest do not all
     // exist on both, so reset to the one sort both understand.
-    setDraft((d) => ({ ...d, sort: 'newest' }))
-    setApplied((a) => ({ ...a, sort: 'newest' }))
+    const filters = { ...draft, sort: 'newest' }
+    setDraft(filters)
+    navigateTo({ source: next, filters, page: 1 }, true)
   }
 
   const catalogue = summary.data?.detail
@@ -486,7 +535,7 @@ export function SearchPage() {
             <Icon name="chevronLeft" className="-ml-2.5 h-3.5 w-3.5" />
           </button>
           <button
-            onClick={() => setPage((p) => Math.max(1, p - 1))}
+            onClick={() => setPage(Math.max(1, page - 1))}
             disabled={page <= 1}
             className="btn-ghost"
           >
@@ -497,7 +546,7 @@ export function SearchPage() {
             Page {page.toLocaleString('en-GB')} of {results.data.pages.toLocaleString('en-GB')}
           </span>
           <button
-            onClick={() => setPage((p) => p + 1)}
+            onClick={() => setPage(page + 1)}
             disabled={page >= results.data.pages}
             className="btn-ghost"
           >

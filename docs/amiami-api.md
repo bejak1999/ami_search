@@ -232,3 +232,33 @@ Because search responses carry only the range and never the grades, a search
 watch with a grade filter opens the detail page for a bounded number of
 candidates per run — the cheapest ones that are still plausibly within reach
 of the target. The rest resolve on later polls.
+
+## A product code names a listing, not a product
+
+Three forms of code look alike and mean different things:
+
+| Code | What it is |
+|---|---|
+| `FIGURE-180385` | The first-hand listing |
+| `FIGURE-180385-R` | The pre-owned listing, covering every graded copy |
+| `FIGURE-180385-R032` | One specific graded copy of the pre-owned listing |
+
+The third form is what a link carries after clicking a buying choice, and the
+number changes with the choice. Watching it would stop working the instant
+that particular copy sold, which is exactly when the watch mattered, so
+`normalise_watch_code` reduces it back to the listing.
+
+Entering only the base code on AmiAmi produces "We could not find the exact
+item. Here is an item that might be the same as the one you are looking for",
+because the shop is resolving a code that has no listing of its own in the
+condition being browsed.
+
+This is why an item watch has no condition filter. A condition filter over a
+single listing would be a setting that silently does nothing; the listing
+itself is the condition, so the watch editor switches the code instead.
+
+The two listings share a product image: the file is named after the base code,
+so `FIGURE-180385.jpg` serves both. A listing being deleted and relisted
+therefore reuses the same cached photo rather than replacing it. A genuinely
+different picture means a different URL, which becomes a separate cache entry;
+nothing is overwritten in place.

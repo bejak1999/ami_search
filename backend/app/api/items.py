@@ -11,7 +11,7 @@ from ..models import CostProfile, Item, User
 from ..providers import ItemNotFound, ProviderError, get_provider
 from ..schemas import CostBreakdownOut, ItemHistoryOut, ItemOut, PricePointOut
 from ..services import catalog, landed_cost
-from .serializers import item_out
+from .serializers import item_out, register_images
 
 router = APIRouter(prefix="/items", tags=["items"])
 
@@ -52,9 +52,10 @@ def list_items(
     if in_stock is not None:
         stmt = stmt.where(Item.in_stock.is_(in_stock))
 
-    rows = db.execute(
-        stmt.order_by(Item.last_seen_at.desc()).offset(offset).limit(limit)
-    ).scalars()
+    rows = list(
+        db.execute(stmt.order_by(Item.last_seen_at.desc()).offset(offset).limit(limit)).scalars()
+    )
+    register_images(db, rows)
     return [item_out(db, item, user=user, profile=profile, with_context=True) for item in rows]
 
 

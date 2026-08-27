@@ -102,6 +102,11 @@ def create_watch(
         detected = detect_provider_from_url(item_code)
         if detected:
             _, item_code = detected
+        # A link copied after picking a buying choice names one graded copy,
+        # which stops existing the moment that copy sells. Watch the listing.
+        normaliser = getattr(get_provider(payload.provider), "normalise_watch_code", None)
+        if normaliser:
+            item_code = normaliser(item_code)
     elif not payload.query.strip() and not payload.filters:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,

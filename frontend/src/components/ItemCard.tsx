@@ -2,6 +2,7 @@ import clsx from 'clsx'
 import { useState } from 'react'
 import type { Item } from '@/api/types'
 import { money, percent, tidyName } from '@/lib/format'
+import { useTheme } from '@/lib/theme'
 import { Badge, Tooltip } from './ui'
 import { Icon } from './Icon'
 
@@ -52,6 +53,7 @@ export interface ItemCardProps {
 
 export function ItemCard({ item, onOpen, onWatch, onWishlist, compact }: ItemCardProps) {
   const [imageFailed, setImageFailed] = useState(false)
+  const { cardShape } = useTheme()
   const discount = item.discount_pct
   const preowned = item.condition === 'preowned'
 
@@ -63,7 +65,14 @@ export function ItemCard({ item, onOpen, onWatch, onWishlist, compact }: ItemCar
       )}
       onClick={() => onOpen?.(item)}
     >
-      <div className="relative aspect-[3/4] overflow-hidden bg-raised">
+      {/* AmiAmi's photos are square. Square shows all of one; portrait crops
+          it but fits more figures on a screen. */}
+      <div
+        className={clsx(
+          'relative overflow-hidden bg-raised',
+          cardShape === 'square' ? 'aspect-square' : 'aspect-[3/4]',
+        )}
+      >
         {item.image_url && !imageFailed ? (
           <img
             src={item.image_url}
@@ -71,7 +80,11 @@ export function ItemCard({ item, onOpen, onWatch, onWishlist, compact }: ItemCar
             loading="lazy"
             decoding="async"
             onError={() => setImageFailed(true)}
-            className="h-full w-full object-cover transition-transform duration-500 group-hover:scale-[1.04]"
+            className={clsx(
+              'h-full w-full transition-transform duration-500 group-hover:scale-[1.04]',
+              // Square matches the source, so nothing needs cropping there.
+              cardShape === 'square' ? 'object-contain' : 'object-cover',
+            )}
           />
         ) : (
           <div className="grid h-full w-full place-items-center text-faint">

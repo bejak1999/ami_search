@@ -20,6 +20,25 @@ from ..services import fx, landed_cost
 from ..services import images as image_cache
 
 
+def register_images(db: Session, items: list[Item]) -> None:
+    """Make sure every photo about to be shown can actually be served.
+
+    The public route is a hash of the source URL and cannot be reversed, so an
+    item whose photo was never registered renders a blank frame. Registering a
+    whole page at once costs one query, and means anything ever displayed is
+    servable from that moment on, rather than only the items the background
+    prefetch happened to have reached.
+    """
+    from ..services import images as cache
+
+    urls: list[str] = []
+    for item in items:
+        urls.extend(cache.urls_for_item(item))
+        urls.extend(u for u in (item.images or []) if u)
+    if urls:
+        cache.register(db, urls, commit=True)
+
+
 def _card_image(url: str | None) -> str | None:
     """The photo a grid tile should show.
 

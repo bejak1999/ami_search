@@ -24,7 +24,7 @@ const COUNTRY_PRESETS: Record<string, Partial<CostProfile>> = {
 }
 
 function AppearanceTab() {
-  const { theme, setTheme, mode, setMode } = useTheme()
+  const { theme, setTheme, mode, setMode, cardShape, setCardShape } = useTheme()
   const { user, patchUser } = useAuth()
 
   const save = useMutation({
@@ -85,6 +85,20 @@ function AppearanceTab() {
             { value: 'dark', label: 'Dark', icon: 'moon' },
             { value: 'light', label: 'Light', icon: 'sun' },
             { value: 'system', label: 'System', icon: 'monitor' },
+          ]}
+        />
+      </Field>
+
+      <Field
+        label="Card shape"
+        hint="AmiAmi's photos are square. Square shows the whole picture; portrait crops it but fits more figures on a screen."
+      >
+        <SegmentedControl
+          value={cardShape}
+          onChange={setCardShape}
+          options={[
+            { value: 'portrait', label: 'Portrait', icon: 'grid' },
+            { value: 'square', label: 'Square', icon: 'box' },
           ]}
         />
       </Field>

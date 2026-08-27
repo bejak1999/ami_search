@@ -23,7 +23,7 @@ from ..models import CostProfile, DiscoverySeed, Item, ItemTag, Tag, TagKind, Us
 from ..providers import ProviderError, SearchQuery, get_provider
 from ..schemas import ItemOut, MessageResponse
 from ..services import catalog, enrich, feed
-from .serializers import item_out
+from .serializers import item_out, register_images
 
 log = logging.getLogger(__name__)
 router = APIRouter(prefix="/discover", tags=["discovery"])
@@ -42,6 +42,9 @@ def discovery_feed(
     is anything to fill them; the rest work on a brand new account too.
     """
     rails = feed.build(db, user, provider)
+    for rail in rails:
+        register_images(db, rail.items)
+
     return MessageResponse(
         message=f"{len(rails)} rail(s)",
         detail={
@@ -145,7 +148,8 @@ def discover_local(
     else:
         stmt = stmt.order_by(Item.last_seen_at.desc())
 
-    rows = db.execute(stmt.offset(offset).limit(limit)).scalars().all()
+    rows = list(db.execute(stmt.offset(offset).limit(limit)).scalars().all())
+    register_images(db, rows)
     return [item_out(db, item, user=user, profile=profile, with_context=True) for item in rows]
 
 

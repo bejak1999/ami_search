@@ -3,6 +3,7 @@ import { useNavigate, useParams } from 'react-router-dom'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { api } from '@/api/client'
 import { Icon } from '@/components/Icon'
+import { LookupMenu } from '@/components/LookupMenu'
 import { CollectionButton } from '@/components/CollectionButton'
 import { PriceChart } from '@/components/PriceChart'
 import { WatchEditor } from '@/components/WatchEditor'
@@ -237,8 +238,15 @@ export function ItemDetailPage() {
                 >
                   {refresh.isPending ? <Spinner /> : <Icon name="refresh" />}
                 </button>
+                <LookupMenu item={item} />
                 {item.url && (
-                  <a href={item.url} target="_blank" rel="noreferrer" className="btn-ghost px-2.5" title="Open on AmiAmi">
+                  <a
+                    href={item.url}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="btn-ghost px-2.5"
+                    title="Open on AmiAmi"
+                  >
                     <Icon name="external" />
                   </a>
                 )}

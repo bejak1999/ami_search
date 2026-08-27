@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import logging
 
-from fastapi import APIRouter, Depends, Response
+from fastapi import APIRouter, BackgroundTasks, Depends, Response
 from fastapi.responses import FileResponse, RedirectResponse
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -23,7 +23,9 @@ _BLANK = bytes.fromhex(
 
 
 @router.get("/{key}")
-def serve_image(key: str, db: Session = Depends(get_db)) -> Response:
+def serve_image(
+    key: str, background: BackgroundTasks, db: Session = Depends(get_db)
+) -> Response:
     """Return a cached photo, fetching it on first sight.
 
     Deliberately unauthenticated. These are public product photos from a shop,
@@ -48,15 +50,14 @@ def serve_image(key: str, db: Session = Depends(get_db)) -> Response:
             )
 
     if row is None:
-        # We have never been told about this key, so there is nothing to fetch.
-        return Response(content=_BLANK, media_type="image/gif", status_code=404)
-
-    stored = image_cache.fetch(db, row.source_url)
-    if stored is not None:
-        return FileResponse(
-            stored.path,
-            media_type=stored.content_type,
-            headers={"Cache-Control": "public, max-age=31536000, immutable"},
+        # Never registered, so the source URL is unknown and unrecoverable:
+        # the route is a hash. Must not be cached, or the blank frame sticks
+        # around after the item is registered on a later render.
+        return Response(
+            content=_BLANK,
+            media_type="image/gif",
+            status_code=404,
+            headers={"Cache-Control": "no-store"},
         )
 
     if row.gone:
@@ -69,6 +70,27 @@ def serve_image(key: str, db: Session = Depends(get_db)) -> Response:
             headers={"Cache-Control": "public, max-age=86400"},
         )
 
-    # A transient failure. Send the browser to the origin so the page still
-    # looks right, and try again on the next request.
-    return RedirectResponse(row.source_url, status_code=302)
+    # Not cached yet. Downloading it here would make a page of forty-eight
+    # tiles wait on forty-eight sequential fetches, so send the browser
+    # straight to the origin and pull the copy in behind it. The next view is
+    # served locally, and this one is not blank.
+    background.add_task(_cache_later, key)
+    return RedirectResponse(
+        row.source_url,
+        status_code=302,
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+def _cache_later(key: str) -> None:
+    """Fetch one image outside the request, on its own session."""
+    from ..db import session_scope
+    from ..models import CachedImage as Row
+
+    try:
+        with session_scope() as db:
+            row = db.execute(select(Row).where(Row.key == key)).scalar_one_or_none()
+            if row is not None and not row.gone and not row.fetched_at:
+                image_cache.fetch(db, row.source_url, touch=False)
+    except Exception:  # noqa: BLE001 - a failed image must never surface
+        log.debug("Background image fetch failed for %s", key, exc_info=True)

@@ -83,6 +83,7 @@ It also answers the question the shop price does not: **what will this actually 
 - Several tags combine with **all of them** or **any of them**, switchable
 - Sort by **near its lowest price ever**, which is a question the shop cannot answer about listings it has removed
 - Removed listings stay, marked, with their last known price
+- Page, filters and tags live in the URL, so opening an item and pressing back returns you to the page you were on
 
 ### 🏷️ Discovery by MyFigureCollection tag
 - Items are cross-referenced with MyFigureCollection **by barcode**, which is exact
@@ -344,7 +345,7 @@ Then add it in `backend/app/providers/registry.py`. The database already keys ev
 ```bash
 cd backend
 
-python tests/test_offline.py       # 228 assertions, no network
+python tests/test_offline.py       # 243 assertions, no network
 python tests/test_migration.py     # 15 assertions: upgrading an old database
 python tests/smoke_e2e.py          # 68 assertions against the live AmiAmi API
 python tests/smoke_discovery.py    # 25 assertions across AmiAmi and MFC

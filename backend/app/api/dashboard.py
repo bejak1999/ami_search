@@ -22,7 +22,7 @@ from ..models import (
 )
 from ..schemas import DashboardStats
 from ..services import fx
-from .serializers import alert_out, item_out
+from .serializers import alert_out, item_out, register_images
 
 router = APIRouter(prefix="/dashboard", tags=["dashboard"])
 
@@ -91,7 +91,7 @@ def dashboard(
         converted = fx.convert(db, entry.item.current_price, entry.item.currency, display)
         owned_value += (converted or 0.0) * entry.quantity
 
-    cheapest = db.execute(
+    cheapest_rows = db.execute(
         select(Item)
         .join(CollectionEntry, CollectionEntry.item_id == Item.id)
         .where(
@@ -102,6 +102,8 @@ def dashboard(
         .order_by(Item.current_price.asc().nulls_last())
         .limit(6)
     ).scalars()
+    cheapest = list(cheapest_rows)
+    register_images(db, cheapest)
 
     recent = db.execute(
         select(Alert)

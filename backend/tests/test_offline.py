@@ -1211,6 +1211,73 @@ def test_local_search() -> None:
         db.close()
 
 
+def test_watch_code_normalisation() -> None:
+    print()
+    print("== Product codes name listings, not products ==")
+    from app.providers.amiami import AmiAmiProvider
+
+    norm = AmiAmiProvider.normalise_watch_code
+
+    # FIGURE-x is the first-hand listing, FIGURE-x-R the pre-owned one, and
+    # FIGURE-x-R032 one specific graded copy of the latter.
+    check("a first-hand code is left alone", norm("FIGURE-180385") == "FIGURE-180385")
+    check("a pre-owned code is left alone", norm("FIGURE-180385-R") == "FIGURE-180385-R")
+    check(
+        "a single graded copy reduces to its listing",
+        norm("FIGURE-180385-R032") == "FIGURE-180385-R",
+    )
+    check("case is normalised", norm("figure-180385-r151") == "FIGURE-180385-R")
+    check("hyphenated makers survive", norm("FIG-MOE-2210-R170") == "FIG-MOE-2210-R")
+    check("empty input stays empty", norm("") == "")
+    check("whitespace is trimmed", norm("  FIGURE-1-R007  ") == "FIGURE-1-R")
+
+    # Watching one copy would break the instant that copy sold, which is
+    # precisely the moment the watch was there for.
+    check(
+        "a copy suffix never survives",
+        all(not c.rsplit("-R", 1)[-1].isdigit() or c.endswith("-R")
+            for c in [norm("A-1-R001"), norm("B-2-R99"), norm("C-3-R")]),
+    )
+
+
+def test_image_fallback() -> None:
+    print()
+    print("== A photo that has not been cached yet ==")
+    from app.db import SessionLocal, init_db
+    from app.models import CachedImage, Item
+    from app.services import images
+
+    init_db()
+    db = SessionLocal()
+    try:
+        url = "https://img.amiami.com/images/product/main/999/FALLBACK-1.jpg"
+        item = Item(provider="fallback-fixture", code="FALLBACK-1", name="X", image_url=url)
+        db.add(item)
+        db.commit()
+
+        key = images.key_for(url)
+        check("nothing is registered to begin with",
+              db.query(CachedImage).filter(CachedImage.key == key).first() is None)
+
+        # Registering is what makes the hashed route resolvable at all: the
+        # key cannot be reversed, so without this the endpoint has no idea
+        # what to fetch and the tile renders blank.
+        added = images.register(db, images.urls_for_item(item), commit=True)
+        check("registering records the mapping", added >= 1, added)
+
+        row = db.query(CachedImage).filter(CachedImage.key == key).one()
+        check("the source URL is recoverable", row.source_url == url)
+        check("but nothing has been downloaded", row.fetched_at is None)
+        check("and it is not marked gone", row.gone is False)
+
+        # Registering the same photo twice must not duplicate it.
+        again = images.register(db, [url], commit=True)
+        check("registering twice adds nothing", again == 0)
+        check("still one row", db.query(CachedImage).filter(CachedImage.key == key).count() == 1)
+    finally:
+        db.close()
+
+
 def test_settings() -> None:
     print("\n== Configuration ==")
     from app.config import Settings
@@ -1255,6 +1322,8 @@ def main() -> int:
     test_image_url_derivation()
     test_image_selection()
     test_local_search()
+    test_watch_code_normalisation()
+    test_image_fallback()
     test_settings()
 
     print(f"\n{'=' * 46}\n  {PASS} passed, {FAIL} failed\n{'=' * 46}")

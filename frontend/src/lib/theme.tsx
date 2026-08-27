@@ -4,6 +4,12 @@ import type { ReactNode } from 'react'
 export type ThemeName = 'midnight' | 'sakura'
 export type ColorMode = 'dark' | 'light' | 'system'
 
+/**
+ * Card shape. AmiAmi's photos are square, so square shows the whole picture
+ * while portrait crops it but fits more figures on a screen.
+ */
+export type CardShape = 'portrait' | 'square'
+
 export const THEMES: { id: ThemeName; label: string; blurb: string; swatch: string[] }[] = [
   {
     id: 'midnight',
@@ -24,12 +30,14 @@ const STORAGE_KEY = 'amisearch.appearance'
 interface Appearance {
   theme: ThemeName
   mode: ColorMode
+  cardShape: CardShape
 }
 
 interface ThemeContextValue extends Appearance {
   resolvedMode: 'dark' | 'light'
   setTheme: (theme: ThemeName) => void
   setMode: (mode: ColorMode) => void
+  setCardShape: (shape: CardShape) => void
 }
 
 const ThemeContext = createContext<ThemeContextValue | null>(null)
@@ -40,9 +48,10 @@ function readStored(): Appearance {
     return {
       theme: raw.theme === 'sakura' ? 'sakura' : 'midnight',
       mode: raw.mode === 'light' || raw.mode === 'system' ? raw.mode : 'dark',
+      cardShape: raw.cardShape === 'square' ? 'square' : 'portrait',
     }
   } catch {
-    return { theme: 'midnight', mode: 'dark' }
+    return { theme: 'midnight', mode: 'dark', cardShape: 'portrait' }
   }
 }
 
@@ -82,10 +91,14 @@ export function ThemeProvider({ children }: { children: ReactNode }) {
     [],
   )
   const setMode = useCallback((mode: ColorMode) => setAppearance((prev) => ({ ...prev, mode })), [])
+  const setCardShape = useCallback(
+    (cardShape: CardShape) => setAppearance((prev) => ({ ...prev, cardShape })),
+    [],
+  )
 
   const value = useMemo(
-    () => ({ ...appearance, resolvedMode, setTheme, setMode }),
-    [appearance, resolvedMode, setTheme, setMode],
+    () => ({ ...appearance, resolvedMode, setTheme, setMode, setCardShape }),
+    [appearance, resolvedMode, setTheme, setMode, setCardShape],
   )
 
   return <ThemeContext.Provider value={value}>{children}</ThemeContext.Provider>

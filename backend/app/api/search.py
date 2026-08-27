@@ -142,7 +142,9 @@ def search_local(
 
     started = time.monotonic()
     result = localsearch.search(db, payload)
-    from .serializers import item_out
+    from .serializers import item_out, register_images
+
+    register_images(db, result.items)
 
     return SearchResponse(
         items=[
