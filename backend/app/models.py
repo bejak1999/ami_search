@@ -904,6 +904,13 @@ class CatalogCrawl(Base):
     cycles_completed: Mapped[int] = mapped_column(Integer, default=0)
 
     pages_fetched: Mapped[int] = mapped_column(Integer, default=0)
+    #: Pages this slice actually gets through in an hour of wall-clock time,
+    #: smoothed across runs. Measured rather than calculated, because the
+    #: calculation was wildly optimistic: it assumed the slice had the crawler
+    #: to itself and that nothing ever paused, while in reality four slices
+    #: share the time, the pacer scatters its requests and takes breaks, the
+    #: night slows everything down and a due watch interrupts outright.
+    pages_per_hour: Mapped[float | None] = mapped_column(Float)
     items_seen: Mapped[int] = mapped_column(Integer, default=0)
     items_new: Mapped[int] = mapped_column(Integer, default=0)
     items_changed: Mapped[int] = mapped_column(Integer, default=0)

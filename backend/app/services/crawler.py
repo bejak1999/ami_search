@@ -283,36 +283,60 @@ def _cooldown_remaining(crawl: CatalogCrawl) -> int:
     return max(0, int(remaining.total_seconds()))
 
 
+def _overdue_seconds(crawl: CatalogCrawl) -> float:
+    """How long past its own schedule this slice is, negative if not yet due."""
+    if not (crawl.cycles_completed or 0) or crawl.finished_at is None:
+        return float("inf")  # never finished a pass, so always the first claim
+    interval = timedelta(minutes=max(1, crawl.recheck_interval_minutes or 30))
+    due = crawl.finished_at + interval
+    return (datetime.now(timezone.utc) - due).total_seconds()
+
+
 def _select_crawl(db: Session, provider: str) -> CatalogCrawl | None:
+    """Which slice gets the next few minutes of crawling.
+
+    Due work first, and it runs to completion; the long sweep fills whatever
+    is left. Both halves of that came from getting it wrong.
+
+    Strict priority starved everything below the busiest slice, which held the
+    budget almost continuously. Plain rotation fixed the starving and replaced
+    it with something worse to watch: every job picked whoever had waited
+    longest, so sweeps were abandoned part way and resumed later and nothing
+    ever visibly finished.
+
+    So a slice that is past its own interval outranks one that is not, and
+    stays outranking it until its pass completes - which is why a 211-page
+    sweep now runs start to end rather than in scattered fragments. A slice
+    only part way through and not yet due keeps going in the gaps, which is
+    what the weekly full sweep does with the time the hourly ones leave.
+    """
     candidates = list(
         db.execute(
-            select(CatalogCrawl)
-            .where(
+            select(CatalogCrawl).where(
                 CatalogCrawl.provider == provider,
                 CatalogCrawl.enabled.is_(True),
                 CatalogCrawl.consecutive_errors < 5,
-            )
-            .order_by(
-                # Round robin by who has waited longest, with priority only
-                # breaking ties. Strict priority looked reasonable and was
-                # not: the pre-owned slice re-reads itself every half hour and
-                # takes most of that half hour to do it, so it held the budget
-                # almost continuously and the full catalogue sweep advanced on
-                # whatever was left. Rotating means every slice visibly moves,
-                # which is also far easier to reason about when watching it.
-                CatalogCrawl.last_run_at.asc().nulls_first(),
-                CatalogCrawl.priority.asc(),
             )
         )
         .scalars()
         .all()
     )
-    # Skip slices still resting between passes, so the budget goes to a slice
-    # that has work to do instead of re-reading the same first pages.
-    for crawl in candidates:
-        if _cooldown_remaining(crawl) == 0:
-            return crawl
-    return None
+
+    def rank(crawl: CatalogCrawl) -> tuple:
+        overdue = _overdue_seconds(crawl)
+        mid_sweep = (crawl.cursor_page or 1) > 1
+        # Due beats not due; among the due, the one waiting longest; among
+        # those, the one already under way; then the configured priority.
+        return (0 if overdue >= 0 else 1, -overdue, 0 if mid_sweep else 1, crawl.priority or 0)
+
+    eligible = [
+        crawl
+        for crawl in candidates
+        if _overdue_seconds(crawl) >= 0 or (crawl.cursor_page or 1) > 1
+    ]
+    if not eligible:
+        return None
+    return sorted(eligible, key=rank)[0]
 
 
 def run_once(db: Session, provider_id: str = "amiami", budget_seconds: int | None = None) -> CrawlRun:
@@ -337,6 +361,10 @@ def run_once(db: Session, provider_id: str = "amiami", budget_seconds: int | Non
     if crawl.started_at is None:
         crawl.started_at = utcnow()
     crawl.state = CrawlState.running
+    # Kept before it is overwritten: the gap since this slice last ran is what
+    # turns pages-per-run into pages-per-hour of real time, and the idle part
+    # of that gap is exactly what the old estimate pretended did not exist.
+    previous_run_at = crawl.last_run_at
     crawl.last_run_at = utcnow()
     db.commit()
 
@@ -406,6 +434,7 @@ def run_once(db: Session, provider_id: str = "amiami", budget_seconds: int | Non
 
     if crawl.state == CrawlState.running and run.stopped_because not in ("cycle complete",):
         crawl.state = CrawlState.paused
+    _record_throughput(crawl, run.pages, previous_run_at)
     db.commit()
 
     run.seconds = time.monotonic() - started
@@ -420,6 +449,26 @@ def run_once(db: Session, provider_id: str = "amiami", budget_seconds: int | Non
             run.stopped_because,
         )
     return run
+
+
+def _record_throughput(crawl: CatalogCrawl, pages: int, previous_run_at) -> None:
+    """Fold this run into the slice's observed pages-per-hour.
+
+    Measured against wall-clock time since the slice last ran, idle included,
+    because that is the number an estimate needs: a slice waiting its turn is
+    not making progress, however fast it moves when it is running.
+    """
+    if pages <= 0 or previous_run_at is None:
+        return
+    elapsed = (utcnow() - previous_run_at).total_seconds() / 3600.0
+    # A gap long enough to be a restart rather than a rhythm says nothing
+    # useful about throughput.
+    if elapsed <= 0 or elapsed > 12:
+        return
+    observed = pages / elapsed
+    crawl.pages_per_hour = (
+        observed if crawl.pages_per_hour is None else crawl.pages_per_hour * 0.7 + observed * 0.3
+    )
 
 
 def _store_page(db: Session, items) -> tuple[int, int]:
@@ -671,7 +720,10 @@ def progress(db: Session, provider_id: str = "amiami") -> dict:
                 "last_run_at": crawl.last_run_at,
                 "last_full_sweep_at": crawl.last_full_sweep_at,
                 "last_error": crawl.last_error,
-                "eta_seconds": _eta_seconds(limit - done),
+                "eta_seconds": _eta_seconds(limit - done, crawl.pages_per_hour),
+                "pages_per_hour": (
+                    round(crawl.pages_per_hour, 1) if crawl.pages_per_hour else None
+                ),
                 "next_run_in_seconds": _cooldown_remaining(crawl),
                 "recheck_minutes": crawl.recheck_interval_minutes,
                 "head_pages": crawl.head_pages,
@@ -695,12 +747,32 @@ def progress(db: Session, provider_id: str = "amiami") -> dict:
     }
 
 
-def _eta_seconds(pages_remaining: int) -> int | None:
-    """Rough time to finish, using the configured rate and duty cycle."""
+def _eta_seconds(pages_remaining: int, pages_per_hour: float | None = None) -> int | None:
+    """Time to finish, from what this slice actually manages per hour.
+
+    The old version multiplied the configured request rate by the share of
+    each interval spent crawling and called that an answer. It was optimistic
+    by a wide margin, because it assumed the slice had the crawler to itself
+    and that nothing ever paused: four slices share the time, the pacer
+    scatters its requests and takes the occasional long break, the night slows
+    everything by a factor of two and a half, and a due watch stops a run
+    outright. A slice quoted at "about 33 minutes" was closer to an afternoon.
+
+    So the measured rate is used when there is one, and the calculated figure
+    only stands in until the first run has been through.
+    """
     if pages_remaining <= 0:
         return None
+    if pages_per_hour and pages_per_hour > 0:
+        return int(pages_remaining / pages_per_hour * 3600)
+
     seconds_per_page = 60.0 / max(0.1, settings.crawler_requests_per_minute)
     working = seconds_per_page * pages_remaining
-    # Only part of each interval is spent crawling.
-    duty = max(0.05, min(1.0, settings.crawler_max_seconds_per_run / (settings.crawler_run_interval_minutes * 60)))
-    return int(working / duty)
+    duty = max(
+        0.05,
+        min(1.0, settings.crawler_max_seconds_per_run / (settings.crawler_run_interval_minutes * 60)),
+    )
+    # Divided again by the number of slices sharing the crawler, since the
+    # rate above is what one gets with the whole thing to itself.
+    contenders = max(1, len([s for s in DEFAULT_SCOPES if s.get("enabled", True)]))
+    return int(working / duty * contenders)

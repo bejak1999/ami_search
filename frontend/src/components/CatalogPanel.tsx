@@ -316,7 +316,16 @@ function Slice({
         {resting ? (
           <span>next sweep in {duration(slice.next_run_in_seconds)}</span>
         ) : slice.eta_seconds ? (
-          <span>this sweep done in {eta(slice.eta_seconds)}</span>
+          <span
+            title={
+              slice.pages_per_hour
+                ? `Based on the ${slice.pages_per_hour} pages an hour this slice actually manages, waiting for its turn included.`
+                : 'A rough guess until this slice has run once and its real speed is known.'
+            }
+          >
+            this sweep done in {eta(slice.eta_seconds)}
+            {!slice.pages_per_hour && ' (rough)'}
+          </span>
         ) : null}
         {slice.last_run_at && <span>last read {relativeTime(slice.last_run_at)}</span>}
         {/* Rows this slice holds that the shop no longer counts in it. On the
@@ -643,12 +652,12 @@ export function CatalogPanel() {
             </span>
           </div>
           <p className="mb-1 max-w-3xl text-xs leading-relaxed text-muted">
-            Four views of the same shop, read newest-updated first. They{' '}
-            <strong className="text-ink">take turns</strong> rather than running by rank, so
-            each keeps its place in the queue and picks up where it left off &mdash; which is
-            why a long sweep shows steady progress instead of finishing in one go. The
-            percentage is how much of what the shop currently lists we hold, not how far
-            through a sweep we are; that is the page count beside it.
+            Four views of the same shop, read newest-updated first. Only one runs at a time:{' '}
+            <strong className="text-ink">whichever is past its own interval</strong>, and it
+            keeps going until that sweep is finished rather than handing over part way. The
+            weekly full sweep fills whatever time the hourly ones leave, so it advances in
+            long stretches and pauses when something falls due &mdash; its cursor is kept, so
+            it resumes rather than restarts.
           </p>
           <p className="mb-3 max-w-3xl text-xs leading-relaxed text-faint">
             <strong className="text-muted">They overlap, and that is the point.</strong>{' '}

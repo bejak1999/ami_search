@@ -1266,9 +1266,7 @@ def test_null_lists_never_break_a_response() -> None:
 
 
 def test_slices_take_turns() -> None:
-    print("\n== Catalogue slices take turns ==")
-    from datetime import datetime as _dt
-
+    print("\n== Due work finishes, the long sweep fills the gaps ==")
     from app.db import SessionLocal, init_db
     from app.models import CatalogCrawl
     from app.services import crawler
@@ -1284,11 +1282,14 @@ def test_slices_take_turns() -> None:
         all(row.enabled for row in rows.values()),
         {s: r.enabled for s, r in rows.items()},
     )
+    check(
+        "and every one reads newest-updated first",
+        all((c.query or {}).get("sort") == "newest" for c in rows.values()),
+    )
 
     # The three narrow slices carry the changes; the full sweep is the
-    # backstop. Anything that is in none of the three is sold out and frozen,
-    # so re-reading it often buys nothing - which is why the big one runs
-    # weekly and the small ones hourly rather than the other way round.
+    # backstop. Anything in none of the three is sold out and frozen, so
+    # re-reading it often buys nothing.
     fast = max(
         rows[s].recheck_interval_minutes
         for s in ("figures_preowned", "figures_in_stock", "figures_preorder")
@@ -1299,8 +1300,6 @@ def test_slices_take_turns() -> None:
         (fast, rows["figures_all"].recheck_interval_minutes),
     )
 
-    # And the whole schedule has to fit the request budget with room to spare,
-    # because watches and the shelf-life sampler draw on the same allowance.
     pages = {
         "figures_preowned": 211,
         "figures_in_stock": 59,
@@ -1318,59 +1317,242 @@ def test_slices_take_turns() -> None:
         per_day < capacity * 0.75,
         f"{per_day:.0f} of {capacity:.0f} pages a day",
     )
-    check(
-        "and every one reads newest-updated first",
-        all((c.query or {}).get("sort") == "newest" for c in rows.values()),
-        {s: (c.query or {}).get("sort") for s, c in rows.items()},
-    )
 
-    # Strict priority let the busiest slice hold the budget almost
-    # continuously: it re-reads itself every half hour and takes most of that
-    # half hour to do it, so the full catalogue sweep only ever got scraps.
-    base = _dt(2026, 8, 28, 8, 0, tzinfo=timezone.utc)
-    for offset, scope in enumerate(
-        ["figures_preowned", "figures_in_stock", "figures_preorder", "figures_all"]
-    ):
-        row = rows[scope]
-        row.last_run_at = base + timedelta(minutes=offset)
+    # --- who gets the next few minutes -------------------------------------
+    now = datetime.now(timezone.utc)
+    for row in rows.values():
         row.cycles_completed = 1
-        row.finished_at = base + timedelta(minutes=offset)
-        row.recheck_interval_minutes = 1
+        row.cursor_page = 1
+        row.finished_at = now - timedelta(minutes=1)
+        row.last_run_at = now - timedelta(minutes=1)
     db.commit()
+    check("with nothing due, nothing is picked", crawler._select_crawl(db, "amiami") is None)
 
+    # The big sweep is part way through and not due, so it fills the gap.
+    rows["figures_all"].cursor_page = 400
+    db.commit()
     picked = crawler._select_crawl(db, "amiami")
     check(
-        "the slice that has waited longest goes next",
-        picked.scope == "figures_preowned",
-        picked.scope,
+        "a sweep already under way continues when nothing is due",
+        picked is not None and picked.scope == "figures_all",
+        picked.scope if picked else None,
     )
 
-    # After it runs, it goes to the back rather than straight round again.
-    picked.last_run_at = base + timedelta(hours=1)
+    # An hourly slice comes due and takes over. The big one keeps its cursor.
+    rows["figures_preowned"].finished_at = now - timedelta(hours=3)
     db.commit()
-    nxt = crawler._select_crawl(db, "amiami")
-    check(
-        "and the next turn belongs to someone else",
-        nxt.scope == "figures_in_stock",
-        nxt.scope,
-    )
+    picked = crawler._select_crawl(db, "amiami")
+    check("due work outranks a sweep in progress", picked.scope == "figures_preowned")
 
-    # The lowest-priority slice is not stuck behind the others for ever.
-    for scope in ("figures_in_stock", "figures_preorder"):
-        rows[scope].last_run_at = base + timedelta(hours=2)
+    # And it stays chosen until its own pass completes, rather than being
+    # swapped out every few minutes. That churn is what made this
+    # incomprehensible to watch: nothing ever finished.
+    rows["figures_preowned"].cursor_page = 40
+    rows["figures_preowned"].last_run_at = datetime.now(timezone.utc)
     db.commit()
     check(
-        "the biggest slice gets its turn too",
-        crawler._select_crawl(db, "amiami").scope == "figures_all",
+        "and keeps the budget until that pass is done",
+        crawler._select_crawl(db, "amiami").scope == "figures_preowned",
         crawler._select_crawl(db, "amiami").scope,
+    )
+
+    # Once it finishes, the interrupted sweep picks up where it left off.
+    rows["figures_preowned"].cursor_page = 1
+    rows["figures_preowned"].finished_at = datetime.now(timezone.utc)
+    db.commit()
+    resumed = crawler._select_crawl(db, "amiami")
+    check(
+        "then the long sweep resumes from its cursor",
+        resumed.scope == "figures_all" and resumed.cursor_page == 400,
+        (resumed.scope, resumed.cursor_page),
+    )
+
+    # A slice that has never run outranks everything, so a fresh install
+    # starts building rather than waiting out an interval.
+    rows["figures_preorder"].cycles_completed = 0
+    rows["figures_preorder"].finished_at = None
+    db.commit()
+    check(
+        "a slice that has never finished a pass goes first",
+        crawler._select_crawl(db, "amiami").scope == "figures_preorder",
     )
 
     detail = crawler.progress(db, "amiami")
     positions = {s["scope"]: s["queue_position"] for s in detail["slices"]}
-    check("the view can say who is in line", all(p is not None for p in positions.values()), positions)
+    check(
+        "the view can say who is in line",
+        all(p is not None for p in positions.values()),
+        positions,
+    )
 
     db.query(CatalogCrawl).delete()
     db.commit()
+    db.close()
+
+
+def test_sweep_estimate_uses_observed_speed() -> None:
+    print("\n== The sweep estimate measures rather than assumes ==")
+    from app.models import CatalogCrawl
+    from app.services.crawler import _eta_seconds, _record_throughput
+
+    # The old estimate multiplied the configured request rate by the share of
+    # each interval spent crawling, which assumed one slice had the crawler to
+    # itself and that nothing ever paused. It quoted half an hour for work
+    # that took an afternoon.
+    naive = 208 / 0.8 * 7.5
+    check("the old arithmetic said about half an hour", 1700 < naive < 2100, f"{naive:.0f}s")
+
+    without = _eta_seconds(208)
+    check(
+        "the fallback now allows for the slices sharing",
+        without > naive * 2,
+        f"{without}s against {naive:.0f}s",
+    )
+
+    for rate, expected_hours in ((60, 3.5), (25, 8.3)):
+        seconds = _eta_seconds(208, rate)
+        check(
+            f"at {rate} pages an hour it says about {expected_hours} h",
+            abs(seconds / 3600 - expected_hours) < 0.3,
+            f"{seconds / 3600:.1f} h",
+        )
+
+    check("nothing left means no estimate", _eta_seconds(0, 25) is None)
+
+    # Throughput is measured against wall-clock time including the waiting, so
+    # a slice that only runs now and then is not credited with the speed it
+    # manages during the few minutes it holds the budget.
+    crawl = CatalogCrawl(provider="amiami", scope="s")
+    _record_throughput(crawl, 30, datetime.now(timezone.utc) - timedelta(hours=1))
+    check("one hour and 30 pages reads as 30 an hour", abs(crawl.pages_per_hour - 30) < 0.5)
+
+    _record_throughput(crawl, 10, datetime.now(timezone.utc) - timedelta(hours=1))
+    check(
+        "a slower run pulls the average down without jumping to it",
+        10 < crawl.pages_per_hour < 30,
+        crawl.pages_per_hour,
+    )
+
+    # A gap long enough to be a restart says nothing about throughput.
+    steady = crawl.pages_per_hour
+    _record_throughput(crawl, 50, datetime.now(timezone.utc) - timedelta(days=2))
+    check("a restart-sized gap is ignored", crawl.pages_per_hour == steady)
+    _record_throughput(crawl, 0, datetime.now(timezone.utc) - timedelta(hours=1))
+    check("and so is a run that fetched nothing", crawl.pages_per_hour == steady)
+
+
+def test_slice_counts_compare_like_with_like() -> None:
+    print("\n== Slice counts mean what the shop's numbers mean ==")
+    from app.db import SessionLocal, init_db
+    from app.models import Condition, Item
+    from app.services import crawler
+
+    init_db()
+    db = SessionLocal()
+
+    # Every pre-owned listing carries the shop's in-stock flag - all hundred
+    # sampled did, because a used copy that sells is deleted rather than
+    # marked gone. The in-stock slice asks the shop for something else
+    # entirely, "first-hand stock available", which no used listing has. So
+    # counting our stored in_stock swept the whole used catalogue into the
+    # in-stock total and reported 13,834 held against 2,813 listed, as if
+    # eleven thousand rows had gone stale.
+    for index in range(12):
+        db.add(
+            Item(provider="amiami", code=f"CNT-P{index}", name="used",
+                 condition=Condition.preowned, in_stock=True)
+        )
+    for index in range(5):
+        db.add(
+            Item(provider="amiami", code=f"CNT-N{index}", name="new",
+                 condition=Condition.new, in_stock=True)
+        )
+    for index in range(3):
+        db.add(
+            Item(provider="amiami", code=f"CNT-O{index}", name="pre-order",
+                 condition=Condition.new, is_preorder=True)
+        )
+    # A pre-owned listing is in stock and could also read as a pre-order
+    # through the other flag; neither may leak into the new-condition counts.
+    db.add(
+        Item(provider="amiami", code="CNT-PX", name="used pre-order",
+             condition=Condition.preowned, in_stock=True, is_preorder=True)
+    )
+    db.commit()
+
+    def count(scope: str) -> int:
+        return crawler.local_count(db, scope, "amiami")
+
+    check("pre-owned counts every used listing", count("figures_preowned") == 13, count("figures_preowned"))
+    check(
+        "in stock counts first-hand stock only",
+        count("figures_in_stock") == 5,
+        count("figures_in_stock"),
+    )
+    check(
+        "pre-order does not count used listings either",
+        count("figures_preorder") == 3,
+        count("figures_preorder"),
+    )
+    check("and the catch-all counts everything", count("figures_all") == 21, count("figures_all"))
+
+    _purge(
+        db,
+        *[f"CNT-P{i}" for i in range(12)],
+        *[f"CNT-N{i}" for i in range(5)],
+        *[f"CNT-O{i}" for i in range(3)],
+        "CNT-PX",
+    )
+    db.close()
+
+
+def test_activity_can_start_again() -> None:
+    print("\n== The activity profile can be started again ==")
+    from app.db import SessionLocal, init_db
+    from app.models import Item
+    from app.services import crawler
+
+    init_db()
+    db = SessionLocal()
+
+    # The first catalogue build ruins the profile: every item is first seen
+    # while the crawler works through the pages, so the busiest hour reads as
+    # whenever the sweep ran rather than when the shop listed anything.
+    stale = datetime.now(timezone.utc) - timedelta(days=3)
+    for index in range(20):
+        db.add(
+            Item(provider="amiami", code=f"ACT-{index}", name="crawled", first_seen_at=stale)
+        )
+    db.commit()
+
+    check("the build shows up in the profile", crawler.activity_profile(db)["new_listings"] == 20)
+    check("with no baseline set", crawler.activity_profile(db)["baseline"] is None)
+
+    at = crawler.reset_activity(db)
+    profile = crawler.activity_profile(db)
+    check("resetting hides what came before", profile["new_listings"] == 0, profile["new_listings"])
+    check("and records when the line was drawn", profile["baseline"] is not None)
+    check("which is what the reset returned", abs((profile["baseline"] - at).total_seconds()) < 2)
+
+    # Nothing may be deleted: these timestamps belong to the catalogue and the
+    # price history, which have their own reasons to exist.
+    check("nothing was deleted", db.query(Item).filter(Item.code.like("ACT-%")).count() == 20)
+
+    db.add(Item(provider="amiami", code="ACT-NEW", name="genuinely new"))
+    db.commit()
+    check(
+        "and anything after the line counts again",
+        crawler.activity_profile(db)["new_listings"] == 1,
+    )
+
+    # A window shorter than the baseline still wins, so "last 7 days" cannot
+    # drag data back in from before the reset.
+    check(
+        "a longer window does not reach past the line",
+        crawler.activity_profile(db, days=90)["new_listings"] == 1,
+    )
+
+    _purge(db, *[f"ACT-{i}" for i in range(20)], "ACT-NEW")
     db.close()
 
 
@@ -2691,6 +2873,7 @@ def main() -> int:
     test_blocklist_hides_things_while_browsing()
     test_rail_filters_take_lists()
     test_slices_take_turns()
+    test_sweep_estimate_uses_observed_speed()
     test_slice_counts_compare_like_with_like()
     test_activity_can_start_again()
     test_discover_ignores_placeholder_series()
