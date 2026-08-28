@@ -207,14 +207,25 @@ def _page_limit(crawl: CatalogCrawl) -> int:
     the list is where anything new turns up. Measured against the live API,
     that assumption is simply false for the slices this crawler reads.
 
-    On the pre-owned slice the order is stable and unrelated to when a listing
-    was added: page one spans product codes from 693 to 205886, page 150 spans
-    598 to 199675, and two snapshots taken apart came back byte for byte
-    identical. A used copy taken in this morning lands wherever its product
-    happens to sit in that fixed order, which for a figure from 2008 is
-    somewhere around page 140. The API offers exactly two orderings, neither
-    of which is by recency, so there is no sort key that would rescue the
-    idea.
+    Measured on the pre-owned slice over nine hours (see .probe/order_probe.py,
+    which records the snapshots this rests on):
+
+      * 375 new listings appeared in that window. Not one of them landed on
+        page one. The single arrival there had drifted up from page two
+        because something above it sold out.
+      * A product that took in five new copies - its intake counter went 120
+        to 125 - did not move a single position. It sat at slot two on page
+        one before and after.
+      * The order itself is fixed: of 49 listings still on page one, zero had
+        changed rank relative to each other. Pages only drift because entries
+        above them leave, which is why page 50 kept two thirds of its content
+        and page 100 kept none.
+
+    So a listing's page says nothing about when it was added or when it was
+    last restocked. New arrivals are scattered through all 203 pages, and a
+    twenty-page head pass would have caught about a tenth of them by luck. The
+    API offers exactly two orderings and neither is by recency, so no sort key
+    rescues the idea either.
 
     The practical effect was that after the first pass the crawler re-read the
     same thousand products for ever and found new listings only on the weekly

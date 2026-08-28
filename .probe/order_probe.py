@@ -1,15 +1,33 @@
 """Does a pre-owned listing move to the front when a new copy arrives?
 
-The crawler used to re-read only the first pages of a slice, which is only
-worth doing if the shop puts recently-restocked products there. Nothing in the
-list payload says when a used listing was created - there is no date field at
-all beyond the figure's original release - so the only way to find out is to
-watch the same pages over time.
+The crawler used to re-read only the first pages of a slice, which is worth
+doing only if the shop puts recently-listed or recently-restocked products
+there. Nothing in the list payload says when a used listing was created -
+there is no date field at all beyond the figure's original release - so the
+only way to find out is to watch the same pages over time.
 
-Run it once to record a baseline, then again hours later to compare:
-
-    python .probe/order_probe.py record
+    python .probe/order_probe.py record      # baseline
+    ... hours later ...
+    python .probe/order_probe.py record      # again
     python .probe/order_probe.py compare
+
+Answered, over a nine-hour window on 28 August 2026:
+
+    375 new pre-owned listings appeared. None on page one; the only arrival
+    there had drifted up from page two because an entry above it left.
+
+    FIGURE-184067-R took in five copies (counter 120 -> 125) and did not move
+    at all, staying at slot two of page one.
+
+    Of 49 listings still on page one, zero had changed rank relative to each
+    other. The order is fixed; pages drift only because entries above them
+    disappear, which is why page 50 kept two thirds of its content while
+    pages 100 and 150 kept none.
+
+Conclusion: page position says nothing about when a listing was added or last
+restocked, so the crawler reads every slice end to end. Worth re-running if
+the shop ever changes its ordering - the conclusion is only as current as the
+last comparison.
 """
 import json
 import os
