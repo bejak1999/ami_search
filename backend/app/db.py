@@ -80,6 +80,9 @@ def init_db() -> None:
     indexed = create_missing_indexes()
     if indexed:
         log.info("Created %s index(es): %s", len(indexed), ", ".join(indexed))
+    filled = backfill_container_defaults()
+    if filled:
+        log.info("Filled in %s empty list/dict column(s) left NULL by a migration", filled)
     adopted = adopt_amiami_rates()
     if adopted:
         log.info("Moved %s cost profile(s) onto AmiAmi's published rate charts", adopted)
@@ -199,6 +202,71 @@ def ease_quiet_slices() -> int:
                 crawl.recheck_interval_minutes = target
                 changed += 1
     return changed
+
+
+def _container_literal(column) -> str | None:
+    """The empty value a JSON column's default would have produced.
+
+    A column declared ``default=list`` has a *callable* default, which the ORM
+    runs on insert and which cannot be written into an ALTER TABLE. So a JSON
+    column added to an existing table arrives NULL on every row that was
+    already there, and stays NULL until something writes to it.
+
+    That is how a dashboard went blank: a list column added by an upgrade read
+    back as None, and a response model declaring it a list refused to
+    serialise, so the whole endpoint failed rather than one field.
+    """
+    default = getattr(column, "default", None)
+    if default is None or not getattr(default, "is_callable", False):
+        return None
+    # SQLAlchemy wraps a callable default in one that takes an execution
+    # context, so the stored function is never ``list`` itself and comparing
+    # against it silently matches nothing. Asking it what it produces is the
+    # only reliable way, and it costs one call at start-up.
+    try:
+        produced = default.arg(None)
+    except Exception:  # noqa: BLE001 - a default needing real context is not ours
+        return None
+    if produced == [] and isinstance(produced, list):
+        return "[]"
+    if produced == {} and isinstance(produced, dict):
+        return "{}"
+    return None
+
+
+def backfill_container_defaults() -> int:
+    """Replace NULLs in list and dict columns with their empty value.
+
+    Runs on every start and is idempotent: it only touches rows that are still
+    NULL. Cheap, because after the first pass there is nothing to update, and
+    it repairs databases migrated by an earlier build as well as the column
+    added by this one.
+    """
+    from . import models
+
+    inspector = inspect(engine)
+    existing = set(inspector.get_table_names())
+    filled = 0
+
+    for table in models.Base.metadata.sorted_tables:
+        if table.name not in existing:
+            continue
+        present = {column["name"] for column in inspector.get_columns(table.name)}
+        for column in table.columns:
+            literal = _container_literal(column)
+            if literal is None or column.name not in present:
+                continue
+            statement = text(
+                f'UPDATE "{table.name}" SET "{column.name}" = :value '
+                f'WHERE "{column.name}" IS NULL'
+            )
+            try:
+                with engine.begin() as conn:
+                    result = conn.execute(statement, {"value": literal})
+                filled += int(result.rowcount or 0)
+            except SQLAlchemyError:
+                log.exception("Could not backfill %s.%s", table.name, column.name)
+    return filled
 
 
 def _backup_sqlite() -> Path | None:

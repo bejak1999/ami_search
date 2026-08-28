@@ -1205,6 +1205,66 @@ def test_rail_filters_take_lists() -> None:
     db.close()
 
 
+def test_null_lists_never_break_a_response() -> None:
+    print("\n== One unset column must not empty a page ==")
+    from app.schemas import AlertOut, CostProfileOut
+    from app.models import TriggerType
+
+    # A JSON column added by an upgrade is NULL on every pre-existing row,
+    # because its default is a callable that cannot be written into an ALTER.
+    # The database is repaired on the next start, but a response model that
+    # refuses None fails the whole endpoint rather than the single field, and
+    # that is how a dashboard went blank after gaining an alert column.
+    alert = AlertOut.model_validate(
+        {
+            "id": 1,
+            "trigger": TriggerType.new_match,
+            "reasons": None,
+            "title": "A new listing matches",
+            "body": "",
+            "price": 8400.0,
+            "currency": "JPY",
+            "landed_currency": "EUR",
+            "landed_price": None,
+            "previous_price": None,
+            "watch_id": None,
+            "item_id": None,
+            "url": None,
+            "image_url": None,
+            "extra": {},
+            "read_at": None,
+            "created_at": datetime.now(timezone.utc),
+        }
+    )
+    check("an alert with no reasons still serialises", alert.reasons == [])
+
+    profile = CostProfileOut.model_validate(
+        {
+            "country": "DE",
+            "vat_rate": 0.19,
+            "duty_rate": 0.047,
+            "duty_free_threshold": 150.0,
+            "vat_free_threshold": 0.0,
+            "customs_handling_fee": 6.0,
+            "shipping_mode": "amiami",
+            "shipping_zone": "zone3",
+            "shipping_service": "auto_air",
+            "shipping_flat": 25.0,
+            "shipping_table": [],
+            "default_weight_grams": 800,
+            "packaging_grams": 250,
+            "weight_scale": 1.0,
+            "blocked_terms": None,
+            "blocked_tags": None,
+            "category_weights": {},
+            "consolidate_shipping": False,
+            "fx_markup": 0.015,
+        }
+    )
+    check("a profile with no blocklist still serialises", profile.blocked_terms == [])
+    check("both lists, not just the first", profile.blocked_tags == [])
+
+
 def _valuation(compare: float | None):
     from app.services.matcher import Valuation
 
@@ -2353,6 +2413,7 @@ def main() -> int:
     test_wishlist_covers_both_conditions()
     test_search_can_fold_conditions()
     test_timestamps_keep_their_zone()
+    test_null_lists_never_break_a_response()
     test_blocklist_hides_things_while_browsing()
     test_rail_filters_take_lists()
     test_history_pruning_keeps_the_irreplaceable()

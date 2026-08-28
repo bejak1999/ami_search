@@ -22,6 +22,23 @@ class ORMModel(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
 
+def empty_when_null(*fields: str):
+    """Read a NULL list or dict column as its empty value.
+
+    A JSON column added by an upgrade is NULL on every row that already
+    existed, because its default is a callable the ALTER cannot write. The
+    database is repaired on the next start, but a response model that refuses
+    None fails the entire endpoint rather than the one field - which is how a
+    dashboard went blank because alerts had gained a column. Belt as well as
+    braces: one absent value should never take a page down with it.
+    """
+
+    def _coerce(cls, value):  # noqa: N805 - Pydantic hands the class in
+        return [] if value is None else value
+
+    return field_validator(*fields, mode="before")(classmethod(_coerce))
+
+
 # ---------------------------------------------------------------------------
 # Auth
 # ---------------------------------------------------------------------------
@@ -100,6 +117,7 @@ class CostProfileOut(ORMModel):
     weight_scale: float
     blocked_terms: list[str] = []
     blocked_tags: list[str] = []
+    _lists_null = empty_when_null("blocked_terms", "blocked_tags")
     category_weights: dict = {}
     consolidate_shipping: bool
     fx_markup: float
@@ -488,6 +506,7 @@ class AlertOut(ORMModel):
     trigger: TriggerType
     #: Every reason this alert qualified, so filters find it by any of them.
     reasons: list[str] = []
+    _reasons_null = empty_when_null("reasons")
     title: str
     body: str
     price: float | None

@@ -139,7 +139,40 @@ def main() -> int:
         row = db.query(Item).filter_by(code="FIGURE-165063-R").one()
         check("the ORM reads a migrated row", row.current_price == 40180)
         check("a column added today reads as empty, not as an error", row.price_max is None)
-        check("JSON columns tolerate the NULL left by the migration", not (row.variants or []))
+        # "or []" was hiding the very thing this needed to catch: the column
+        # really was NULL, every reader had to remember to paper over it, and
+        # the one that did not - a response model declaring a list - took a
+        # whole endpoint down with it.
+        check("a JSON column is filled in, not left NULL", row.variants == [])
+
+        # The same sweep the application runs, asserted over every table: a
+        # list or dict column must never survive a migration as NULL.
+        from sqlalchemy import text as _text
+
+        from app.db import _container_literal
+        from app.models import Base
+
+        offenders = []
+        for table in Base.metadata.sorted_tables:
+            for column in table.columns:
+                if _container_literal(column) is None:
+                    continue
+                nulls = db.execute(
+                    _text(
+                        f'SELECT COUNT(*) FROM "{table.name}" '
+                        f'WHERE "{column.name}" IS NULL'
+                    )
+                ).scalar_one()
+                if nulls:
+                    offenders.append(f"{table.name}.{column.name}={nulls}")
+        check("no list or dict column is left NULL anywhere", not offenders, offenders)
+
+        # And the response models must survive a migrated row, because a
+        # single unset field should never be able to empty a page.
+        from app.api.serializers import item_out
+
+        payload = item_out(db, row)
+        check("a migrated row still serialises", payload.code == "FIGURE-165063-R")
     finally:
         db.close()
 
