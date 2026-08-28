@@ -1397,6 +1397,71 @@ def test_discover_ignores_placeholder_series() -> None:
         check(f"{value!r} is left alone", not _is_placeholder(value), value)
 
 
+def test_slice_counts_compare_like_with_like() -> None:
+    print("\n== Slice counts mean what the shop's numbers mean ==")
+    from app.db import SessionLocal, init_db
+    from app.models import Condition, Item
+    from app.services import crawler
+
+    init_db()
+    db = SessionLocal()
+
+    # Every pre-owned listing carries the shop's in-stock flag - all hundred
+    # sampled did, because a used copy that sells is deleted rather than
+    # marked gone. The in-stock slice asks the shop for something else
+    # entirely, "first-hand stock available", which no used listing has. So
+    # counting our stored in_stock swept the whole used catalogue into the
+    # in-stock total and reported 13,834 held against 2,813 listed, as if
+    # eleven thousand rows had gone stale.
+    for index in range(12):
+        db.add(
+            Item(provider="amiami", code=f"CNT-P{index}", name="used",
+                 condition=Condition.preowned, in_stock=True)
+        )
+    for index in range(5):
+        db.add(
+            Item(provider="amiami", code=f"CNT-N{index}", name="new",
+                 condition=Condition.new, in_stock=True)
+        )
+    for index in range(3):
+        db.add(
+            Item(provider="amiami", code=f"CNT-O{index}", name="pre-order",
+                 condition=Condition.new, is_preorder=True)
+        )
+    # A pre-owned listing is in stock and could also read as a pre-order
+    # through the other flag; neither may leak into the new-condition counts.
+    db.add(
+        Item(provider="amiami", code="CNT-PX", name="used pre-order",
+             condition=Condition.preowned, in_stock=True, is_preorder=True)
+    )
+    db.commit()
+
+    def count(scope: str) -> int:
+        return crawler.local_count(db, scope, "amiami")
+
+    check("pre-owned counts every used listing", count("figures_preowned") == 13, count("figures_preowned"))
+    check(
+        "in stock counts first-hand stock only",
+        count("figures_in_stock") == 5,
+        count("figures_in_stock"),
+    )
+    check(
+        "pre-order does not count used listings either",
+        count("figures_preorder") == 3,
+        count("figures_preorder"),
+    )
+    check("and the catch-all counts everything", count("figures_all") == 21, count("figures_all"))
+
+    _purge(
+        db,
+        *[f"CNT-P{i}" for i in range(12)],
+        *[f"CNT-N{i}" for i in range(5)],
+        *[f"CNT-O{i}" for i in range(3)],
+        "CNT-PX",
+    )
+    db.close()
+
+
 def _valuation(compare: float | None):
     from app.services.matcher import Valuation
 
@@ -2124,7 +2189,15 @@ def test_crawler_coverage_counting() -> None:
         db.commit()
 
         check("pre-owned slice counts pre-owned rows", local_count(db, "figures_preowned", "amiami") == 4)
-        check("in-stock slice counts stocked rows", local_count(db, "figures_in_stock", "amiami") == 4)
+        # Four of the seven are in stock, but two of those are pre-owned and
+        # the shop's in-stock slice asks for first-hand stock, which no used
+        # listing has. Counting them here is what made the panel report five
+        # times more held than listed.
+        check(
+            "in-stock slice counts first-hand stock only",
+            local_count(db, "figures_in_stock", "amiami") == 2,
+            local_count(db, "figures_in_stock", "amiami"),
+        )
         check("pre-order slice counts pre-orders", local_count(db, "figures_preorder", "amiami") == 1)
         check("the catch-all counts everything", local_count(db, "figures_all", "amiami") == 7)
         check("another provider counts nothing here", local_count(db, "figures_all", "mandarake") == 0)
@@ -2568,6 +2641,7 @@ def main() -> int:
     test_blocklist_hides_things_while_browsing()
     test_rail_filters_take_lists()
     test_slices_take_turns()
+    test_slice_counts_compare_like_with_like()
     test_discover_ignores_placeholder_series()
     test_history_pruning_keeps_the_irreplaceable()
     test_deleting_a_copy_keeps_its_prices()

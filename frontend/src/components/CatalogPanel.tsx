@@ -305,14 +305,24 @@ function Slice({
           <span>this sweep done in {eta(slice.eta_seconds)}</span>
         ) : null}
         {slice.last_run_at && <span>last read {relativeTime(slice.last_run_at)}</span>}
-        {/* Rows this slice holds that the shop no longer counts in it. A
-            listing marked in stock stays that way here until something
-            rechecks it, so the two numbers disagree until the next sweep
-            reaches it. Only worth mentioning when it is a real share. */}
+        {/* Rows this slice holds that the shop no longer counts in it. On the
+            pre-owned slice that is not a fault, it is the whole point: a used
+            listing is deleted when it sells and this is the only place it
+            still exists. Elsewhere it means a status nothing has rechecked
+            yet, which the next sweep corrects. */}
         {slice.stale_local > 0 && slice.total_results > 0 && (
-          <span className="text-warning" title="These will correct themselves on the next sweep.">
-            {slice.stale_local.toLocaleString('en-GB')} held here have changed status since
-          </span>
+          slice.scope === 'figures_preowned' ? (
+            <span
+              className="text-positive"
+              title="A used listing is deleted the moment it sells. These are kept here with their prices and photos."
+            >
+              {slice.stale_local.toLocaleString('en-GB')} the shop has removed, kept here
+            </span>
+          ) : (
+            <span className="text-warning" title="The next sweep corrects these.">
+              {slice.stale_local.toLocaleString('en-GB')} awaiting a re-check
+            </span>
+          )
         )}
 
         <span className="ml-auto flex items-center gap-2">

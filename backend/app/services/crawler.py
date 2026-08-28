@@ -465,6 +465,15 @@ def local_count(db: Session, scope: str, provider_id: str) -> int:
     Counting rows beats trusting a counter: ``items_seen`` accumulates fifty
     per page on every pass forever, so after a few dozen head passes it read
     "52,691 of ~10,475", which is not a ratio of anything.
+
+    The count has to mean the same thing as the number it gets compared
+    against, which is subtler than it looks. Every pre-owned listing carries
+    the shop's in-stock flag - all hundred sampled did, since a used copy that
+    sells is deleted rather than marked gone - while the in-stock slice
+    filters on a different flag entirely, "first-hand stock available", which
+    no used listing has. Counting our stored in_stock therefore swept the
+    whole used catalogue into the in-stock total and reported 13,834 held
+    against 2,813 listed, as though eleven thousand rows had gone stale.
     """
     from ..models import Condition
 
@@ -473,9 +482,14 @@ def local_count(db: Session, scope: str, provider_id: str) -> int:
     if kind == "preowned":
         stmt = stmt.where(Item.condition == Condition.preowned)
     elif kind == "in_stock":
-        stmt = stmt.where(Item.in_stock.is_(True))
+        # First-hand stock, which is what the slice asks the shop for.
+        stmt = stmt.where(
+            Item.in_stock.is_(True), Item.condition != Condition.preowned
+        )
     elif kind == "preorder":
-        stmt = stmt.where(Item.is_preorder.is_(True))
+        stmt = stmt.where(
+            Item.is_preorder.is_(True), Item.condition != Condition.preowned
+        )
     return int(db.execute(stmt).scalar_one() or 0)
 
 
