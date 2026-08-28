@@ -79,45 +79,44 @@ DEFAULT_SCOPES: list[dict] = [
         "label": "Pre-owned figures",
         "priority": 10,
         "query": {"category_id": 1, "condition": "preowned", "sort": "newest"},
-        # About 200 pages, so roughly 25 minutes of requests. The one part of
-        # the shop that turns over hour to hour: a used copy can be listed and
-        # sold inside a morning.
-        "recheck_interval_minutes": 30,
+        # 211 pages, about 25 minutes of requests. The one part of the shop
+        # that turns over hour to hour: a used copy can be listed and sold
+        # inside a morning. Hourly rather than half-hourly, because at
+        # half-hourly it never stops and starves everything else.
+        "recheck_interval_minutes": 60,
     },
     {
         "scope": "figures_in_stock",
         "label": "Figures in stock",
         "priority": 20,
-        # A subset of the full sweep that changes slowly, so the extra lane
-        # buys about half a day of notice for 59 pages of requests.
-        "enabled": False,
         "query": {"category_id": 1, "stock_filter": "in_stock", "sort": "newest"},
-        # Under 60 pages, but first-hand stock does not appear and vanish the
-        # way used copies do, so twice a day is plenty.
-        "recheck_interval_minutes": 720,
+        # 59 pages, about seven minutes. This is the only way a sold-out
+        # listing coming back into stock gets noticed, which is why it earns a
+        # frequent pass despite being small.
+        "recheck_interval_minutes": 60,
     },
     {
         "scope": "figures_preorder",
         "label": "Figures on pre-order",
         "priority": 30,
-        # Pre-orders are announced once and then sit there. The full sweep
-        # finds them within a day, which is soon enough.
-        "enabled": False,
         "query": {"category_id": 1, "stock_filter": "preorder", "sort": "newest"},
-        # Pre-orders are announced, not restocked. A day's granularity loses
-        # nothing except requests.
-        "recheck_interval_minutes": 1440,
+        # 45 pages. Announcements rather than restocks: a pre-order appears
+        # once and then sits there, so a few hours of latency costs nothing.
+        "recheck_interval_minutes": 180,
     },
     {
         "scope": "figures_all",
         "label": "All figures",
         "priority": 90,
         "query": {"category_id": 1, "sort": "newest"},
-        # The only slice too big to sweep often: around 1,400 pages, some
-        # three hours of requests. Once a day keeps the long tail honest.
-        "recheck_interval_minutes": 1440,
+        # The backstop, not the workhorse: 1,385 pages, some three hours of
+        # requests. Its job is to record a listing that appeared and sold out
+        # between two passes, and to correct anything nothing else revisited.
+        # Neither needs doing daily.
+        "recheck_interval_minutes": 10080,
     },
 ]
+
 
 
 @dataclass

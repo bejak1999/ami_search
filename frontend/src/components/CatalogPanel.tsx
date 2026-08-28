@@ -251,8 +251,17 @@ function Slice({
           {!slice.enabled ? 'off' : resting ? 'resting' : slice.state}
         </Badge>
         {!slice.enabled && (
-          <span className="text-[11px] text-faint">
-            covered by &ldquo;All figures&rdquo;
+          <span
+            className={clsx(
+              'text-[11px]',
+              slice.scope === 'figures_in_stock' ? 'text-warning' : 'text-faint',
+            )}
+          >
+            {slice.scope === 'figures_in_stock'
+              ? 'off — nothing else notices a restock quickly'
+              : slice.scope === 'figures_preowned'
+                ? 'off — used listings only found by the weekly sweep'
+                : 'off — the weekly sweep still finds these'}
           </span>
         )}
         {slice.first_pass_done && <Badge tone="positive">Swept at least once</Badge>}
@@ -618,12 +627,16 @@ export function CatalogPanel() {
             through a sweep we are; that is the page count beside it.
           </p>
           <p className="mb-3 max-w-3xl text-xs leading-relaxed text-faint">
-            <strong className="text-muted">They overlap.</strong> &ldquo;All figures&rdquo; is
-            the complete one and contains everything, used listings included; the other three
-            are filtered views of it, so anything in them is read twice. That is worth paying
-            for on pre-owned, which turns over hour to hour and would otherwise wait a day to
-            be noticed. In stock and pre-order change slowly and the daily sweep covers them
-            anyway, so they start switched off &mdash; turn one on if you want the faster lane.
+            <strong className="text-muted">They overlap, and that is the point.</strong>{' '}
+            &ldquo;All figures&rdquo; contains everything, used listings included. Subtract the
+            other three and what remains is sold-out listings &mdash; every one of 150 sampled
+            &mdash; which are frozen: the price cannot move and nothing can be bought. Such a
+            listing only becomes interesting again by coming back into stock or by a used copy
+            appearing, and those land in the in-stock and pre-owned slices. So the three narrow
+            ones catch the changes between them, at about 315 pages a pass against the full
+            sweep&rsquo;s 1,385. The full sweep is the backstop: it records a listing that
+            appeared and sold out between two passes, and corrects anything nothing else
+            revisited. Weekly is enough for that.
           </p>
 
           {catalog.isLoading ? (

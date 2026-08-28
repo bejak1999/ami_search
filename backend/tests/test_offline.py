@@ -1280,14 +1280,44 @@ def test_slices_take_turns() -> None:
     rows = {c.scope: c for c in db.query(CatalogCrawl).all()}
     check("the four shop statuses are set up", len(rows) == 4, sorted(rows))
     check(
-        "the two that duplicate the full sweep start switched off",
-        not rows["figures_in_stock"].enabled and not rows["figures_preorder"].enabled,
+        "every slice starts enabled",
+        all(row.enabled for row in rows.values()),
+        {s: r.enabled for s, r in rows.items()},
     )
-    # Rotation is about who gets a turn among the ones that are running, so
-    # this turns them all on rather than testing a two-horse race.
-    for row in rows.values():
-        row.enabled = True
-    db.commit()
+
+    # The three narrow slices carry the changes; the full sweep is the
+    # backstop. Anything that is in none of the three is sold out and frozen,
+    # so re-reading it often buys nothing - which is why the big one runs
+    # weekly and the small ones hourly rather than the other way round.
+    fast = max(
+        rows[s].recheck_interval_minutes
+        for s in ("figures_preowned", "figures_in_stock", "figures_preorder")
+    )
+    check(
+        "the narrow slices run far more often than the full sweep",
+        rows["figures_all"].recheck_interval_minutes > fast * 20,
+        (fast, rows["figures_all"].recheck_interval_minutes),
+    )
+
+    # And the whole schedule has to fit the request budget with room to spare,
+    # because watches and the shelf-life sampler draw on the same allowance.
+    pages = {
+        "figures_preowned": 211,
+        "figures_in_stock": 59,
+        "figures_preorder": 45,
+        "figures_all": 1385,
+    }
+    from app.config import settings as _settings
+
+    per_day = sum(
+        pages[s] * (1440 / r.recheck_interval_minutes) for s, r in rows.items() if r.enabled
+    )
+    capacity = _settings.crawler_requests_per_minute * 60 * 24
+    check(
+        "and the schedule leaves budget for everything else",
+        per_day < capacity * 0.75,
+        f"{per_day:.0f} of {capacity:.0f} pages a day",
+    )
     check(
         "and every one reads newest-updated first",
         all((c.query or {}).get("sort") == "newest" for c in rows.values()),

@@ -186,7 +186,7 @@ def ease_quiet_slices() -> int:
     # still sitting on one of them was never configured by anyone, so moving
     # it is a correction; anything else is a choice its owner made and is left
     # exactly as it is.
-    SHIPPED_DEFAULTS = {30, 180}
+    SHIPPED_DEFAULTS = {30, 180, 720, 1440}
 
     wanted = {spec["scope"]: spec["recheck_interval_minutes"] for spec in DEFAULT_SCOPES}
     changed = 0
