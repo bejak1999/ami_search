@@ -1280,6 +1280,15 @@ def test_slices_take_turns() -> None:
     rows = {c.scope: c for c in db.query(CatalogCrawl).all()}
     check("the four shop statuses are set up", len(rows) == 4, sorted(rows))
     check(
+        "the two that duplicate the full sweep start switched off",
+        not rows["figures_in_stock"].enabled and not rows["figures_preorder"].enabled,
+    )
+    # Rotation is about who gets a turn among the ones that are running, so
+    # this turns them all on rather than testing a two-horse race.
+    for row in rows.values():
+        row.enabled = True
+    db.commit()
+    check(
         "and every one reads newest-updated first",
         all((c.query or {}).get("sort") == "newest" for c in rows.values()),
         {s: (c.query or {}).get("sort") for s, c in rows.items()},
@@ -1333,6 +1342,29 @@ def test_slices_take_turns() -> None:
     db.query(CatalogCrawl).delete()
     db.commit()
     db.close()
+
+
+def test_discover_ignores_placeholder_series() -> None:
+    print("\n== Discover ignores the shop's no-franchise placeholder ==")
+    from app.services.feed import _is_placeholder
+
+    # The shop files a figure with no franchise under "Original", so treating
+    # that as a series someone follows filled the rail with unrelated figures:
+    # saving one original character made every other maker's look like a
+    # match.
+    for value in (
+        "Original",
+        "original",
+        "ORIGINAL",
+        "Original Character",
+        "Original Character: Vertex",
+        "Original: Something",
+    ):
+        check(f"{value!r} is treated as no series", _is_placeholder(value), value)
+
+    # Deliberately strict, so a real franchise beginning with the word stays.
+    for value in ("Original Sin", "Originals of Nature", "Azur Lane", "hololive", ""):
+        check(f"{value!r} is left alone", not _is_placeholder(value), value)
 
 
 def _valuation(compare: float | None):
@@ -2506,6 +2538,7 @@ def main() -> int:
     test_blocklist_hides_things_while_browsing()
     test_rail_filters_take_lists()
     test_slices_take_turns()
+    test_discover_ignores_placeholder_series()
     test_history_pruning_keeps_the_irreplaceable()
     test_deleting_a_copy_keeps_its_prices()
     test_image_prune_protects_the_unfetchable()

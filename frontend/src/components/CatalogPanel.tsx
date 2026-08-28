@@ -248,8 +248,13 @@ function Slice({
                   : 'neutral'
           }
         >
-          {resting ? 'resting' : slice.state}
+          {!slice.enabled ? 'off' : resting ? 'resting' : slice.state}
         </Badge>
+        {!slice.enabled && (
+          <span className="text-[11px] text-faint">
+            covered by &ldquo;All figures&rdquo;
+          </span>
+        )}
         {slice.first_pass_done && <Badge tone="positive">Swept at least once</Badge>}
         {/* Where it sits in the rotation. Slices take turns rather than
             running by rank, so "third in line" is the honest answer to why
@@ -604,14 +609,21 @@ export function CatalogPanel() {
               {data?.requests_per_minute ?? '—'} req/min, irregularly spaced
             </span>
           </div>
-          <p className="mb-3 max-w-3xl text-xs leading-relaxed text-muted">
-            Four views of the same shop, read newest-updated first. Three of them are filtered
-            by status and are quick; &ldquo;All figures&rdquo; is the complete one and takes
-            hours. They <strong className="text-ink">take turns</strong> rather than running by
-            rank, so each keeps its place in the list and picks up where it left off &mdash;
-            which is why a long sweep shows steady progress instead of finishing in one go.
-            The percentage is how much of what the shop currently lists we hold, not how far
+          <p className="mb-1 max-w-3xl text-xs leading-relaxed text-muted">
+            Four views of the same shop, read newest-updated first. They{' '}
+            <strong className="text-ink">take turns</strong> rather than running by rank, so
+            each keeps its place in the queue and picks up where it left off &mdash; which is
+            why a long sweep shows steady progress instead of finishing in one go. The
+            percentage is how much of what the shop currently lists we hold, not how far
             through a sweep we are; that is the page count beside it.
+          </p>
+          <p className="mb-3 max-w-3xl text-xs leading-relaxed text-faint">
+            <strong className="text-muted">They overlap.</strong> &ldquo;All figures&rdquo; is
+            the complete one and contains everything, used listings included; the other three
+            are filtered views of it, so anything in them is read twice. That is worth paying
+            for on pre-owned, which turns over hour to hour and would otherwise wait a day to
+            be noticed. In stock and pre-order change slowly and the daily sweep covers them
+            anyway, so they start switched off &mdash; turn one on if you want the faster lane.
           </p>
 
           {catalog.isLoading ? (

@@ -12,6 +12,8 @@ wants beats a generic new-arrivals list.
 from __future__ import annotations
 
 import logging
+import re
+from datetime import datetime, timedelta, timezone
 from dataclasses import dataclass, field
 
 from sqlalchemy import Select, and_, func, or_, select
@@ -43,6 +45,26 @@ class Rail:
     items: list[Item] = field(default_factory=list)
     #: Search parameters that reproduce this rail in full.
     explore: dict | None = None
+
+
+#: What the shop files a figure under when it belongs to no franchise:
+#: "Original", "Original Character", "Original Character: Vertex" and the
+#: like. Treating that as a series someone follows is what filled the "from
+#: series you follow" rail with unrelated figures - saving one original
+#: character made every other maker's original characters look like a match.
+#: Deliberately strict. Matching anything starting with "Original" would
+#: also swallow a real franchise whose name happens to begin that way, so
+#: this matches the word on its own, or followed by "character", or
+#: followed by punctuation - which are the shapes the shop actually uses.
+_PLACEHOLDER_SERIES = re.compile(
+    r"^\s*original(\s*$|\s+character\b|\s*[:\-])",
+    re.IGNORECASE,
+)
+
+
+def _is_placeholder(value: str) -> bool:
+    """True for a series or character that stands in for "none"."""
+    return bool(_PLACEHOLDER_SERIES.match(value or ""))
 
 
 def _buyable(stmt: Select) -> Select:
@@ -92,8 +114,10 @@ def _taste(db: Session, user: User) -> dict[str, list]:
         }
 
     rows = db.execute(select(Item).where(Item.id.in_(item_ids))).scalars().all()
-    series = {r.series for r in rows if r.series}
-    characters = {r.character for r in rows if r.character}
+    series = {r.series for r in rows if r.series and not _is_placeholder(r.series)}
+    characters = {
+        r.character for r in rows if r.character and not _is_placeholder(r.character)
+    }
     makers = {r.maker for r in rows if r.maker}
 
     tag_ids = list(
@@ -257,9 +281,17 @@ def build(db: Session, user: User, provider: str | None = None) -> list[Rail]:
             )
 
     # --- rails that work on an empty account too --------------------------
+    # Ordered by when this instance first saw the listing, which is the best
+    # stand-in available: the shop tells us nothing about when a used listing
+    # was created. It is a good stand-in now that the crawler reads the
+    # pre-owned slice newest-updated first and gets round it about once an
+    # hour, so a listing turns up here within an hour of appearing. The window
+    # keeps the rail honest during the first catalogue build, when everything
+    # is "new to us" and the ordering means nothing.
+    fortnight = datetime.now(timezone.utc) - timedelta(days=14)
     stmt = (
         base()
-        .where(Item.condition == Condition.preowned)
+        .where(Item.condition == Condition.preowned, Item.first_seen_at >= fortnight)
         .order_by(Item.first_seen_at.desc())
     )
     items = _fetch(db, stmt, seen)
@@ -269,7 +301,7 @@ def build(db: Session, user: User, provider: str | None = None) -> list[Rail]:
             Rail(
                 key="new_preowned",
                 title="Just listed pre-owned",
-                subtitle="These sell fastest, and vanish without warning when they do",
+                subtitle="New to this instance in the last fortnight, newest first",
                 icon="fire",
                 items=items,
                 explore={"condition": "preowned", "sort": "newest"},

@@ -79,8 +79,11 @@ export function ItemDetailPage() {
   const loadCounterpart = useMutation({
     mutationFn: () => api.items.counterpart(id),
     onSuccess: (other) => {
-      toast.success(`Found the ${other.condition === 'preowned' ? 'pre-owned' : 'new'} listing`)
       void queryClient.invalidateQueries({ queryKey: ['item', id] })
+      // Looking it up and then staying put would mean pressing the same
+      // button twice to get where you were going.
+      if (other.id) navigate(`/item/${other.id}`)
+      else toast.success(`Found the ${other.condition === 'preowned' ? 'pre-owned' : 'new'} listing`)
     },
     onError: (error) => toast.error('No counterpart listing', (error as Error).message),
   })
@@ -278,6 +281,48 @@ export function ItemDetailPage() {
                     </p>
                   </Tooltip>
                 )}
+              </div>
+
+              {/* The same figure is sold twice, new and pre-owned, under codes
+                  that differ by a suffix. Switching between them is the thing
+                  you want most often on this page - is the used one cheaper
+                  enough to bother - and it was buried in a line of prose
+                  further down. */}
+              <div className="flex items-center gap-1 rounded-control border border-line bg-raised p-1 text-sm">
+                {(['new', 'preowned'] as const).map((condition) => {
+                  const isThis = item.condition === condition
+                  const target = isThis ? item : counterpart
+                  const label = condition === 'preowned' ? 'Pre-owned' : 'New'
+                  const price = target
+                    ? money(target.price ?? null, target.currency ?? item.currency)
+                    : null
+                  return (
+                    <button
+                      key={condition}
+                      onClick={() => {
+                        if (isThis) return
+                        if (counterpart?.id) navigate(`/item/${counterpart.id}`)
+                        else loadCounterpart.mutate()
+                      }}
+                      disabled={loadCounterpart.isPending}
+                      className={clsx(
+                        'flex-1 rounded-control px-3 py-1.5 text-left transition-colors',
+                        isThis ? 'bg-surface font-medium text-ink shadow-card' : 'text-muted hover:text-ink',
+                      )}
+                    >
+                      <span className="block text-xs uppercase tracking-wide">{label}</span>
+                      <span className="block tabular-nums">
+                        {loadCounterpart.isPending && !isThis ? (
+                          <Spinner className="h-3 w-3" />
+                        ) : price ? (
+                          price
+                        ) : (
+                          <span className="text-faint">check</span>
+                        )}
+                      </span>
+                    </button>
+                  )
+                })}
               </div>
 
               <div className="flex flex-wrap gap-2">

@@ -50,10 +50,20 @@ SCOPE_FILTERS: dict[str, str] = {
 #: catalogue that changes, while the full sweep is what keeps the long tail
 #: honest and eventually corrects a status nothing else has rechecked.
 #:
-#: The four slices are the shop's own statuses. They overlap on purpose:
-#: "All figures" is the only complete one and the other three are filtered
-#: views of it, which makes them fast lanes over the parts that change while
-#: the full sweep keeps the long tail honest.
+#: The four slices are the shop's own statuses, and the overlap between them
+#: was measured rather than assumed:
+#:
+#:   All figures     69,176   every listing, used ones included
+#:   Pre-owned       10,481   a subset, and the only one that isolates used
+#:   In stock         2,906   a subset, with no used listings in it at all
+#:   Pre-order        2,242   a subset, with no used listings in it at all
+#:
+#: So every narrow slice is read twice: once in its own lane, and again by the
+#: full sweep. Worth paying for on pre-owned, which turns over hour to hour
+#: and would otherwise wait a day to be noticed. Not obviously worth it on
+#: in-stock and pre-order, which change slowly and the daily sweep covers
+#: anyway - so those two start switched off, and the toggle is there for
+#: anyone who wants the faster lane.
 #:
 #: Every slice is swept end to end on every pass, and they take turns rather
 #: than running strictly by priority. The cheaper design - re-read the first
@@ -78,6 +88,9 @@ DEFAULT_SCOPES: list[dict] = [
         "scope": "figures_in_stock",
         "label": "Figures in stock",
         "priority": 20,
+        # A subset of the full sweep that changes slowly, so the extra lane
+        # buys about half a day of notice for 59 pages of requests.
+        "enabled": False,
         "query": {"category_id": 1, "stock_filter": "in_stock", "sort": "newest"},
         # Under 60 pages, but first-hand stock does not appear and vanish the
         # way used copies do, so twice a day is plenty.
@@ -87,6 +100,9 @@ DEFAULT_SCOPES: list[dict] = [
         "scope": "figures_preorder",
         "label": "Figures on pre-order",
         "priority": 30,
+        # Pre-orders are announced once and then sit there. The full sweep
+        # finds them within a day, which is soon enough.
+        "enabled": False,
         "query": {"category_id": 1, "stock_filter": "preorder", "sort": "newest"},
         # Pre-orders are announced, not restocked. A day's granularity loses
         # nothing except requests.
@@ -149,6 +165,7 @@ def ensure_scopes(db: Session, provider: str = "amiami") -> int:
                 priority=spec["priority"],
                 query=spec["query"],
                 recheck_interval_minutes=spec.get("recheck_interval_minutes", 30),
+                enabled=spec.get("enabled", True),
             )
         )
         created += 1
