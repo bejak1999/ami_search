@@ -493,6 +493,51 @@ def local_count(db: Session, scope: str, provider_id: str) -> int:
     return int(db.execute(stmt).scalar_one() or 0)
 
 
+#: Where a reset of the activity profile is remembered. Nothing is deleted -
+#: the numbers are derived from timestamps other features depend on - so a
+#: reset is a line drawn under what came before.
+ACTIVITY_SINCE_SETTING = "activity_since"
+
+
+def activity_baseline(db: Session) -> datetime | None:
+    """The point a reset drew a line at, if there has been one."""
+    from ..models import AppSetting
+
+    row = db.get(AppSetting, ACTIVITY_SINCE_SETTING)
+    raw = (row.value or {}).get("at") if row else None
+    if not raw:
+        return None
+    try:
+        parsed = datetime.fromisoformat(raw)
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+
+
+def reset_activity(db: Session) -> datetime:
+    """Ignore everything recorded so far when profiling the shop's rhythm.
+
+    Worth having because the first catalogue build ruins the picture: every
+    item is "first seen" while the crawler is working through the pages, so
+    the busiest hour reads as whenever the sweep happened rather than when the
+    shop was listing things. Once the catalogue is complete, drawing a line
+    here gives a profile built only from listings that genuinely arrived.
+
+    Nothing is deleted. The timestamps this reads belong to the price history
+    and the catalogue, which have their own reasons to exist.
+    """
+    from ..models import AppSetting
+
+    now = datetime.now(timezone.utc)
+    row = db.get(AppSetting, ACTIVITY_SINCE_SETTING)
+    if row is None:
+        row = AppSetting(key=ACTIVITY_SINCE_SETTING, value={})
+        db.add(row)
+    row.value = {"at": now.isoformat()}
+    db.commit()
+    return now
+
+
 def activity_profile(db: Session, provider_id: str = "amiami", days: int = 30) -> dict:
     """When the shop is actually busy, by hour of day and day of week.
 
@@ -508,6 +553,9 @@ def activity_profile(db: Session, provider_id: str = "amiami", days: int = 30) -
     signal - and that is what it is for.
     """
     since = datetime.now(timezone.utc) - timedelta(days=max(1, days))
+    baseline = activity_baseline(db)
+    if baseline is not None and baseline > since:
+        since = baseline
 
     def buckets(column, expression: str, extra=None) -> dict[int, int]:
         stmt = select(
@@ -543,6 +591,8 @@ def activity_profile(db: Session, provider_id: str = "amiami", days: int = 30) -
     )
     return {
         "days": days,
+        "since": since,
+        "baseline": baseline,
         "new_listings": observed,
         "price_changes": sum(changes_hour.values()),
         # Index 0 is midnight UTC; index 0 of the weekday series is Sunday,

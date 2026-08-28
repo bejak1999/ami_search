@@ -232,6 +232,10 @@ function Slice({
   })
 
   const resting = slice.next_run_in_seconds > 0
+  // Mid-pass means the cursor has left page one, whatever the state says: a
+  // slice that ran out of time reads "paused" but is still part way through,
+  // and its bar should show that rather than jumping back to coverage.
+  const sweeping = !resting && slice.cursor_page > 1
 
   return (
     <div>
@@ -280,15 +284,25 @@ function Slice({
         </span>
       </div>
 
+      {/* How far through the current pass, which is what a progress bar means
+          to anyone looking at one. It used to show catalogue coverage, so it
+          sat full and green while a fresh sweep was on page 3 of 211 - the
+          one moment it should have been near empty. Coverage is still here,
+          as the number underneath, where a figure that barely moves belongs. */}
       <Bar
-        percent={slice.coverage_percent}
-        tone={slice.coverage_percent >= 95 ? 'positive' : 'accent'}
+        percent={sweeping ? slice.pass_percent : slice.coverage_percent}
+        tone={sweeping ? 'accent' : slice.coverage_percent >= 95 ? 'positive' : 'accent'}
       />
 
       <div className="mt-1.5 flex flex-wrap items-center gap-x-4 gap-y-1 text-[11px] text-faint">
         <span className="font-medium text-muted">
-          {slice.coverage_percent}% of what the shop lists
+          {sweeping
+            ? `${slice.pass_percent}% through this sweep`
+            : `${slice.coverage_percent}% of what the shop lists`}
         </span>
+        {sweeping && (
+          <span>{slice.coverage_percent}% of the shop held</span>
+        )}
         {slice.pages_this_cycle ? (
           <span>
             {slice.state === 'running' ? 'reading' : 'paused at'} page{' '}

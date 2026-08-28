@@ -1,8 +1,9 @@
 import { useState } from 'react'
-import { useQuery } from '@tanstack/react-query'
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { api } from '@/api/client'
 import { Icon } from '@/components/Icon'
 import { Card, SegmentedControl, Spinner, Tooltip } from '@/components/ui'
+import { useToast } from '@/lib/toast'
 import clsx from 'clsx'
 
 /**
@@ -20,8 +21,15 @@ import clsx from 'clsx'
 
 const WEEKDAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat']
 
+//: Japan keeps one offset all year, so the shop's own clock is a fixed nine
+//: hours ahead of UTC. Worth showing beside the reader's own: a peak at four
+//: in the morning here is one in the afternoon where the listings are made,
+//: which turns a curiosity into an explanation.
+const JST_OFFSET = 9
+
 type Activity = {
   days: number
+  baseline: string | null
   new_listings: number
   price_changes: number
   listings_by_hour_utc: number[]
@@ -113,9 +121,23 @@ function quiet(values: number[]): string {
       run = []
     }
   }
-  if (best.length < 3) return ''
+  // Under three hours is not a lull, and over sixteen means there is barely
+  // any data rather than a quiet stretch - saying "quiet for 22 hours" is
+  // technically true and tells the reader nothing.
+  if (best.length < 3 || best.length > 16) return ''
   const pad = (h: number) => `${String(h).padStart(2, '0')}:00`
   return `${pad(best[0])}–${pad((best[best.length - 1] + 1) % 24)}`
+}
+
+/** "08:00 to 11:00, and again at 15:00" rather than a single peak hour. */
+function inJapan(label: string): string {
+  return label.replace(/(\d{2}):00/g, (_, hour) =>
+    `${String((Number(hour) + JST_OFFSET - localOffset()) % 24).padStart(2, '0')}:00`,
+  )
+}
+
+function localOffset(): number {
+  return Math.round(-new Date().getTimezoneOffset() / 60)
 }
 
 /** "08:00 to 11:00, and again at 15:00" rather than a single peak hour. */
@@ -137,12 +159,23 @@ function busyHours(values: number[]): string {
 }
 
 export function ActivityPanel() {
+  const toast = useToast()
+  const queryClient = useQueryClient()
   const [metric, setMetric] = useState<'listings' | 'changes'>('listings')
   const [days, setDays] = useState('30')
 
   const activity = useQuery({
     queryKey: ['admin', 'activity', days],
     queryFn: () => api.admin.activity(Number(days)),
+  })
+
+  const reset = useMutation({
+    mutationFn: () => api.admin.resetActivity(),
+    onSuccess: (result) => {
+      toast.success('Counting from now', result.message)
+      void queryClient.invalidateQueries({ queryKey: ['admin', 'activity'] })
+    },
+    onError: (error) => toast.error('Could not reset', (error as Error).message),
   })
 
   const data = activity.data?.detail as Activity | undefined
@@ -214,10 +247,15 @@ export function ActivityPanel() {
             <>
               Busiest between{' '}
               <span className="font-semibold text-ink">{busyHours(hourly)}</span> your time
+              {' '}
+              <span className="text-faint">
+                ({inJapan(busyHours(hourly))} in Japan)
+              </span>
               {quiet(hourly) && (
                 <>
                   , and quiet from{' '}
-                  <span className="font-semibold text-ink">{quiet(hourly)}</span>
+                  <span className="font-semibold text-ink">{quiet(hourly)}</span>{' '}
+                  <span className="text-faint">({inJapan(quiet(hourly))} there)</span>
                 </>
               )}
               .
@@ -226,21 +264,44 @@ export function ActivityPanel() {
             'Not enough recorded yet to see a pattern.'
           )}
         </p>
-        <SegmentedControl
-          value={days}
-          onChange={setDays}
-          options={[
-            { value: '7', label: '7d' },
-            { value: '30', label: '30d' },
-            { value: '90', label: '90d' },
-          ]}
-        />
+        <div className="flex items-center gap-2">
+          <SegmentedControl
+            value={days}
+            onChange={setDays}
+            options={[
+              { value: '7', label: '7d' },
+              { value: '30', label: '30d' },
+              { value: '90', label: '90d' },
+            ]}
+          />
+          <button
+            onClick={() => reset.mutate()}
+            disabled={reset.isPending}
+            className="btn-quiet text-xs"
+            title="Ignore everything recorded so far. Nothing is deleted; the profile simply starts again from now."
+          >
+            {reset.isPending ? 'Resetting…' : 'Start again'}
+          </button>
+        </div>
       </div>
 
       <p className="mt-2 text-[11px] leading-relaxed text-faint">
         This measures when <em>this instance</em> noticed something, not when the shop did it, so
         it is blurred by the polling interval and shows nothing for hours when nothing was
         polling. It is enough to find the daily rhythm, which is what it is for.
+        {data.baseline ? (
+          <>
+            {' '}
+            Counting from <strong>{new Date(data.baseline).toLocaleString('en-GB')}</strong>.
+          </>
+        ) : (
+          <>
+            {' '}
+            The first catalogue build skews this badly &mdash; everything is
+            &ldquo;first seen&rdquo; while the crawler works through the pages &mdash; so it is
+            worth starting again once the sweep has finished.
+          </>
+        )}
       </p>
     </Card>
   )

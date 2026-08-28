@@ -265,6 +265,7 @@ export const api = {
     shelfLife: () => get<MessageResponse>('/admin/shelf-life'),
     behaviour: () => get<MessageResponse>('/admin/behaviour'),
     activity: (days = 30) => get<MessageResponse>(`/admin/activity${qs({ days })}`),
+    resetActivity: () => post<MessageResponse>('/admin/activity/reset'),
     setBehaviour: (body: Record<string, boolean>) =>
       request<MessageResponse>('/admin/behaviour', {
         method: 'PUT',

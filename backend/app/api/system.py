@@ -293,6 +293,29 @@ def shop_activity(
     )
 
 
+@admin.post("/activity/reset", response_model=MessageResponse)
+def reset_shop_activity(
+    db: Session = Depends(get_db), _admin: User = Depends(admin_user)
+) -> MessageResponse:
+    """Start the shop's activity profile again from now.
+
+    The first catalogue build ruins the picture: every item is first seen
+    while the crawler works through the pages, so the busiest hour reads as
+    whenever the sweep ran. Once the catalogue is complete, drawing a line
+    here leaves a profile built only from listings that genuinely arrived.
+
+    Nothing is deleted - the timestamps belong to the price history and the
+    catalogue, which have their own reasons to exist.
+    """
+    from ..services import crawler
+
+    at = crawler.reset_activity(db)
+    return MessageResponse(
+        message="Counting from now. Earlier observations are left in place but no longer shown.",
+        detail={"baseline": at},
+    )
+
+
 @admin.get("/shelf-life", response_model=MessageResponse)
 def shelf_coverage(
     provider: str = "amiami",

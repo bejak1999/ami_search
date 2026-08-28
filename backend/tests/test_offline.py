@@ -1462,6 +1462,56 @@ def test_slice_counts_compare_like_with_like() -> None:
     db.close()
 
 
+def test_activity_can_start_again() -> None:
+    print("\n== The activity profile can be started again ==")
+    from app.db import SessionLocal, init_db
+    from app.models import Item
+    from app.services import crawler
+
+    init_db()
+    db = SessionLocal()
+
+    # The first catalogue build ruins the profile: every item is first seen
+    # while the crawler works through the pages, so the busiest hour reads as
+    # whenever the sweep ran rather than when the shop listed anything.
+    stale = datetime.now(timezone.utc) - timedelta(days=3)
+    for index in range(20):
+        db.add(
+            Item(provider="amiami", code=f"ACT-{index}", name="crawled", first_seen_at=stale)
+        )
+    db.commit()
+
+    check("the build shows up in the profile", crawler.activity_profile(db)["new_listings"] == 20)
+    check("with no baseline set", crawler.activity_profile(db)["baseline"] is None)
+
+    at = crawler.reset_activity(db)
+    profile = crawler.activity_profile(db)
+    check("resetting hides what came before", profile["new_listings"] == 0, profile["new_listings"])
+    check("and records when the line was drawn", profile["baseline"] is not None)
+    check("which is what the reset returned", abs((profile["baseline"] - at).total_seconds()) < 2)
+
+    # Nothing may be deleted: these timestamps belong to the catalogue and the
+    # price history, which have their own reasons to exist.
+    check("nothing was deleted", db.query(Item).filter(Item.code.like("ACT-%")).count() == 20)
+
+    db.add(Item(provider="amiami", code="ACT-NEW", name="genuinely new"))
+    db.commit()
+    check(
+        "and anything after the line counts again",
+        crawler.activity_profile(db)["new_listings"] == 1,
+    )
+
+    # A window shorter than the baseline still wins, so "last 7 days" cannot
+    # drag data back in from before the reset.
+    check(
+        "a longer window does not reach past the line",
+        crawler.activity_profile(db, days=90)["new_listings"] == 1,
+    )
+
+    _purge(db, *[f"ACT-{i}" for i in range(20)], "ACT-NEW")
+    db.close()
+
+
 def _valuation(compare: float | None):
     from app.services.matcher import Valuation
 
@@ -2642,6 +2692,7 @@ def main() -> int:
     test_rail_filters_take_lists()
     test_slices_take_turns()
     test_slice_counts_compare_like_with_like()
+    test_activity_can_start_again()
     test_discover_ignores_placeholder_series()
     test_history_pruning_keeps_the_irreplaceable()
     test_deleting_a_copy_keeps_its_prices()
