@@ -70,13 +70,19 @@ const LOCAL_SORTS = [
   { value: 'oldest', label: 'Oldest here' },
 ]
 
+// The shop sorts across its whole result set, so "cheapest" now means the
+// cheapest of every match rather than the cheapest of the fifty rows we
+// happen to be holding. Only the last one is still ours to do, and its label
+// says so.
 const SHOP_SORTS = [
-  { value: 'newest', label: 'Newest' },
-  { value: 'preowned', label: 'Pre-owned first' },
-  { value: 'price_asc', label: 'Cheapest on page' },
-  { value: 'price_desc', label: 'Dearest on page' },
-  { value: 'discount', label: 'Biggest discount' },
-  { value: 'release', label: 'Release date' },
+  { value: 'newest', label: 'Recently updated' },
+  { value: 'updated', label: 'Recently updated (alternate)' },
+  { value: 'oldest', label: 'Oldest first' },
+  { value: 'price_asc', label: 'Cheapest' },
+  { value: 'price_desc', label: 'Dearest' },
+  { value: 'release', label: 'Newest release' },
+  { value: 'release_asc', label: 'Oldest release' },
+  { value: 'discount', label: 'Biggest discount (this page)' },
 ]
 
 export function SearchPage() {

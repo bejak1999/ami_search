@@ -50,51 +50,55 @@ SCOPE_FILTERS: dict[str, str] = {
 #: catalogue that changes, while the full sweep is what keeps the long tail
 #: honest and eventually corrects a status nothing else has rechecked.
 #:
-#: Every slice is swept end to end on every pass. The obvious cheaper design
-#: - re-read the first pages often, the rest rarely - was tried and does not
-#: work here, because it assumes the shop lists newest first and the shop does
-#: not. See :func:`_page_limit` for the measurements. What controls the cost
-#: instead is the pause between complete passes, which is set per slice
-#: according to how fast that part of the shop actually moves.
+#: The four slices are the shop's own statuses. They overlap on purpose:
+#: "All figures" is the only complete one and the other three are filtered
+#: views of it, which makes them fast lanes over the parts that change while
+#: the full sweep keeps the long tail honest.
+#:
+#: Every slice is swept end to end on every pass, and they take turns rather
+#: than running strictly by priority. The cheaper design - re-read the first
+#: pages often, the rest rarely - assumes the shop lists newest first, which
+#: it does not under the default order. It might hold under "regtimed", which
+#: the queries below now ask for, but the measurement that would settle it has
+#: to be taken while the shop is actually listing things: an eighteen-minute
+#: sample at seven in the evening Japan time saw nothing arrive at all. Until
+#: then, reading everything is the answer that cannot be wrong.
 DEFAULT_SCOPES: list[dict] = [
     {
         "scope": "figures_preowned",
         "label": "Pre-owned figures",
         "priority": 10,
-        "query": {"category_id": 1, "condition": "preowned"},
-        # About 200 pages, so roughly 25 minutes of requests. Pausing half an
-        # hour between complete sweeps re-reads the whole used catalogue about
-        # once an hour, which is the right cadence for the one part of the
-        # shop that turns over hourly.
+        "query": {"category_id": 1, "condition": "preowned", "sort": "newest"},
+        # About 200 pages, so roughly 25 minutes of requests. The one part of
+        # the shop that turns over hour to hour: a used copy can be listed and
+        # sold inside a morning.
         "recheck_interval_minutes": 30,
     },
     {
         "scope": "figures_in_stock",
         "label": "Figures in stock",
         "priority": 20,
-        "query": {"category_id": 1, "stock_filter": "in_stock"},
-        # Under 60 pages, but first-hand stock does not appear and vanish
-        # the way used copies do, so twice a day is plenty and leaves the
-        # budget for work that pays.
+        "query": {"category_id": 1, "stock_filter": "in_stock", "sort": "newest"},
+        # Under 60 pages, but first-hand stock does not appear and vanish the
+        # way used copies do, so twice a day is plenty.
         "recheck_interval_minutes": 720,
     },
     {
         "scope": "figures_preorder",
         "label": "Figures on pre-order",
         "priority": 30,
-        "query": {"category_id": 1, "stock_filter": "preorder"},
-        # Pre-orders are announced, not restocked. A day's granularity
-        # loses nothing except requests.
+        "query": {"category_id": 1, "stock_filter": "preorder", "sort": "newest"},
+        # Pre-orders are announced, not restocked. A day's granularity loses
+        # nothing except requests.
         "recheck_interval_minutes": 1440,
     },
     {
         "scope": "figures_all",
         "label": "All figures",
         "priority": 90,
-        "query": {"category_id": 1},
+        "query": {"category_id": 1, "sort": "newest"},
         # The only slice too big to sweep often: around 1,400 pages, some
-        # three hours of requests. Once a day keeps the long tail honest
-        # without crowding out everything else.
+        # three hours of requests. Once a day keeps the long tail honest.
         "recheck_interval_minutes": 1440,
     },
 ]
@@ -273,11 +277,15 @@ def _select_crawl(db: Session, provider: str) -> CatalogCrawl | None:
                 CatalogCrawl.consecutive_errors < 5,
             )
             .order_by(
-                # Anything mid-sweep finishes before a fresh slice starts, so
-                # progress is visible rather than spread thinly everywhere.
-                (CatalogCrawl.state == CrawlState.running).desc(),
-                CatalogCrawl.priority.asc(),
+                # Round robin by who has waited longest, with priority only
+                # breaking ties. Strict priority looked reasonable and was
+                # not: the pre-owned slice re-reads itself every half hour and
+                # takes most of that half hour to do it, so it held the budget
+                # almost continuously and the full catalogue sweep advanced on
+                # whatever was left. Rotating means every slice visibly moves,
+                # which is also far easier to reason about when watching it.
                 CatalogCrawl.last_run_at.asc().nulls_first(),
+                CatalogCrawl.priority.asc(),
             )
         )
         .scalars()
@@ -528,6 +536,19 @@ def progress(db: Session, provider_id: str = "amiami") -> dict:
         .all()
     )
 
+    # Who would be picked next, by the same rule the scheduler uses, so the
+    # view can say "waiting, third in line" instead of leaving someone to
+    # wonder why a slice has not moved for an hour.
+    waiting = sorted(
+        (c for c in crawls if c.enabled and (c.consecutive_errors or 0) < 5),
+        key=lambda c: (
+            _cooldown_remaining(c) > 0,
+            c.last_run_at or datetime.min.replace(tzinfo=timezone.utc),
+            c.priority or 0,
+        ),
+    )
+    queue = {c.scope: index for index, c in enumerate(waiting)}
+
     slices = []
     for crawl in crawls:
         limit = _page_limit(crawl) if crawl.pages_total else 0
@@ -540,6 +561,14 @@ def progress(db: Session, provider_id: str = "amiami") -> dict:
                 "coverage_percent": (
                     round(min(local, upstream) / upstream * 100, 1) if upstream else 0.0
                 ),
+                # Rows held here that the shop no longer counts in this slice:
+                # a listing marked in stock stays that way until something
+                # rechecks it, and until then the two numbers disagree.
+                "stale_local": max(0, local - upstream) if upstream else 0,
+                # Where it sits in the queue, and what the scheduler is doing.
+                "queue_position": queue.get(crawl.scope),
+                "resting": _cooldown_remaining(crawl) > 0,
+                "sort_key": (crawl.query or {}).get("sort") or "newest",
                 "label": crawl.label or crawl.scope,
                 "state": crawl.state.value,
                 "enabled": crawl.enabled,

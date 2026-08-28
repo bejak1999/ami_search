@@ -250,10 +250,18 @@ function Slice({
         >
           {resting ? 'resting' : slice.state}
         </Badge>
-        {slice.first_pass_done && <Badge tone="positive">Complete</Badge>}
+        {slice.first_pass_done && <Badge tone="positive">Swept at least once</Badge>}
+        {/* Where it sits in the rotation. Slices take turns rather than
+            running by rank, so "third in line" is the honest answer to why
+            one has not moved for a while. */}
+        {slice.state !== 'running' && slice.queue_position !== null && (
+          <span className="text-[11px] text-faint">
+            {slice.queue_position === 0 ? 'up next' : `${slice.queue_position + 1}. in line`}
+          </span>
+        )}
         <span className="ml-auto text-xs tabular-nums text-muted">
           {slice.total_results
-            ? `${Math.min(slice.items_local, slice.total_results).toLocaleString('en-GB')} of ~${slice.total_results.toLocaleString('en-GB')} in the shop`
+            ? `${slice.items_local.toLocaleString('en-GB')} here · shop lists ~${slice.total_results.toLocaleString('en-GB')}`
             : 'not started'}
         </span>
       </div>
@@ -265,31 +273,33 @@ function Slice({
 
       <div className="mt-1.5 flex flex-wrap items-center gap-x-4 gap-y-1 text-[11px] text-faint">
         <span className="font-medium text-muted">
-          {slice.coverage_percent}% of the catalogue held
+          {slice.coverage_percent}% of what the shop lists
         </span>
-        {/* A status slice can hold more rows than the shop currently lists,
-            because a listing marked in stock here stays that way until
-            something rechecks it. Saying so beats printing "12,888 of 2,847"
-            and leaving the reader to work out what went wrong. */}
-        {slice.total_results > 0 && slice.items_local > slice.total_results && (
-          <span className="text-warning">
-            {(slice.items_local - slice.total_results).toLocaleString('en-GB')} held here no
-            longer match, awaiting a re-check
-          </span>
-        )}
         {slice.pages_this_cycle ? (
           <span>
-            sweeping: page {slice.cursor_page.toLocaleString('en-GB')} of{' '}
+            {slice.state === 'running' ? 'reading' : 'paused at'} page{' '}
+            {slice.cursor_page.toLocaleString('en-GB')} of{' '}
             {slice.pages_this_cycle.toLocaleString('en-GB')} ({slice.pass_percent}%)
           </span>
         ) : null}
-        <span>{slice.items_changed.toLocaleString('en-GB')} price changes recorded</span>
+        {slice.items_changed > 0 && (
+          <span>{slice.items_changed.toLocaleString('en-GB')} price changes seen</span>
+        )}
         {resting ? (
-          <span>next pass in {duration(slice.next_run_in_seconds)}</span>
-        ) : !slice.first_pass_done && slice.eta_seconds ? (
-          <span>first pass done in {eta(slice.eta_seconds)}</span>
+          <span>next sweep in {duration(slice.next_run_in_seconds)}</span>
+        ) : slice.eta_seconds ? (
+          <span>this sweep done in {eta(slice.eta_seconds)}</span>
         ) : null}
-        {slice.last_run_at && <span>ran {relativeTime(slice.last_run_at)}</span>}
+        {slice.last_run_at && <span>last read {relativeTime(slice.last_run_at)}</span>}
+        {/* Rows this slice holds that the shop no longer counts in it. A
+            listing marked in stock stays that way here until something
+            rechecks it, so the two numbers disagree until the next sweep
+            reaches it. Only worth mentioning when it is a real share. */}
+        {slice.stale_local > 0 && slice.total_results > 0 && (
+          <span className="text-warning" title="These will correct themselves on the next sweep.">
+            {slice.stale_local.toLocaleString('en-GB')} held here have changed status since
+          </span>
+        )}
 
         <span className="ml-auto flex items-center gap-2">
           <button onClick={() => setOpen((v) => !v)} className="hover:text-ink">
@@ -594,6 +604,15 @@ export function CatalogPanel() {
               {data?.requests_per_minute ?? '—'} req/min, irregularly spaced
             </span>
           </div>
+          <p className="mb-3 max-w-3xl text-xs leading-relaxed text-muted">
+            Four views of the same shop, read newest-updated first. Three of them are filtered
+            by status and are quick; &ldquo;All figures&rdquo; is the complete one and takes
+            hours. They <strong className="text-ink">take turns</strong> rather than running by
+            rank, so each keeps its place in the list and picks up where it left off &mdash;
+            which is why a long sweep shows steady progress instead of finishing in one go.
+            The percentage is how much of what the shop currently lists we hold, not how far
+            through a sweep we are; that is the page count beside it.
+          </p>
 
           {catalog.isLoading ? (
             <Spinner className="h-4 w-4" />

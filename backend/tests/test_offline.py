@@ -1265,6 +1265,76 @@ def test_null_lists_never_break_a_response() -> None:
     check("both lists, not just the first", profile.blocked_tags == [])
 
 
+def test_slices_take_turns() -> None:
+    print("\n== Catalogue slices take turns ==")
+    from datetime import datetime as _dt
+
+    from app.db import SessionLocal, init_db
+    from app.models import CatalogCrawl
+    from app.services import crawler
+
+    init_db()
+    db = SessionLocal()
+    crawler.ensure_scopes(db, "amiami")
+
+    rows = {c.scope: c for c in db.query(CatalogCrawl).all()}
+    check("the four shop statuses are set up", len(rows) == 4, sorted(rows))
+    check(
+        "and every one reads newest-updated first",
+        all((c.query or {}).get("sort") == "newest" for c in rows.values()),
+        {s: (c.query or {}).get("sort") for s, c in rows.items()},
+    )
+
+    # Strict priority let the busiest slice hold the budget almost
+    # continuously: it re-reads itself every half hour and takes most of that
+    # half hour to do it, so the full catalogue sweep only ever got scraps.
+    base = _dt(2026, 8, 28, 8, 0, tzinfo=timezone.utc)
+    for offset, scope in enumerate(
+        ["figures_preowned", "figures_in_stock", "figures_preorder", "figures_all"]
+    ):
+        row = rows[scope]
+        row.last_run_at = base + timedelta(minutes=offset)
+        row.cycles_completed = 1
+        row.finished_at = base + timedelta(minutes=offset)
+        row.recheck_interval_minutes = 1
+    db.commit()
+
+    picked = crawler._select_crawl(db, "amiami")
+    check(
+        "the slice that has waited longest goes next",
+        picked.scope == "figures_preowned",
+        picked.scope,
+    )
+
+    # After it runs, it goes to the back rather than straight round again.
+    picked.last_run_at = base + timedelta(hours=1)
+    db.commit()
+    nxt = crawler._select_crawl(db, "amiami")
+    check(
+        "and the next turn belongs to someone else",
+        nxt.scope == "figures_in_stock",
+        nxt.scope,
+    )
+
+    # The lowest-priority slice is not stuck behind the others for ever.
+    for scope in ("figures_in_stock", "figures_preorder"):
+        rows[scope].last_run_at = base + timedelta(hours=2)
+    db.commit()
+    check(
+        "the biggest slice gets its turn too",
+        crawler._select_crawl(db, "amiami").scope == "figures_all",
+        crawler._select_crawl(db, "amiami").scope,
+    )
+
+    detail = crawler.progress(db, "amiami")
+    positions = {s["scope"]: s["queue_position"] for s in detail["slices"]}
+    check("the view can say who is in line", all(p is not None for p in positions.values()), positions)
+
+    db.query(CatalogCrawl).delete()
+    db.commit()
+    db.close()
+
+
 def _valuation(compare: float | None):
     from app.services.matcher import Valuation
 
@@ -1765,10 +1835,29 @@ def test_local_filters() -> None:
     excluded = AmiAmiProvider._apply_local_filters(items, SearchQuery(exclude_keywords=["keychain"]))
     check("exclusion filter", "C" not in [i.code for i in excluded])
 
-    ascending = AmiAmiProvider._apply_local_sort(items, "price_asc")
-    check("price ascending", [i.price for i in ascending] == [50, 100, 200, 300])
+    # Sorting moved to the shop, which does it across the whole result set
+    # rather than the fifty rows we happen to be holding. So the local sort's
+    # job now is to keep its hands off anything already ordered upstream.
+    from app.providers.amiami import SORT_KEYS, SORT_KEYS_NEEDING_LOCAL_SORT
+
+    check("cheapest is the shop's job now", "price_asc" in SORT_KEYS)
+    untouched = AmiAmiProvider._apply_local_sort(items, "price_asc")
+    check(
+        "so the page comes back in the order it arrived",
+        [i.price for i in untouched] == [i.price for i in items],
+        [i.price for i in untouched],
+    )
+
+    # "priced" selects the dear listings from the whole result but hands them
+    # back shuffled, so that one page does still get ordered here.
+    check("dearest needs a local pass", "price_desc" in SORT_KEYS_NEEDING_LOCAL_SORT)
     descending = AmiAmiProvider._apply_local_sort(items, "price_desc")
     check("price descending", [i.price for i in descending] == [300, 200, 100, 50])
+
+    # No upstream equivalent at all, so this is ours entirely.
+    check("discount has no shop equivalent", "discount" not in SORT_KEYS)
+    discounted = AmiAmiProvider._apply_local_sort(items, "discount")
+    check("and is still sorted here", len(discounted) == len(items))
 
 
 def test_rate_limiting() -> None:
@@ -2416,6 +2505,7 @@ def main() -> int:
     test_null_lists_never_break_a_response()
     test_blocklist_hides_things_while_browsing()
     test_rail_filters_take_lists()
+    test_slices_take_turns()
     test_history_pruning_keeps_the_irreplaceable()
     test_deleting_a_copy_keeps_its_prices()
     test_image_prune_protects_the_unfetchable()

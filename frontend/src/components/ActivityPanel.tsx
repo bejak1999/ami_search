@@ -37,32 +37,103 @@ function toLocalHours(utc: number[]): number[] {
   return utc.map((_, index) => utc[(((index - whole) % 24) + 24) % 24])
 }
 
-function Bars({ values, labels }: { values: number[]; labels: string[] }) {
+/**
+ * One bar per hour, with the hour written underneath it.
+ *
+ * An axis with a handful of numbers spread across the bottom looked tidy and
+ * was useless: you could see that something peaked without being able to say
+ * when. Every bar carries its own label now, and the busy ones are called out
+ * in words below the chart, because that is the sentence someone actually
+ * wants out of this.
+ */
+function HourBars({ values }: { values: number[] }) {
   const peak = Math.max(1, ...values)
+  const total = values.reduce((sum, v) => sum + v, 0)
   return (
-    <div className="flex h-24 items-end gap-[3px]">
-      {values.map((value, index) => (
-        <Tooltip
-          key={index}
-          content={
-            <span className="text-xs">
-              {labels[index]}: {value.toLocaleString('en-GB')}
-            </span>
-          }
-        >
-          <div className="flex h-24 flex-1 items-end">
-            <div
-              className={clsx(
-                'w-full rounded-sm transition-[height]',
-                value >= peak * 0.75 ? 'bg-accent' : 'bg-accent/40',
-              )}
-              style={{ height: `${Math.max(2, (value / peak) * 100)}%` }}
-            />
-          </div>
-        </Tooltip>
-      ))}
+    <div className="flex items-end gap-[2px]">
+      {values.map((value, hour) => {
+        const share = total ? (value / total) * 100 : 0
+        return (
+          <Tooltip
+            key={hour}
+            content={
+              <span className="text-xs">
+                {String(hour).padStart(2, '0')}:00 &ndash;{' '}
+                {String((hour + 1) % 24).padStart(2, '0')}:00 &middot;{' '}
+                {value.toLocaleString('en-GB')} ({share.toFixed(1)}%)
+              </span>
+            }
+          >
+            <div className="flex flex-1 flex-col items-center gap-1">
+              <span className="text-[9px] tabular-nums text-faint">
+                {value >= peak * 0.6 ? value.toLocaleString('en-GB') : ''}
+              </span>
+              <div className="flex h-24 w-full items-end">
+                <div
+                  className={clsx(
+                    'w-full rounded-sm transition-[height]',
+                    value >= peak * 0.75
+                      ? 'bg-accent'
+                      : value >= peak * 0.4
+                        ? 'bg-accent/60'
+                        : 'bg-accent/25',
+                  )}
+                  style={{ height: `${Math.max(2, (value / peak) * 100)}%` }}
+                />
+              </div>
+              <span
+                className={clsx(
+                  'text-[9px] tabular-nums',
+                  value >= peak * 0.75 ? 'font-semibold text-accent' : 'text-faint',
+                )}
+              >
+                {String(hour).padStart(2, '0')}
+              </span>
+            </div>
+          </Tooltip>
+        )
+      })}
     </div>
   )
+}
+
+/** The longest run of hours with almost nothing in them. */
+function quiet(values: number[]): string {
+  const peak = Math.max(...values)
+  if (!peak) return ''
+  let best: number[] = []
+  let run: number[] = []
+  // Wrapped, because a quiet stretch usually spans midnight.
+  for (let index = 0; index < 48; index += 1) {
+    const hour = index % 24
+    if (values[hour] <= peak * 0.15) {
+      run.push(hour)
+      if (run.length > best.length && run.length <= 24) best = [...run]
+    } else {
+      run = []
+    }
+  }
+  if (best.length < 3) return ''
+  const pad = (h: number) => `${String(h).padStart(2, '0')}:00`
+  return `${pad(best[0])}–${pad((best[best.length - 1] + 1) % 24)}`
+}
+
+/** "08:00 to 11:00, and again at 15:00" rather than a single peak hour. */
+function busyHours(values: number[]): string {
+  const peak = Math.max(...values)
+  if (!peak) return ''
+  const busy = values.map((v, hour) => ({ v, hour })).filter((e) => e.v >= peak * 0.6)
+  if (!busy.length) return ''
+  const runs: number[][] = []
+  for (const { hour } of busy) {
+    const previous = runs[runs.length - 1]
+    if (previous && hour === previous[previous.length - 1] + 1) previous.push(hour)
+    else runs.push([hour])
+  }
+  const pad = (h: number) => `${String(h).padStart(2, '0')}:00`
+  return runs
+    .map((run) => (run.length > 1 ? `${pad(run[0])}–${pad(run[run.length - 1] + 1)}` : pad(run[0])))
+    .join(', ')
 }
 
 export function ActivityPanel() {
@@ -88,8 +159,6 @@ export function ActivityPanel() {
     metric === 'listings' ? data.listings_by_hour_utc : data.changes_by_hour_utc,
   )
   const weekly = metric === 'listings' ? data.listings_by_weekday : data.changes_by_weekday
-  const hourLabels = hourly.map((_, hour) => `${String(hour).padStart(2, '0')}:00`)
-  const busiest = hourly.indexOf(Math.max(...hourly))
   const total = metric === 'listings' ? data.new_listings : data.price_changes
 
   return (
@@ -117,12 +186,7 @@ export function ActivityPanel() {
         />
       </div>
 
-      <Bars values={hourly} labels={hourLabels} />
-      <div className="mt-1 flex justify-between text-[10px] text-faint">
-        {[0, 6, 12, 18, 23].map((hour) => (
-          <span key={hour}>{String(hour).padStart(2, '0')}</span>
-        ))}
-      </div>
+      <HourBars values={hourly} />
 
       <div className="mt-4 border-t border-line pt-3">
         <p className="mb-2 text-xs text-faint">By day of week</p>
@@ -146,11 +210,21 @@ export function ActivityPanel() {
 
       <div className="mt-3 flex flex-wrap items-center justify-between gap-3 border-t border-line pt-3">
         <p className="text-xs text-muted">
-          Busiest around{' '}
-          <span className="font-semibold text-ink">
-            {String(busiest).padStart(2, '0')}:00
-          </span>{' '}
-          your time.
+          {busyHours(hourly) ? (
+            <>
+              Busiest between{' '}
+              <span className="font-semibold text-ink">{busyHours(hourly)}</span> your time
+              {quiet(hourly) && (
+                <>
+                  , and quiet from{' '}
+                  <span className="font-semibold text-ink">{quiet(hourly)}</span>
+                </>
+              )}
+              .
+            </>
+          ) : (
+            'Not enough recorded yet to see a pattern.'
+          )}
         </p>
         <SegmentedControl
           value={days}

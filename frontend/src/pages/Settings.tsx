@@ -423,39 +423,6 @@ function CostTab() {
           </div>
         </Field>
 
-        <div className="space-y-4 border-t border-line pt-5">
-          <div>
-            <h4 className="text-sm font-semibold">Never show me</h4>
-            <p className="mt-0.5 max-w-2xl text-xs text-muted">
-              Applied to search results and the discovery feed. Your watches are left alone: you
-              asked for those by name, and hiding their results would be a silent failure rather
-              than a tidy list.
-            </p>
-          </div>
-          <Field
-            label="Words in the product name"
-            hint="Matched anywhere in the name, so 'nendoroid' hides the nendoroids without touching a scale figure by the same maker."
-          >
-            <Blocklist
-              values={current.blocked_terms}
-              onChange={(blocked_terms) => set({ blocked_terms })}
-              placeholder="nendoroid"
-              empty="Nothing blocked by name."
-            />
-          </Field>
-          <Field
-            label="MyFigureCollection tags"
-            hint="Tag slugs as they appear on MFC, for instance 'chibi'. Only reaches figures that have been cross-referenced."
-          >
-            <Blocklist
-              values={current.blocked_tags}
-              onChange={(blocked_tags) => set({ blocked_tags })}
-              placeholder="chibi"
-              empty="Nothing blocked by tag."
-            />
-          </Field>
-        </div>
-
         <Toggle
           checked={current.consolidate_shipping}
           onChange={(consolidate_shipping) => set({ consolidate_shipping })}
@@ -694,9 +661,94 @@ function AccountTab() {
   )
 }
 
+/**
+ * Things you never want to see.
+ *
+ * It shares the cost profile's storage, which is why it started out on that
+ * tab - a filing decision, not a reason. Nothing here has anything to do with
+ * shipping or customs, so it gets its own place.
+ */
+function BlocklistTab() {
+  const toast = useToast()
+  const queryClient = useQueryClient()
+  const profile = useQuery({ queryKey: ['costProfile'], queryFn: api.auth.costProfile })
+  const [draft, setDraft] = useState<CostProfile | null>(null)
+  const current = draft ?? profile.data ?? null
+
+  const save = useMutation({
+    mutationFn: (body: Partial<CostProfile>) => api.auth.updateCostProfile(body),
+    onSuccess: () => {
+      toast.success('Blocklist saved', 'Search and Discover will skip these from now on.')
+      void queryClient.invalidateQueries({ queryKey: ['costProfile'] })
+      void queryClient.invalidateQueries({ queryKey: ['search'] })
+      void queryClient.invalidateQueries({ queryKey: ['discover'] })
+      setDraft(null)
+    },
+    onError: (error) => toast.error('Could not save', (error as Error).message),
+  })
+
+  if (!current) return <Spinner className="h-5 w-5" />
+  const set = (changes: Partial<CostProfile>) => setDraft({ ...current, ...changes })
+
+  return (
+    <div className="space-y-6">
+      <div>
+        <h3 className="text-sm font-semibold">Never show me</h3>
+        <p className="mt-0.5 max-w-2xl text-sm text-muted">
+          Applied to search results and the discovery feed. Your watches are left alone: you
+          asked for those by name, and hiding their results would be a silent failure rather
+          than a tidy list. A single search can still look past this list without emptying it.
+        </p>
+      </div>
+
+      <Field
+        label="Words in the product name"
+        hint="Matched anywhere in the name, so 'nendoroid' hides the nendoroids without touching a scale figure by the same maker."
+      >
+        <Blocklist
+          values={current.blocked_terms}
+          onChange={(blocked_terms) => set({ blocked_terms })}
+          placeholder="nendoroid"
+          empty="Nothing blocked by name."
+        />
+      </Field>
+
+      <Field
+        label="MyFigureCollection tags"
+        hint="Tag slugs as they appear on MFC, for instance 'chibi'. Only reaches figures that have been cross-referenced, so it is the weaker of the two."
+      >
+        <Blocklist
+          values={current.blocked_tags}
+          onChange={(blocked_tags) => set({ blocked_tags })}
+          placeholder="chibi"
+          empty="Nothing blocked by tag."
+        />
+      </Field>
+
+      {draft && (
+        <div className="sticky bottom-4 flex items-center gap-2 rounded-card border border-accent/40 bg-surface p-3 shadow-pop">
+          <span className="text-sm text-muted">Unsaved changes</span>
+          <button onClick={() => setDraft(null)} className="btn-quiet ml-auto text-sm">
+            Discard
+          </button>
+          <button
+            onClick={() => save.mutate(draft)}
+            disabled={save.isPending}
+            className="btn-primary text-sm"
+          >
+            {save.isPending ? 'Saving…' : 'Save'}
+          </button>
+        </div>
+      )}
+    </div>
+  )
+}
+
+
 const TABS = [
   { value: 'notifications', label: 'Notifications', icon: 'bell' as const },
   { value: 'cost', label: 'Landed cost', icon: 'box' as const },
+  { value: 'blocklist', label: 'Blocklist', icon: 'filter' as const },
   { value: 'appearance', label: 'Appearance', icon: 'sparkle' as const },
   { value: 'account', label: 'Account', icon: 'user' as const },
 ]
@@ -718,6 +770,7 @@ export function SettingsPage() {
       <Card className="p-5">
         {tab === 'notifications' && <ChannelManager />}
         {tab === 'cost' && <CostTab />}
+        {tab === 'blocklist' && <BlocklistTab />}
         {tab === 'appearance' && <AppearanceTab />}
         {tab === 'account' && <AccountTab />}
       </Card>

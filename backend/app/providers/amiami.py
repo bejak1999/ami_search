@@ -16,7 +16,13 @@ Filters confirmed against the live API:
   s_st_list_backorder_available=1   back-orderable
   s_st_saleitem=1                   discounted
   s_cate_tag / s_maker_id / s_originaltitle_id
-  s_sortkey=preowned                pre-owned listings first
+  s_sortkey=<key>                   ordering, see SORT_KEYS
+
+A sort key without its direction suffix is accepted and then silently
+ignored: asking for "price" returns the shop's default order, which looks
+exactly like no sorting support at all. Only the suffixed forms do anything,
+and the shop's own menu offers four of them under labels that do not say
+which is which.
 
 Price and release-date ranges are not supported upstream, so they are applied
 locally after fetching.
@@ -104,6 +110,33 @@ def meets_grade(grade: str | None, minimum: str | None) -> bool:
     if not minimum:
         return True
     return grade_rank(grade) <= grade_rank(minimum)
+
+
+#: Our sort names mapped onto the shop's, so the shop does the ordering
+#: across the whole result rather than us reordering the fifty rows we happen
+#: to be holding. Anything absent here has no upstream equivalent and is
+#: sorted locally, which only ever orders the current page.
+#:
+#: "regtimed" is the one the shop's menu calls "Recently Updated Items". It
+#: puts listings the shop has just taken copies in for at the front, measured
+#: rather than assumed: of the twelve products on its first page, eleven were
+#: holding the last numbers the shop had issued for them, consecutively. The
+#: default order does no such thing.
+SORT_KEYS: dict[str, str] = {
+    "newest": "regtimed",
+    "updated": "preowned",
+    "preowned": "preowned",
+    "release": "releasedated",
+    "release_asc": "releasedatea",
+    "oldest": "regtimea",
+    "price_asc": "pricea",
+    "price_desc": "priced",
+}
+
+#: "priced" returns dear listings but not in order, so the page it hands back
+#: is re-sorted locally. That still beats sorting an arbitrary page: these are
+#: the expensive listings from the whole result, just shuffled.
+SORT_KEYS_NEEDING_LOCAL_SORT = frozenset({"price_desc"})
 
 
 class AmiAmiProvider(ShopProvider):
@@ -198,8 +231,9 @@ class AmiAmiProvider(ShopProvider):
         elif query.stock_filter == "backorder":
             params["s_st_list_backorder_available"] = 1
 
-        if query.sort == "preowned":
-            params["s_sortkey"] = "preowned"
+        sort_key = SORT_KEYS.get(query.sort)
+        if sort_key:
+            params["s_sortkey"] = sort_key
 
         if query.category_id:
             params["s_cate_tag"] = query.category_id
@@ -521,8 +555,17 @@ class AmiAmiProvider(ShopProvider):
 
     @staticmethod
     def _apply_local_sort(items: list[NormalizedItem], sort: str) -> list[NormalizedItem]:
-        # Upstream only honours its default order and preowned-first, so any
-        # other ordering is applied to the page we just fetched.
+        """Order the fetched page, for the orderings the shop cannot do.
+
+        Only reached when SORT_KEYS has no upstream equivalent, or when the
+        upstream one is known not to order cleanly. Sorting here can only ever
+        arrange the fifty rows in hand, so "cheapest" would mean "cheapest on
+        this page" - which is why as much of this as possible now happens at
+        the shop instead.
+        """
+        if sort in SORT_KEYS and sort not in SORT_KEYS_NEEDING_LOCAL_SORT:
+            return items
+
         epoch = datetime.min.replace(tzinfo=timezone.utc)
         if sort == "price_asc":
             return sorted(items, key=lambda i: (i.price is None, i.price or 0))

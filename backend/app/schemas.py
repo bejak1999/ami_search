@@ -312,8 +312,19 @@ class SearchRequest(BaseModel):
     per_page: int = Field(default=30, ge=1, le=50)
     condition: Literal["any", "new", "preowned"] = "any"
     stock: Literal["any", "in_stock", "preorder", "backorder"] = "any"
+    #: Everything except "discount" is done by the shop across the whole
+    #: result set. "discount" has no upstream equivalent and can only order
+    #: the page in hand, which is why it says so in the menu.
     sort: Literal[
-        "newest", "preowned", "price_asc", "price_desc", "release", "discount"
+        "newest",
+        "updated",
+        "oldest",
+        "preowned",
+        "price_asc",
+        "price_desc",
+        "release",
+        "release_asc",
+        "discount",
     ] = "newest"
     category_id: int | None = None
     maker_id: int | None = None
