@@ -48,8 +48,13 @@ ORDERINGS = [
     ("regtimea", "Registered, oldest first", "The same axis, reversed."),
     ("releasedated", "Release date, newest first", "The figure's own release, not the listing's."),
     ("releasedatea", "Release date, oldest first", ""),
-    ("priced", "Price, high to low", "Sorted by the shop across the whole result."),
-    ("pricea", "Price, low to high", ""),
+    (
+        "priced",
+        "Price, high to low (roughly)",
+        "Returns dear items but not in order. Whatever it sorts on, it is not "
+        "a price field the response carries.",
+    ),
+    ("pricea", "Price, low to high", "Cleanly sorted, across the whole result set."),
 ]
 
 CONDITIONS = [

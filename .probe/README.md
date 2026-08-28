@@ -11,7 +11,13 @@ plain `requests` call or a browser `fetch` cannot.
 
 ## `sort_lab.py` — what the orderings actually do
 
-    python .probe/sort_lab.py     then open http://localhost:8710
+    .probe\sort-lab.bat          double-click it, or
+
+    python .probe/sort_lab.py    then open http://localhost:8710
+
+The batch file works out the paths from where it sits, so it can be run from
+anywhere or pinned to a taskbar. If the virtual environment is missing it says
+so and how to make one, rather than closing before you can read anything.
 
 Shows any two orderings side by side, marks where a listing sits in the other
 one, and can open each product to read how many copies it holds and its intake
@@ -28,7 +34,7 @@ by the order they came back in. Seven produce something distinct:
 | `regtimea`     | Product registration, oldest first    |
 | `releasedated` | Release date, newest first            |
 | `releasedatea` | Release date, oldest first            |
-| `priced`       | Price, high to low                    |
+| `priced`       | Roughly price-descending, see below   |
 | `pricea`       | Price, low to high                    |
 
 The catch that hid most of these: a key without its direction suffix is
@@ -40,6 +46,12 @@ the API had two orderings; it has eight.
 Worth knowing: the sort is applied by the shop across the whole result set,
 not to the page being fetched. `pricea` on ten thousand pre-owned figures
 really does start at 70 yen.
+
+`priced` is the odd one out. It returns expensive listings, but not in order -
+129,980 then 188,280 then 160,650 - and the sequence matches neither the
+asking price nor the list price the response carries. It is a distinct
+ordering, just not the clean mirror of `pricea` its name suggests, so the page
+labels it as approximate rather than pretending otherwise.
 
 ## `order_probe.py` — does a listing move when it is restocked?
 
