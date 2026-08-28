@@ -164,27 +164,28 @@ def backfill_figure_codes() -> int:
 
 
 def ease_quiet_slices() -> int:
-    """Stop re-reading slices that do not change every half hour.
+    """Space out the slices that do not need re-reading every half hour.
 
     Every slice started on the same thirty-minute cadence, which is right for
     used copies - one can be listed and sold inside a morning - and wasteful
-    for first-hand stock and pre-orders, whose head pages hold the same
-    listings from one day to the next. Only slices still sitting on that
-    original default are moved, so a deliberately chosen interval is left
-    exactly as its owner set it.
+    for first-hand stock and pre-orders, which hold the same listings from one
+    day to the next. Now that a pass reads the whole slice rather than its
+    first few pages, the interval is what controls the cost, so getting it
+    right per slice matters more than it used to.
+
+    Only slices still sitting on a value this application shipped are moved.
+    An interval someone chose is left exactly as they set it.
     """
     from . import models
     from .services.crawler import DEFAULT_SCOPES
 
-    OLD_DEFAULT = 30
-    wanted = {
-        spec["scope"]: spec["recheck_interval_minutes"]
-        for spec in DEFAULT_SCOPES
-        if spec.get("recheck_interval_minutes", OLD_DEFAULT) != OLD_DEFAULT
-    }
-    if not wanted:
-        return 0
+    # Values this application has shipped as a default at some point. A slice
+    # still sitting on one of them was never configured by anyone, so moving
+    # it is a correction; anything else is a choice its owner made and is left
+    # exactly as it is.
+    SHIPPED_DEFAULTS = {30, 180}
 
+    wanted = {spec["scope"]: spec["recheck_interval_minutes"] for spec in DEFAULT_SCOPES}
     changed = 0
     with session_scope() as db:
         try:
@@ -193,7 +194,8 @@ def ease_quiet_slices() -> int:
             return 0
         for crawl in crawls:
             target = wanted.get(crawl.scope)
-            if target and (crawl.recheck_interval_minutes or OLD_DEFAULT) == OLD_DEFAULT:
+            current = crawl.recheck_interval_minutes or 30
+            if target and current != target and current in SHIPPED_DEFAULTS:
                 crawl.recheck_interval_minutes = target
                 changed += 1
     return changed

@@ -1804,6 +1804,10 @@ def test_crawler_cycles() -> None:
     first = CatalogCrawl(provider="amiami", scope="s", pages_total=200, cycles_completed=0)
     check("the first pass reads everything", _page_limit(first) == 200)
 
+    # Head passes are gone. They rested on the shop listing newest first, and
+    # measured against the live API that is false: the pre-owned order is
+    # stable and unrelated to when a listing was added, so re-reading the
+    # front of the list found the same thousand products for ever.
     later = CatalogCrawl(
         provider="amiami",
         scope="s",
@@ -1812,7 +1816,15 @@ def test_crawler_cycles() -> None:
         head_pages=20,
         last_full_sweep_at=datetime.now(timezone.utc),
     )
-    check("later passes only re-read the newest pages", _page_limit(later) == 20, _page_limit(later))
+    check(
+        "later passes read the whole slice too",
+        _page_limit(later) == 200,
+        _page_limit(later),
+    )
+    check(
+        "and a leftover head-page setting is ignored",
+        _page_limit(later) != later.head_pages,
+    )
 
     stale = CatalogCrawl(
         provider="amiami",

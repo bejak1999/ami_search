@@ -50,21 +50,22 @@ SCOPE_FILTERS: dict[str, str] = {
 #: catalogue that changes, while the full sweep is what keeps the long tail
 #: honest and eventually corrects a status nothing else has rechecked.
 #:
-#: One thing the head pages cannot do is catch changes. The shop's default
-#: order is roughly "orderable first, by release date", not "recently
-#: changed", so a price moving on a figure that came out last year happens
-#: somewhere around page sixty and no head pass will ever see it. The head
-#: pages are for finding listings that are new; the full sweep and the
-#: shelf-life sampler are for noticing that something moved.
+#: Every slice is swept end to end on every pass. The obvious cheaper design
+#: - re-read the first pages often, the rest rarely - was tried and does not
+#: work here, because it assumes the shop lists newest first and the shop does
+#: not. See :func:`_page_limit` for the measurements. What controls the cost
+#: instead is the pause between complete passes, which is set per slice
+#: according to how fast that part of the shop actually moves.
 DEFAULT_SCOPES: list[dict] = [
     {
         "scope": "figures_preowned",
         "label": "Pre-owned figures",
         "priority": 10,
         "query": {"category_id": 1, "condition": "preowned"},
-        "head_pages": 20,
-        # The one slice that genuinely turns over hour to hour: a used copy
-        # can be listed and sold inside a morning.
+        # About 200 pages, so roughly 25 minutes of requests. Pausing half an
+        # hour between complete sweeps re-reads the whole used catalogue about
+        # once an hour, which is the right cadence for the one part of the
+        # shop that turns over hourly.
         "recheck_interval_minutes": 30,
     },
     {
@@ -72,10 +73,9 @@ DEFAULT_SCOPES: list[dict] = [
         "label": "Figures in stock",
         "priority": 20,
         "query": {"category_id": 1, "stock_filter": "in_stock"},
-        "head_pages": 15,
-        # First-hand stock does not appear and vanish the way used copies do,
-        # and its head pages are the same listings the full sweep covers, so
-        # twice a day is plenty and leaves the budget for work that pays.
+        # Under 60 pages, but first-hand stock does not appear and vanish
+        # the way used copies do, so twice a day is plenty and leaves the
+        # budget for work that pays.
         "recheck_interval_minutes": 720,
     },
     {
@@ -83,9 +83,8 @@ DEFAULT_SCOPES: list[dict] = [
         "label": "Figures on pre-order",
         "priority": 30,
         "query": {"category_id": 1, "stock_filter": "preorder"},
-        "head_pages": 10,
-        # Pre-orders are announced, not restocked. A day's granularity loses
-        # nothing except requests.
+        # Pre-orders are announced, not restocked. A day's granularity
+        # loses nothing except requests.
         "recheck_interval_minutes": 1440,
     },
     {
@@ -93,8 +92,10 @@ DEFAULT_SCOPES: list[dict] = [
         "label": "All figures",
         "priority": 90,
         "query": {"category_id": 1},
-        "head_pages": 30,
-        "recheck_interval_minutes": 180,
+        # The only slice too big to sweep often: around 1,400 pages, some
+        # three hours of requests. Once a day keeps the long tail honest
+        # without crowding out everything else.
+        "recheck_interval_minutes": 1440,
     },
 ]
 
@@ -143,7 +144,6 @@ def ensure_scopes(db: Session, provider: str = "amiami") -> int:
                 label=spec["label"],
                 priority=spec["priority"],
                 query=spec["query"],
-                head_pages=spec["head_pages"],
                 recheck_interval_minutes=spec.get("recheck_interval_minutes", 30),
             )
         )
@@ -200,28 +200,36 @@ def _build_query(crawl: CatalogCrawl, page: int) -> SearchQuery:
 
 
 def _page_limit(crawl: CatalogCrawl) -> int:
-    """How deep this cycle should go.
+    """How deep this cycle should go. Always: all the way.
 
-    The first pass reads everything. Later passes only re-read the newest
-    pages, because the shop lists newest first, unless a full sweep is due.
+    This used to re-read only the first ``head_pages`` of a slice between full
+    sweeps, on the assumption that the shop lists newest first so the front of
+    the list is where anything new turns up. Measured against the live API,
+    that assumption is simply false for the slices this crawler reads.
 
-    Column defaults only apply on insert, so every number is read defensively:
-    a row that has not been flushed yet still carries None.
+    On the pre-owned slice the order is stable and unrelated to when a listing
+    was added: page one spans product codes from 693 to 205886, page 150 spans
+    598 to 199675, and two snapshots taken apart came back byte for byte
+    identical. A used copy taken in this morning lands wherever its product
+    happens to sit in that fixed order, which for a figure from 2008 is
+    somewhere around page 140. The API offers exactly two orderings, neither
+    of which is by recency, so there is no sort key that would rescue the
+    idea.
+
+    The practical effect was that after the first pass the crawler re-read the
+    same thousand products for ever and found new listings only on the weekly
+    sweep. Reading everything instead costs about the same: the whole
+    pre-owned slice is 203 pages, roughly twenty-five minutes of requests at
+    the configured rate, against the forty pages an hour the head passes were
+    already spending on a fifth of it.
+
+    ``head_pages`` is left on the model so an existing row still loads, but
+    nothing reads it any more.
+
+    Column defaults only apply on insert, so the number is read defensively: a
+    row that has not been flushed yet still carries None.
     """
-    pages_total = crawl.pages_total or 0
-    if not pages_total:
-        return 10_000  # unknown until the first response comes back
-    if not (crawl.cycles_completed or 0):
-        return pages_total
-
-    last = crawl.last_full_sweep_at
-    if last is not None:
-        if last.tzinfo is None:
-            last = last.replace(tzinfo=timezone.utc)
-        interval = max(1, crawl.full_sweep_interval_days or 7)
-        if datetime.now(timezone.utc) - last >= timedelta(days=interval):
-            return pages_total
-    return min(pages_total, max(1, crawl.head_pages or 20))
+    return crawl.pages_total or 10_000  # unknown until the first response
 
 
 def _cooldown_remaining(crawl: CatalogCrawl) -> int:
@@ -396,9 +404,10 @@ def _store_page(db: Session, items) -> tuple[int, int]:
 
 def _complete_cycle(db: Session, crawl: CatalogCrawl) -> None:
     """Wrap a finished pass and arm the next one."""
-    was_full = (crawl.cursor_page or 1) > max(1, crawl.head_pages or 20) or not (
-        crawl.cycles_completed or 0
-    )
+    # Every completed pass reads the whole slice now, so every one of them is
+    # a full sweep. The distinction only existed while some passes were
+    # shallow.
+    was_full = True
     crawl.cycles_completed = (crawl.cycles_completed or 0) + 1
     crawl.cursor_page = 1
     crawl.finished_at = utcnow()

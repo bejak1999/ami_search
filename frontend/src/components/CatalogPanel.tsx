@@ -279,7 +279,7 @@ function Slice({
         )}
         {slice.pages_this_cycle ? (
           <span>
-            this pass: page {slice.cursor_page.toLocaleString('en-GB')} of{' '}
+            sweeping: page {slice.cursor_page.toLocaleString('en-GB')} of{' '}
             {slice.pages_this_cycle.toLocaleString('en-GB')} ({slice.pass_percent}%)
           </span>
         ) : null}
@@ -322,31 +322,14 @@ function Slice({
               <span className="text-xs text-faint">minutes</span>
             </div>
           </Field>
-          <Field label="Pages per re-check" hint="50 listings per page, newest first.">
-            <input
-              type="number"
-              min={1}
-              max={500}
-              defaultValue={slice.head_pages ?? 20}
-              onBlur={(e) => save.mutate({ head_pages: Number(e.target.value) })}
-              className="field w-24 tabular-nums"
-            />
-          </Field>
-          <Field label="Full sweep every" hint="Occasionally re-read the whole slice.">
-            <div className="flex items-center gap-2">
-              <input
-                type="number"
-                min={1}
-                max={365}
-                defaultValue={slice.full_sweep_interval_days ?? 7}
-                onBlur={(e) =>
-                  save.mutate({ full_sweep_interval_days: Number(e.target.value) })
-                }
-                className="field w-24 tabular-nums"
-              />
-              <span className="text-xs text-faint">days</span>
-            </div>
-          </Field>
+          <p className="text-[11px] leading-relaxed text-faint sm:col-span-3">
+            Every pass reads the whole slice. There used to be a shallow
+            re-check of the first few pages between full sweeps, on the
+            assumption that the shop lists newest first — measured against the
+            live API, it does not. The pre-owned order is stable and unrelated
+            to when a listing was added, so the shallow pass re-read the same
+            products for ever and never saw the rest.
+          </p>
           <p className="text-[11px] leading-relaxed text-faint sm:col-span-3">
             {slice.cycles_completed.toLocaleString('en-GB')} pass(es) so far,{' '}
             {slice.listings_checked.toLocaleString('en-GB')} listings checked in total. That
