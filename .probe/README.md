@@ -37,6 +37,32 @@ by the order they came back in. Seven produce something distinct:
 | `priced`       | Roughly price-descending, see below   |
 | `pricea`       | Price, low to high                    |
 
+The shop's own dropdown offers four of these under labels that do not say what
+they do - `regtimed` is "Recently Updated Items", `preowned` is "Updated
+Items", and neither name distinguishes them. The lab names them for their
+behaviour and keeps the shop's wording in the note, so an entry can still be
+matched to the site.
+
+### Which ordering finds a listing that just arrived
+
+Both update orderings do, and the default does not. Measured across the first
+twelve products of each, by where the copies a product holds sit in its own
+intake counter - a shop that has just taken copies in will be holding the last
+numbers it issued, consecutively:
+
+| ordering   | copies held | spread in the counter | gaps | consecutive at the top |
+| ---------- | ----------- | --------------------- | ---- | ---------------------- |
+| default    | 4.2         | 26                    | 21   | 3 of 11                |
+| `regtimed` | 2.4         | 2                     | 0    | 11 of 12               |
+| `preowned` | 2.4         | 2                     | 0    | 7 of 12                |
+
+So the front of `regtimed` is almost entirely products the shop has just
+restocked, `preowned` mostly so, and the default order is neither - its front
+holds shelves whose copies were taken in at scattered times.
+
+This is a snapshot correlation, not proof; `order_probe.py` records the same
+orderings over time to confirm it.
+
 The catch that hid most of these: a key without its direction suffix is
 accepted and then ignored. Asking for `price` returns the default order, which
 looks exactly like "the API does not support sorting by price". Only `pricea`

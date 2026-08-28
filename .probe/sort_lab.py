@@ -39,22 +39,56 @@ PORT = 8710
 provider = AmiAmiProvider()
 
 #: Every ordering confirmed to return something different from the default.
-#: A name without its direction suffix is accepted by the API and then
-#: ignored, which is exactly how this was missed the first time round.
+#: Named for what they do rather than for what the shop's menu calls them -
+#: "Updated Items" and "Recently Updated Items" are two entries in that menu
+#: and neither tells you which is which. The shop's wording is kept in the
+#: note so an entry here can still be matched to one on the site.
+#:
+#: The key names mislead too: "preowned" is one of the update orderings and
+#: has nothing to do with condition. And a name without its direction suffix
+#: is accepted and then ignored, which is how most of these were missed the
+#: first time round.
 ORDERINGS = [
     ("", "Default (no sort key)", "What the shop returns when asked for nothing."),
-    ("preowned", "Pre-owned first", "The only key that works without a direction."),
-    ("regtimed", "Registered, newest first", "When the product entry was created."),
-    ("regtimea", "Registered, oldest first", "The same axis, reversed."),
-    ("releasedated", "Release date, newest first", "The figure's own release, not the listing's."),
-    ("releasedatea", "Release date, oldest first", ""),
+    (
+        "regtimed",
+        "Registration, newest first",
+        "Shop menu: 'Recently Updated Items'. Surfaces older figures whose "
+        "used listing looks recent.",
+    ),
+    (
+        "regtimea",
+        "Registration, oldest first",
+        "The same axis reversed. Not offered in the shop's own menu.",
+    ),
+    (
+        "preowned",
+        "Last update, newest first",
+        "Shop menu: 'Updated Items'. The key is called preowned but has "
+        "nothing to do with condition. Surfaces recent figures.",
+    ),
+    (
+        "releasedated",
+        "Release date, newest first",
+        "Shop menu: 'Latest Release Date'. The figure's own release, not the "
+        "listing's.",
+    ),
+    (
+        "releasedatea",
+        "Release date, oldest first",
+        "Not offered in the shop's own menu.",
+    ),
+    (
+        "pricea",
+        "Price, low to high",
+        "Cleanly sorted across the whole result set. Not in the shop's menu.",
+    ),
     (
         "priced",
         "Price, high to low (roughly)",
         "Returns dear items but not in order. Whatever it sorts on, it is not "
         "a price field the response carries.",
     ),
-    ("pricea", "Price, low to high", "Cleanly sorted, across the whole result set."),
 ]
 
 CONDITIONS = [

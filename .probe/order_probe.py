@@ -46,6 +46,10 @@ HERE = pathlib.Path(__file__).resolve().parent
 PAGES = (1, 2, 3, 50, 100, 150)
 #: Products to follow individually, so a move can be tied to a new copy.
 SAMPLE_PER_PAGE = 4
+#: Which ordering to follow. The shop's dropdown offers "Recently Updated
+#: Items" (regtimed) and "Updated Items" (preowned); which of the two actually
+#: reacts to a copy arriving is the open question, so both can be recorded.
+SORT = (sys.argv[2] if len(sys.argv) > 2 else "")
 
 provider = AmiAmiProvider()
 
@@ -58,6 +62,8 @@ def fetch(page: int) -> list[dict]:
         "s_st_condition_flg": 1,
         "lang": "eng",
     }
+    if SORT:
+        params["s_sortkey"] = SORT
     payload = provider._decode(provider.request("GET", API_ROOT + "/items", params=params))
     return payload.get("items") or []
 
@@ -79,6 +85,7 @@ def shelf(code: str) -> dict:
 def record() -> None:
     snapshot = {
         "taken_at": datetime.now(timezone.utc).isoformat(),
+        "sort": SORT,
         "pages": {},
         "shelves": {},
     }
@@ -92,18 +99,19 @@ def record() -> None:
         print(f"  page {page:>3}: {len(codes)} listings, {SAMPLE_PER_PAGE} shelves read")
 
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-    path = HERE / f"order-{stamp}.json"
+    path = HERE / f"order-{SORT or 'default'}-{stamp}.json"
     path.write_text(json.dumps(snapshot, indent=1), encoding="utf-8")
     print(f"\nBaseline written to {path.name}")
 
 
 def compare() -> None:
-    files = sorted(HERE.glob("order-*.json"))
+    files = sorted(HERE.glob(f"order-{SORT or 'default'}-*.json"))
     if len(files) < 2:
         print("Need two snapshots. Run 'record' again later.")
         return
     old = json.loads(files[0].read_text(encoding="utf-8"))
     new = json.loads(files[-1].read_text(encoding="utf-8"))
+    print(f"Ordering: {SORT or '(default)'}")
     print(f"Comparing {files[0].name} -> {files[-1].name}")
     print(f"  {old['taken_at']}  ->  {new['taken_at']}\n")
 
