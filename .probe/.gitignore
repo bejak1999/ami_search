@@ -1,3 +1,4 @@
 # Snapshots from the ordering investigation. The script is worth keeping,
 # the data it collects is not.
 order-*.json
+regtime-watch.json

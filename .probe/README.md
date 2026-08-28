@@ -79,6 +79,36 @@ asking price nor the list price the response carries. It is a distinct
 ordering, just not the clean mirror of `pricea` its name suggests, so the page
 labels it as approximate rather than pretending otherwise.
 
+## `regtime_watch.py` — would reading only the first pages be enough?
+
+    .probeegtime-watch.bat          start it, leave it, Ctrl+C to stop
+    python .probe/regtime_watch.py report
+
+The crawler sweeps all 211 pages of the pre-owned slice every hour. If new
+listings reliably appear at the front of the `regtimed` ordering, a 20-page
+head pass would do the same job for a twentieth of the requests.
+
+Two earlier attempts to settle this failed the same way: they sampled for
+minutes, at times when the shop was not listing anything, and read a stable
+front as proof that nothing arrives there. This one measures what actually
+arrived and then asks whether the head would have seen it:
+
+* a complete enumeration of the slice at the start and another at the end, so
+  the exact set of listings before and after is known
+* a 20-page snapshot every hour in between
+
+Anything present at the end but not at the start is an arrival; anything whose
+price range moved is a restock. For each, the hourly snapshots say whether a
+head pass would have caught it and on which page. Run it for a full day so it
+covers Japanese business hours, which is when listings are actually made.
+
+It costs about 900 requests over 24 hours, paced at six a minute, and saves
+after every step so an interruption loses at most the hour in progress.
+
+One thing it cannot see: a listing that appeared and sold out between two
+snapshots is invisible to both the head and the closing enumeration, so it
+counts in neither column.
+
 ## `order_probe.py` — does a listing move when it is restocked?
 
     python .probe/order_probe.py record      # baseline
