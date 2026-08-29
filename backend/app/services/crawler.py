@@ -65,24 +65,34 @@ SCOPE_FILTERS: dict[str, str] = {
 #: anyway - so those two start switched off, and the toggle is there for
 #: anyone who wants the faster lane.
 #:
-#: Every slice is swept end to end on every pass, and they take turns rather
-#: than running strictly by priority. The cheaper design - re-read the first
-#: pages often, the rest rarely - assumes the shop lists newest first, which
-#: it does not under the default order. It might hold under "regtimed", which
-#: the queries below now ask for, but the measurement that would settle it has
-#: to be taken while the shop is actually listing things: an eighteen-minute
-#: sample at seven in the evening Japan time saw nothing arrive at all. Until
-#: then, reading everything is the answer that cannot be wrong.
+#: Every slice is swept end to end on every pass. The cheaper design - re-read
+#: the first pages often, the rest rarely - needs the shop to put new listings
+#: at the front, and it does not, under either ordering it offers. Settled by
+#: measurement over 24.7 hours covering a full Japanese working day, with the
+#: whole slice enumerated at both ends so the arrivals were known exactly
+#: rather than inferred (.probe/regtime_watch.py):
+#:
+#:   592 listings arrived. 9 of them - 2 per cent - ever appeared in the
+#:   first twenty pages of "regtimed". None at all on the first two.
+#:
+#: Those twenty pages are 9.5 per cent of the slice, so a new listing is
+#: about six times *less* likely to be found there than if the order were
+#: shuffled. Price-range changes do slightly better, 19 per cent against the
+#: 9.5 expected, but four fifths of them would still be missed.
+#:
+#: The same run measured the churn that sets the pace: 24 listings arrive and
+#: 21 disappear every hour. An hourly full sweep therefore catches every
+#: arrival within the hour, which is what the interval below is for.
 DEFAULT_SCOPES: list[dict] = [
     {
         "scope": "figures_preowned",
         "label": "Pre-owned figures",
         "priority": 10,
         "query": {"category_id": 1, "condition": "preowned", "sort": "newest"},
-        # 211 pages, about 25 minutes of requests. The one part of the shop
-        # that turns over hour to hour: a used copy can be listed and sold
-        # inside a morning. Hourly rather than half-hourly, because at
-        # half-hourly it never stops and starves everything else.
+        # 211 pages, about 25 minutes of requests. Measured churn is 24
+        # arrivals and 21 departures an hour, so an hourly sweep sees every
+        # one of them within the hour. Half-hourly would only halve a latency
+        # nobody is waiting on, and it never stops running.
         "recheck_interval_minutes": 60,
     },
     {
@@ -242,10 +252,19 @@ def _page_limit(crawl: CatalogCrawl) -> int:
         and page 100 kept none.
 
     So a listing's page says nothing about when it was added or when it was
-    last restocked. New arrivals are scattered through all 203 pages, and a
-    twenty-page head pass would have caught about a tenth of them by luck. The
-    API offers exactly two orderings and neither is by recency, so no sort key
-    rescues the idea either.
+    last restocked, and no sort key rescues the idea. That last part was then
+    checked properly rather than assumed, over 24.7 hours covering a full
+    Japanese working day, with the whole slice enumerated at both ends so the
+    arrivals were known exactly (.probe/regtime_watch.py):
+
+      * 592 listings arrived. 9 of them ever appeared in the first twenty
+        pages of "regtimed", and none at all in the first two.
+      * Those pages are 9.5 per cent of the slice, so an arrival is about six
+        times *less* likely to be found there than under a shuffle. The
+        ordering does not merely fail to help, it pushes new listings away
+        from the front.
+      * Price-range changes fare better and still badly: 19 per cent against
+        the 9.5 expected, so four fifths would be missed.
 
     The practical effect was that after the first pass the crawler re-read the
     same thousand products for ever and found new listings only on the weekly
