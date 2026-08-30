@@ -863,17 +863,28 @@ def test_image_prune_protects_the_unfetchable() -> None:
     init_db()
     db = SessionLocal()
 
-    live = Item(provider="amiami", code="IMG-LIVE", name="On sale", order_closed=False,
-                condition=Condition.preowned,
+    # Three photos with different prospects. The used copy still on sale is
+    # the interesting one: its listing is up now, so its photo could in
+    # principle be fetched again - but it is a photograph of that one copy's
+    # actual condition, and AmiAmi deletes it the moment the copy sells.
+    # Evicting it while it is still listed loses it just as completely as
+    # evicting it afterwards, only with a delay.
+    live = Item(provider="amiami", code="IMG-LIVE", name="Used, on sale", order_closed=False,
+                condition=Condition.preowned, in_stock=True,
                 image_url="https://img.amiami.com/images/product/main/live.jpg")
     gone = Item(provider="amiami", code="IMG-GONE", name="Deleted upstream", order_closed=True,
                 condition=Condition.preowned,
                 image_url="https://img.amiami.com/images/product/main/gone.jpg")
-    db.add_all([live, gone])
+    # A factory-new item's picture is a product shot that stays up for as long
+    # as the product exists. That one is replaceable, so that one goes.
+    stock = Item(provider="amiami", code="IMG-NEW", name="New, on sale", order_closed=False,
+                 condition=Condition.new, in_stock=True,
+                 image_url="https://img.amiami.com/images/product/main/new.jpg")
+    db.add_all([live, gone, stock])
     db.commit()
 
     keys = {}
-    for item, age in ((gone, 100), (live, 1)):
+    for item, age in ((gone, 100), (live, 50), (stock, 1)):
         for url in images.urls_for_item(item):
             key = images.key_for(url)
             keys.setdefault(item.code, set()).add(key)
@@ -903,8 +914,13 @@ def test_image_prune_protects_the_unfetchable() -> None:
         result,
     )
     check(
-        "the still-buyable ones were the ones evicted",
-        not (keys["IMG-LIVE"] & remaining),
+        "a used copy still on sale is kept too, before its photo can be lost",
+        keys["IMG-LIVE"] <= remaining,
+        sorted(remaining),
+    )
+    check(
+        "the replaceable product shot was the one evicted",
+        not (keys["IMG-NEW"] & remaining),
         sorted(remaining),
     )
     check(
@@ -914,7 +930,7 @@ def test_image_prune_protects_the_unfetchable() -> None:
     )
 
     db.query(CachedImage).delete()
-    for row in (live, gone):
+    for row in (live, gone, stock):
         db.delete(row)
     db.commit()
     db.close()
@@ -2979,6 +2995,111 @@ def test_photo_counts_distinguish_known_from_held() -> None:
     db.close()
 
 
+def test_prefetch_works_through_its_backlog() -> None:
+    print("\n== The prefetcher downloads the photos it has only noted ==")
+    from app.db import SessionLocal, init_db
+    from app.models import CachedImage, CollectionEntry, Condition, Item
+    from app.services import images
+
+    init_db()
+    db = SessionLocal()
+    db.query(CachedImage).delete()
+    db.query(CollectionEntry).delete()
+    db.query(Item).delete()
+    db.commit()
+
+    def add_item(code, *, preowned=False, in_stock=True, days_old=1):
+        item = Item(
+            provider="amiami",
+            code=code,
+            name=f"Figure {code}",
+            image_url=f"https://img.amiami.com/{code}.jpg",
+            in_stock=in_stock,
+            condition=Condition.preowned if preowned else Condition.new,
+            first_seen_at=datetime.now(timezone.utc) - timedelta(days=days_old),
+            last_seen_at=datetime.now(timezone.utc),
+        )
+        db.add(item)
+        db.flush()
+        images.register(db, images.urls_for_item(item))
+        return item
+
+    wishlisted = [add_item(f"W{n}") for n in range(30)]
+    for item in wishlisted:
+        db.add(CollectionEntry(user_id=1, item_id=item.id))
+    fresh = add_item("P-NEW", preowned=True, days_old=0)
+    older = add_item("P-OLD", preowned=True, days_old=40)
+    db.commit()
+
+    known = images.stats(db)["count"]
+    check("a crawl notes every photo without fetching it", known == 32, known)
+    check("none of them are on disk yet", images.stats(db)["downloaded"] == 0)
+    check("and all of them are owed", images.pending_count(db) == known)
+
+    # Stand in for the network: record what was asked for, in order.
+    asked: list[str] = []
+
+    def pretend_download(url):
+        asked.append(url)
+        return b"x" * 1000, "image/jpeg"
+
+    original = images._download
+    images._download = pretend_download
+    try:
+        # The wishlist photos are already on disk. Before the fix, they filled
+        # the candidate list, every one of them was skipped as "cached", and
+        # the run ended having fetched nothing - for ever.
+        for item in wishlisted:
+            for url in images.urls_for_item(item):
+                images.fetch(db, url, touch=False)
+        asked.clear()
+
+        result = images.prefetch(db, limit=50)
+        check("a second run does not stall behind them", result["fetched"] > 0, result)
+        check("it reports what is still owed", result["queued"] < known, result["queued"])
+        check(
+            "the newest used copy is fetched before the one sitting a month",
+            asked and "P-NEW" in asked[0],
+            asked[:2],
+        )
+        check(
+            "and both used copies are covered",
+            any("P-OLD" in url for url in asked),
+        )
+
+        # Nothing is fetched twice.
+        before = len(asked)
+        images.prefetch(db, limit=50)
+        check("what is already on disk is not fetched again", len(asked) == before)
+        check("and then nothing is owed", images.pending_count(db) == 0)
+    finally:
+        images._download = original
+
+    # A photo the shop has deleted is not retried for ever.
+    lost = add_item("GONE")
+    db.commit()
+
+    def refuse(url):
+        raise FileNotFoundError("410 Gone")
+
+    images._download = refuse
+    try:
+        images.prefetch(db, limit=10)
+        check("a deleted photo is marked gone", images.pending_count(db) == 0)
+        check(
+            "and does not count as downloaded",
+            images.stats(db)["gone_upstream"] > 0,
+        )
+    finally:
+        images._download = original
+
+    db.query(CachedImage).delete()
+    db.query(CollectionEntry).delete()
+    db.query(Item).delete()
+    db.commit()
+    db.close()
+
+
 def main() -> int:
     test_url_parsing()
     test_release_dates()
@@ -3037,6 +3158,7 @@ def main() -> int:
     test_run_log()
     test_request_accounting()
     test_photo_counts_distinguish_known_from_held()
+    test_prefetch_works_through_its_backlog()
     test_settings()
 
     print(f"\n{'=' * 46}\n  {PASS} passed, {FAIL} failed\n{'=' * 46}")

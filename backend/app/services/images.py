@@ -16,15 +16,24 @@ import hashlib
 import logging
 import re
 import threading
+from collections.abc import Iterator
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
 from ..config import settings
-from ..models import CachedImage, CollectionEntry, Item, Watch, WatchSeenItem, utcnow
+from ..models import (
+    CachedImage,
+    CollectionEntry,
+    Condition,
+    Item,
+    Watch,
+    WatchSeenItem,
+    utcnow,
+)
 from ..providers.ratelimit import TokenBucket
 
 log = logging.getLogger(__name__)
@@ -283,35 +292,95 @@ def urls_for_item(item: Item, include_full: bool | None = None) -> list[str]:
     return wanted
 
 
-def _priority_item_ids(db: Session, limit: int) -> list[int]:
-    """Items whose pictures matter most, should the cache fall behind.
+def _priority_items(db: Session) -> Iterator[int]:
+    """Item ids in the order their pictures matter, most first.
 
-    Anything on a wishlist or matched by a watch comes first: those are the
-    ones a person will open, and the ones whose listing disappearing actually
-    costs them something.
+    The order is by what is lost if we are too slow, not by what is nice to
+    have. A pre-owned listing is one copy: when it sells, AmiAmi takes down
+    the photographs of that copy, and they were the only pictures of the
+    actual item rather than of the product. Nothing recreates them. A new
+    item's stock photo, by contrast, stays up as long as the product exists
+    and can be fetched whenever.
+
+    A generator rather than a list, because the caller cannot know in advance
+    how far down it has to read: most of what comes back is usually already on
+    disk. Building a fixed-size list instead was the second half of the same
+    bug - a wishlist big enough to fill the list meant the same already-cached
+    items were offered every run, all of them skipped, and nothing behind them
+    was ever reached.
     """
-    wanted: list[int] = []
     seen: set[int] = set()
-
     for stmt in (
         select(CollectionEntry.item_id),
         select(WatchSeenItem.item_id)
         .join(Watch, Watch.id == WatchSeenItem.watch_id)
         .where(Watch.enabled.is_(True)),
-        # Then whatever is currently buyable, since those are the listings that
-        # can vanish without warning.
+        # Used copies on sale now: the irreplaceable ones. Newest first,
+        # because a listing that has been up a month has shown it is in no
+        # hurry, while one added today may be gone tonight.
+        select(Item.id)
+        .where(Item.in_stock.is_(True), Item.condition == Condition.preowned)
+        .order_by(Item.first_seen_at.desc()),
+        # Then anything else buyable, which can also vanish, though its photos
+        # usually come back with the next restock.
         select(Item.id).where(Item.in_stock.is_(True)).order_by(Item.last_seen_at.desc()),
         select(Item.id).order_by(Item.last_seen_at.desc()),
     ):
-        for item_id in db.execute(stmt.limit(limit * 4)).scalars():
-            if item_id not in seen:
-                seen.add(item_id)
-                wanted.append(item_id)
-            if len(wanted) >= limit * 4:
-                break
-        if len(wanted) >= limit * 4:
-            break
-    return wanted
+        for item_id in db.execute(stmt).scalars():
+            if item_id in seen:
+                continue
+            seen.add(item_id)
+            yield item_id
+
+
+#: How many photos to consider per run before giving up and leaving the rest
+#: for the next one. Only a bound on the walk, not on the downloads: it stops
+#: a nearly-complete cache from reading the whole catalogue every five minutes
+#: to find the handful still missing.
+SCAN_LIMIT = 20_000
+
+
+def pending_count(db: Session) -> int:
+    """Photos known of but not on disk, and still worth trying for."""
+    return int(
+        db.execute(
+            select(func.count(CachedImage.id)).where(
+                CachedImage.fetched_at.is_(None),
+                CachedImage.gone.is_(False),
+                CachedImage.attempts < 3,
+            )
+        ).scalar_one()
+    )
+
+
+def _settled(db: Session, urls: list[str]) -> set[str]:
+    """Of these photos, the keys not worth fetching again.
+
+    Either the file is on disk, or the shop has deleted it, or it has failed
+    often enough to be counted out. Anything else is still owed. Skipping
+    every *registered* photo, as this once did, skipped the entire backlog: a
+    row is written the moment the crawler sees a photo, so after one pass
+    every photo looked done and the prefetcher had nothing left to do. That is
+    why the cache held about 200 MB against 131,716 known photos - the only
+    ones ever downloaded were the ones somebody happened to open in a browser.
+    """
+    keys = list({key_for(url) for url in urls})
+    if not keys:
+        return set()
+    return set(
+        db.execute(
+            select(CachedImage.key).where(
+                CachedImage.key.in_(keys),
+                or_(
+                    CachedImage.fetched_at.is_not(None),
+                    CachedImage.gone.is_(True),
+                    CachedImage.attempts >= 3,
+                ),
+            )
+        )
+        .scalars()
+        .all()
+    )
 
 
 def prefetch(db: Session, limit: int | None = None) -> dict:
@@ -320,25 +389,57 @@ def prefetch(db: Session, limit: int | None = None) -> dict:
         return {"fetched": 0, "skipped": 0, "reason": "disabled"}
 
     limit = limit or settings.image_prefetch_batch
-    cached_keys = {
-        row for row in db.execute(select(CachedImage.key)).scalars().all()
-    }
+    fetched = failed = scanned = 0
 
-    fetched = failed = 0
-    for item_id in _priority_item_ids(db, limit):
+    # Walked in chunks so the "already have it" question is one query per
+    # chunk rather than one per photo, and so a cache that is nearly complete
+    # does not pay for a full catalogue read to find the last few gaps.
+    chunk: list[str] = []
+    for item_id in _priority_items(db):
         item = db.get(Item, item_id)
-        if item is None:
+        if item is not None:
+            chunk.extend(urls_for_item(item))
+        if len(chunk) < 200:
             continue
-        for url in urls_for_item(item):
-            if key_for(url) in cached_keys:
+
+        scanned += len(chunk)
+        settled = _settled(db, chunk)
+        for url in chunk:
+            if key_for(url) in settled:
                 continue
             if fetch(db, url, touch=False):
                 fetched += 1
             else:
                 failed += 1
-            if fetched >= limit:
-                return {"fetched": fetched, "failed": failed}
-    return {"fetched": fetched, "failed": failed}
+            if fetched + failed >= limit:
+                return _prefetch_result(db, fetched, failed, scanned)
+        chunk = []
+        if scanned >= SCAN_LIMIT:
+            break
+
+    if chunk:
+        scanned += len(chunk)
+        settled = _settled(db, chunk)
+        for url in chunk:
+            if key_for(url) in settled:
+                continue
+            if fetch(db, url, touch=False):
+                fetched += 1
+            else:
+                failed += 1
+            if fetched + failed >= limit:
+                break
+
+    return _prefetch_result(db, fetched, failed, scanned)
+
+
+def _prefetch_result(db: Session, fetched: int, failed: int, scanned: int) -> dict:
+    return {
+        "fetched": fetched,
+        "failed": failed,
+        "scanned": scanned,
+        "queued": pending_count(db),
+    }
 
 
 def prune(db: Session, budget_bytes: int | None = None) -> dict:
@@ -370,10 +471,20 @@ def prune(db: Session, budget_bytes: int | None = None) -> dict:
         .scalars()
         .all()
     )
-    # The ones the docstring is really about: the shop has dropped these, so
-    # nothing can be re-fetched and we are the last place they exist.
+    # The ones the docstring is really about. Every pre-owned photograph is of
+    # one particular second-hand copy - its actual wear, its actual box - not
+    # a product shot, and AmiAmi deletes it when that copy sells. Protecting
+    # only the ones already sold would be a race we lose by definition: the
+    # photo has to survive the sale to be worth having, so it is protected
+    # while the listing is still up.
     protected |= set(
-        db.execute(select(Item.id).where(Item.order_closed.is_(True))).scalars().all()
+        db.execute(
+            select(Item.id).where(
+                or_(Item.order_closed.is_(True), Item.condition == Condition.preowned)
+            )
+        )
+        .scalars()
+        .all()
     )
     protected_urls: set[str] = set()
     if protected:
@@ -463,6 +574,13 @@ def stats(db: Session) -> dict:
     budget = int(settings.image_cache_max_gb * 1024**3)
 
     # How many photos the current catalogue would need in total.
+    pending = pending_count(db)
+    per_hour = int(
+        min(
+            settings.image_prefetch_batch * (60 / max(1, settings.image_prefetch_interval_minutes)),
+            settings.image_cache_requests_per_minute * 60,
+        )
+    )
     per_item = 2 if settings.image_cache_full_images else 1
     expected = items * per_item
     # Averaged over what was actually downloaded, not over every row, or the
@@ -476,7 +594,7 @@ def stats(db: Session) -> dict:
         # between them is the prefetch backlog.
         "count": int(total_rows),
         "downloaded": downloaded,
-        "pending": max(0, int(total_rows) - downloaded - gone),
+        "pending": pending,
         "bytes": int(total_bytes),
         "budget_bytes": budget,
         "percent_of_budget": round(int(total_bytes) / budget * 100, 1) if budget else 0.0,
@@ -489,5 +607,10 @@ def stats(db: Session) -> dict:
         "average_bytes": int(average),
         "projected_bytes": int(average * expected) if average else 0,
         "requests_per_minute": settings.image_cache_requests_per_minute,
+        # What the queue is actually draining at, so the wait can be quoted
+        # rather than guessed. The token bucket caps it; the batch and the
+        # interval decide whether it ever gets near that cap.
+        "prefetch_per_hour": per_hour,
+        "queue_hours": round(pending / per_hour, 1) if pending and per_hour else 0.0,
         "path": str(cache_root()),
     }

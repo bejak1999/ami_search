@@ -981,12 +981,25 @@ function ImageCache() {
           </p>
           <Bar percent={d.coverage_percent} />
           <p className="mt-1.5 text-[11px] leading-relaxed text-faint">
-            A photo is noted the moment the crawler sees it and fetched later, at{' '}
-            {d.requests_per_minute}/min, so downloading does not compete with the crawl. That
-            is why {d.count.toLocaleString('en-GB')} are known of while{' '}
-            {d.downloaded.toLocaleString('en-GB')} are on disk, with{' '}
-            {d.pending.toLocaleString('en-GB')} still queued.
+            The crawler notes a photo the moment it sees one and the download follows
+            separately, from a different host, so it never slows the crawl.{' '}
+            {d.count.toLocaleString('en-GB')} are known of,{' '}
+            {d.downloaded.toLocaleString('en-GB')} are on disk.
           </p>
+          {d.pending > 0 && (
+            <p className="mt-1.5 text-[11px] leading-relaxed text-warning">
+              {d.pending.toLocaleString('en-GB')} still to fetch, going out at about{' '}
+              {d.prefetch_per_hour.toLocaleString('en-GB')} an hour
+              {d.queue_hours >= 1 &&
+                ` \u2014 roughly ${
+                  d.queue_hours >= 48
+                    ? `${Math.round(d.queue_hours / 24)} days`
+                    : `${Math.round(d.queue_hours)} hours`
+                } to catch up`}
+              . Used listings are fetched first, newest first: when a used copy sells, its
+              photographs go with it, and they were the only pictures of that actual item.
+            </p>
+          )}
           <p className="mt-1.5 text-[11px] text-faint">
             {d.full_images ? 'Thumbnail and full image' : 'Thumbnails only'} per item; all of
             them would need about {bytes(d.projected_bytes)}

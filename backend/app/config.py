@@ -133,7 +133,12 @@ class Settings(BaseSettings):
     """Cache the large detail photo as well as the grid thumbnail. Thumbnails
     are about 4 KB each; full images are around 80 KB."""
     image_cache_requests_per_minute: float = 60.0
-    image_prefetch_batch: int = 40
+    #: Per run. With a five-minute interval this averages fifty a minute,
+    #: inside the allowance above, which the token bucket enforces anyway.
+    #: It used to be forty per run - eight a minute - which would have
+    #: taken eleven days to work through the backlog even once the
+    #: prefetcher could see it.
+    image_prefetch_batch: int = 250
     image_prefetch_interval_minutes: int = 5
 
     # ---- Self-monitoring ---------------------------------------------------
