@@ -1,14 +1,49 @@
+import { useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { api } from '@/api/client'
-import { CatalogPanel } from '@/components/CatalogPanel'
+import {
+  CatalogPanel,
+  MaintenancePanels,
+  ShelfPanels,
+  TrafficPanels,
+} from '@/components/CatalogPanel'
 import { Icon } from '@/components/Icon'
-import { Badge, Card, SectionTitle, Spinner, Stat } from '@/components/ui'
+import { Badge, Card, SectionTitle, SegmentedControl, Spinner, Stat } from '@/components/ui'
 import { dateTime, duration, relativeTime } from '@/lib/format'
 import { useAuth } from '@/lib/auth'
 import { useToast } from '@/lib/toast'
 
+const TABS = [
+  { value: 'catalogue', label: 'Catalogue' },
+  { value: 'traffic', label: 'Traffic' },
+  { value: 'shelf', label: 'Used copies' },
+  { value: 'shops', label: 'Shops' },
+  { value: 'accounts', label: 'Accounts' },
+  { value: 'instance', label: 'Instance' },
+]
+
 export function AdminPage() {
   const { user } = useAuth()
+  // Remembered, because an administrator who came here to watch the crawler
+  // comes back to watch the crawler, and landing on Accounts every time is a
+  // small tax on the thing they actually do.
+  const [tab, setTab] = useState(() => {
+    try {
+      const saved = localStorage.getItem('admin:tab')
+      return TABS.some((t) => t.value === saved) ? (saved as string) : 'catalogue'
+    } catch {
+      return 'catalogue'
+    }
+  })
+
+  function chooseTab(next: string) {
+    setTab(next)
+    try {
+      localStorage.setItem('admin:tab', next)
+    } catch {
+      // A private window refuses this; the choice still holds for this visit.
+    }
+  }
   const toast = useToast()
   const queryClient = useQueryClient()
 
@@ -77,8 +112,54 @@ export function AdminPage() {
         />
       </div>
 
-      <CatalogPanel />
+      <SegmentedControl value={tab} onChange={chooseTab} options={TABS} />
 
+      {tab === 'catalogue' && <CatalogPanel />}
+      {tab === 'traffic' && <TrafficPanels />}
+      {tab === 'shelf' && <ShelfPanels />}
+      {tab === 'instance' && (
+        <>
+          <MaintenancePanels />
+      <section>
+        <SectionTitle
+          title="Instance configuration"
+          icon="settings"
+          subtitle="Read-only. These come from environment variables."
+        />
+        <Card className="p-4">
+          {!status.data?.webpush_configured && (
+            <div className="mb-4 flex flex-wrap items-center gap-3 rounded-control border border-warning/40 bg-warning/10 p-3">
+              <Icon name="alertTriangle" className="h-4 w-4 shrink-0 text-warning" />
+              <p className="flex-1 text-sm">
+                Browser push is unavailable because no VAPID keys are set.
+              </p>
+              <button
+                onClick={() => vapid.mutate()}
+                disabled={vapid.isPending}
+                className="btn-ghost text-sm"
+              >
+                {vapid.isPending && <Spinner className="h-3.5 w-3.5" />}
+                Generate and copy
+              </button>
+            </div>
+          )}
+
+          <dl className="grid gap-x-6 gap-y-2 text-sm sm:grid-cols-2">
+            {Object.entries(settings.data?.detail ?? {}).map(([key, value]) => (
+              <div key={key} className="flex justify-between gap-4 border-b border-line/60 py-1.5">
+                <dt className="text-muted">{key.replace(/_/g, ' ')}</dt>
+                <dd className="truncate font-mono text-xs tabular-nums">
+                  {typeof value === 'boolean' ? (value ? 'yes' : 'no') : String(value || '—')}
+                </dd>
+              </div>
+            ))}
+          </dl>
+        </Card>
+      </section>
+        </>
+      )}
+      {tab === 'shops' && (
+        <>
       <section>
         <SectionTitle title="Shops" icon="link" subtitle="Upstream health and rate limits" />
         <div className="grid gap-3 sm:grid-cols-2">
@@ -125,7 +206,6 @@ export function AdminPage() {
           ))}
         </div>
       </section>
-
       <section>
         <SectionTitle
           title="Exchange rates"
@@ -167,7 +247,10 @@ export function AdminPage() {
           )}
         </Card>
       </section>
-
+        </>
+      )}
+      {tab === 'accounts' && (
+        <>
       <section>
         <SectionTitle title="Accounts" icon="user" subtitle={`${users.data?.length ?? 0} registered`} />
         <Card className="scroll-x">
@@ -229,43 +312,8 @@ export function AdminPage() {
           </table>
         </Card>
       </section>
-
-      <section>
-        <SectionTitle
-          title="Instance configuration"
-          icon="settings"
-          subtitle="Read-only. These come from environment variables."
-        />
-        <Card className="p-4">
-          {!status.data?.webpush_configured && (
-            <div className="mb-4 flex flex-wrap items-center gap-3 rounded-control border border-warning/40 bg-warning/10 p-3">
-              <Icon name="alertTriangle" className="h-4 w-4 shrink-0 text-warning" />
-              <p className="flex-1 text-sm">
-                Browser push is unavailable because no VAPID keys are set.
-              </p>
-              <button
-                onClick={() => vapid.mutate()}
-                disabled={vapid.isPending}
-                className="btn-ghost text-sm"
-              >
-                {vapid.isPending && <Spinner className="h-3.5 w-3.5" />}
-                Generate and copy
-              </button>
-            </div>
-          )}
-
-          <dl className="grid gap-x-6 gap-y-2 text-sm sm:grid-cols-2">
-            {Object.entries(settings.data?.detail ?? {}).map(([key, value]) => (
-              <div key={key} className="flex justify-between gap-4 border-b border-line/60 py-1.5">
-                <dt className="text-muted">{key.replace(/_/g, ' ')}</dt>
-                <dd className="truncate font-mono text-xs tabular-nums">
-                  {typeof value === 'boolean' ? (value ? 'yes' : 'no') : String(value || '—')}
-                </dd>
-              </div>
-            ))}
-          </dl>
-        </Card>
-      </section>
+        </>
+      )}
     </div>
   )
 }

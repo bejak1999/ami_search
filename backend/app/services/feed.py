@@ -360,22 +360,56 @@ def build(db: Session, user: User, provider: str | None = None) -> list[Rail]:
             )
         )
 
-    stmt = base().where(
+    # Two rails, not one with a switch. The same figure ranks completely
+    # differently under each and both readings are worth having: 12,000 down
+    # to 6,000 is the better bargain, 60,000 down to 45,000 is the larger sum
+    # of money. Ranked independently of one another, so a figure that is both
+    # is allowed to appear in both, but each still hides what earlier rails
+    # have already shown.
+    discount_seen = set(seen)
+
+    priced = (
         Item.list_price.is_not(None),
         Item.list_price > 0,
-        Item.current_price <= Item.list_price * 0.6,
-    ).order_by((Item.current_price / func.nullif(Item.list_price, 0)).asc())
-    items = _fetch(db, stmt, seen)
+        Item.current_price.is_not(None),
+        Item.current_price < Item.list_price,
+    )
+
+    stmt = (
+        base()
+        .where(*priced, Item.current_price <= Item.list_price * 0.6)
+        .order_by((Item.current_price / func.nullif(Item.list_price, 0)).asc())
+    )
+    items = _fetch(db, stmt, discount_seen)
     if items:
         seen.update(i.id for i in items)
         rails.append(
             Rail(
-                key="heavily_discounted",
-                title="Well under list price",
-                subtitle="At least 40% off what the maker asked",
+                key="discount_percent",
+                title="Greatest discount",
+                subtitle="Furthest below list price as a share of it",
                 icon="yen",
                 items=items,
                 explore={"min_discount_pct": 40, "sort": "discount"},
+            )
+        )
+
+    stmt = (
+        base()
+        .where(*priced)
+        .order_by((Item.list_price - Item.current_price).desc())
+    )
+    items = _fetch(db, stmt, discount_seen)
+    if items:
+        seen.update(i.id for i in items)
+        rails.append(
+            Rail(
+                key="discount_amount",
+                title="Greatest saving",
+                subtitle="Largest sum off the list price, in yen",
+                icon="down",
+                items=items,
+                explore={"sort": "saving"},
             )
         )
 

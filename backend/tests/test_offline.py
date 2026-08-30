@@ -3488,6 +3488,207 @@ def test_head_slice_reads_only_its_front() -> None:
     db.close()
 
 
+def test_copy_codes_are_not_product_codes() -> None:
+    print("\n== A copy and the product it belongs to are addressed differently ==")
+    from app.providers.amiami import is_copy_code
+
+    # FIGURE-184067-R is the product; FIGURE-184067-R124 is the 124th used
+    # copy of it. Asked for a copy under "gcode" the API answers that it has
+    # no such item, and asked for a product under "scode" it rejects the
+    # request - so neither substitutes for the other in either direction.
+    for code in ("FIGURE-184067-R124", "FIGURE-012382-R99", "FIGURE-200001-R1"):
+        check(f"{code} is one copy", is_copy_code(code))
+    for code in ("FIGURE-184067-R", "FIGURE-184067", "FIG-MOE-1524-R", "HOB-FIG-2390-R"):
+        check(f"{code} is a product", not is_copy_code(code))
+    check("nothing is not a copy", not is_copy_code(""))
+
+
+def test_shop_links_use_the_right_key() -> None:
+    print("\n== Links out to the shop carry the key that resolves ==")
+    import re
+
+    # The rule the frontend applies, restated here so a change to one without
+    # the other is caught. Every link out of the buying-choices list and the
+    # shelf-life table used gcode for both, so none of them resolved.
+    def shop_url(code: str) -> str:
+        key = "scode" if re.search(r"-R\d+$", code) else "gcode"
+        return f"https://www.amiami.com/eng/detail/?{key}={code}"
+
+    check(
+        "a copy links by scode",
+        "scode=FIGURE-184067-R124" in shop_url("FIGURE-184067-R124"),
+        shop_url("FIGURE-184067-R124"),
+    )
+    check(
+        "a product links by gcode",
+        "gcode=FIGURE-184067-R" in shop_url("FIGURE-184067-R"),
+        shop_url("FIGURE-184067-R"),
+    )
+
+
+def test_a_watch_waiting_is_not_a_watch_failing() -> None:
+    print("\n== A watch on something out of stock is not broken ==")
+    from app.db import SessionLocal, init_db
+    from app.models import User, Watch, WatchKind
+    from app.services import health
+
+    init_db()
+    db = SessionLocal()
+    db.query(Watch).delete()
+    db.commit()
+    user = db.query(User).first()
+    if user is None:
+        user = User(email="recap@example.com", password_hash="x", is_active=True)
+        db.add(user)
+        db.flush()
+
+    # AmiAmi has no listing for a used figure until somebody sells one back,
+    # which is precisely what this watch is waiting for. It used to count as
+    # an error, reach five, and be reported as failing every single morning.
+    waiting = Watch(
+        user_id=user.id,
+        kind=WatchKind.item,
+        provider="amiami",
+        label="Waiting for a copy",
+        item_code="FIGURE-999999-R",
+        enabled=True,
+        consecutive_errors=40,
+        last_success_at=datetime.now(timezone.utc) - timedelta(days=3),
+    )
+    # One that has never resolved is a different matter: a mistyped code does
+    # not fix itself, and nothing else would ever say so.
+    never = Watch(
+        user_id=user.id,
+        kind=WatchKind.item,
+        provider="amiami",
+        label="Typo",
+        item_code="FIGURE-NOT-A-CODE",
+        enabled=True,
+        consecutive_errors=6,
+        last_success_at=None,
+    )
+    db.add_all([waiting, never])
+    db.commit()
+
+    issues = {i.key: i for i in health.collect_issues(db)}
+    reported = issues.get("watches:failing")
+    check("something is reported", reported is not None, sorted(issues))
+    if reported:
+        check(
+            "the never-resolved one is named",
+            "Typo" in reported.detail,
+            reported.detail,
+        )
+        check(
+            "and the waiting one is not",
+            "Waiting for a copy" not in reported.detail,
+            reported.detail,
+        )
+        check("only one is counted", "1 watch" in reported.title, reported.title)
+
+    db.query(Watch).delete()
+    db.commit()
+    db.close()
+
+
+def test_linking_estimate_describes_the_job_that_runs() -> None:
+    print("\n== The cross-reference estimate matches the job doing the work ==")
+    from app.config import settings
+    from app.services.enrich import throughput_per_minute
+
+    # The setting is 0 by default, meaning "work it out from the rate and the
+    # interval". The estimate read that raw value, so max(1, 0) described one
+    # item every five minutes against a job doing twenty-five - and quoted 203
+    # days where the real figure was near eight.
+    check("the raw setting is a sentinel", settings.mfc_batch_size == 0)
+    check(
+        "and the effective size is far larger",
+        settings.mfc_effective_batch_size > 1,
+        settings.mfc_effective_batch_size,
+    )
+
+    rate = throughput_per_minute()
+    check("throughput is reported in items", rate > 0, rate)
+    check(
+        "and never claims more than the request budget allows",
+        rate <= settings.mfc_requests_per_minute,
+        (rate, settings.mfc_requests_per_minute),
+    )
+
+
+def test_daily_recap_counts_copies_not_products() -> None:
+    print("\n== The daily recap counts individual copies ==")
+    from app.db import SessionLocal, init_db
+    from app.models import Condition, Item, Listing, ListingOutcome, ListingStatus
+    from app.services.shelflife import daily_recap
+
+    init_db()
+    db = SessionLocal()
+    db.query(Listing).delete()
+    db.query(Item).delete()
+    db.commit()
+
+    # One product, several copies moving under it. A product-level count would
+    # see nothing happen here at all.
+    item = Item(provider="amiami", code="R-1", name="Used figure",
+                condition=Condition.preowned)
+    db.add(item)
+    db.flush()
+
+    now = datetime.now(timezone.utc)
+    for n in range(5):
+        db.add(Listing(item_id=item.id, code=f"R-1-A{n}", currency="JPY",
+                       status=ListingStatus.live, first_seen_at=now - timedelta(days=1),
+                       last_seen_at=now))
+    for n in range(3):
+        db.add(Listing(item_id=item.id, code=f"R-1-S{n}", currency="JPY",
+                       status=ListingStatus.gone, first_seen_at=now - timedelta(days=6),
+                       last_seen_at=now - timedelta(days=1),
+                       vanished_before=now - timedelta(days=1),
+                       outcome=ListingOutcome.sold))
+    db.add(Listing(item_id=item.id, code="R-1-W0", currency="JPY",
+                   status=ListingStatus.gone, first_seen_at=now - timedelta(days=6),
+                   last_seen_at=now - timedelta(days=1),
+                   vanished_before=now - timedelta(days=1),
+                   outcome=ListingOutcome.withdrawn))
+    db.commit()
+
+    out = daily_recap(db, days=4)
+    by_date = {row["date"]: row for row in out["days"]}
+    yesterday = (now - timedelta(days=1)).date().isoformat()
+    row = by_date[yesterday]
+
+    check("arrivals are counted per copy", row["arrived"] == 5, row)
+    check("sales are counted per copy", row["sold"] == 3, row)
+    check("a withdrawal is not called a sale", row["withdrawn"] == 1, row)
+    check("departures are the sum of both", row["gone"] == 4, row)
+    check("and the net is the difference", row["net"] == 1, row)
+
+    check("live copies are counted", out["live_listings"] == 5, out["live_listings"])
+    check("every day in the window is present", len(out["days"]) == 4, len(out["days"]))
+    check(
+        "quiet days read as quiet rather than missing",
+        all(d["arrived"] == 0 for date, d in by_date.items() if date != yesterday),
+    )
+    check("newest day first", out["days"][0]["date"] > out["days"][-1]["date"])
+
+    # Today is still happening, so averaging it against whole days would make
+    # every morning look like a collapse.
+    today = now.date().isoformat()
+    complete = [d for d in out["days"] if d["date"] != today]
+    check(
+        "the typical figure excludes today",
+        abs(out["typical_arrivals"] - sum(d["arrived"] for d in complete) / len(complete))
+        < 0.05,
+        out["typical_arrivals"],
+    )
+
+    db.query(Listing).delete()
+    db.query(Item).delete()
+    db.commit()
+    db.close()
+
+
 def main() -> int:
     test_url_parsing()
     test_release_dates()
@@ -3550,6 +3751,11 @@ def main() -> int:
     test_tag_search_reaches_past_the_popular_ones()
     test_price_history_follows_the_cheapest_copy()
     test_head_slice_reads_only_its_front()
+    test_copy_codes_are_not_product_codes()
+    test_shop_links_use_the_right_key()
+    test_a_watch_waiting_is_not_a_watch_failing()
+    test_linking_estimate_describes_the_job_that_runs()
+    test_daily_recap_counts_copies_not_products()
     test_settings()
 
     print(f"\n{'=' * 46}\n  {PASS} passed, {FAIL} failed\n{'=' * 46}")

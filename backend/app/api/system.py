@@ -251,6 +251,8 @@ def catalog_progress(
     detail["mfc"]["enabled"] = settings.mfc_enabled
     detail["mfc"]["requests_per_minute"] = settings.mfc_requests_per_minute
     detail["mfc"]["eta_seconds"] = enrich.eta_seconds(db)
+    detail["mfc"]["items_per_minute"] = enrich.throughput_per_minute()
+    detail["mfc"]["batch_size"] = settings.mfc_effective_batch_size
     return MessageResponse(message="ok", detail=detail)
 
 
@@ -272,6 +274,23 @@ def run_catalog_crawl(
         ),
         detail=outcome.as_dict(),
     )
+
+
+@admin.get("/recap", response_model=MessageResponse)
+def preowned_recap(
+    days: int = Query(default=14, ge=2, le=90),
+    db: Session = Depends(get_db),
+    _admin: User = Depends(admin_user),
+) -> MessageResponse:
+    """Used copies arriving and leaving, day by day.
+
+    Counted over individual copies rather than products: one product can take
+    in five copies in a morning and sell three by evening without ever
+    changing whether it is listed.
+    """
+    from ..services import shelflife
+
+    return MessageResponse(message="ok", detail=shelflife.daily_recap(db, days))
 
 
 @admin.get("/load", response_model=MessageResponse)

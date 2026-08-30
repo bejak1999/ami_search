@@ -287,7 +287,12 @@ def eta_seconds(db: Session) -> int | None:
     if pending <= 0:
         return None
 
-    batch = max(1, settings.mfc_batch_size)
+    # The size the job actually uses, not the raw setting. That setting is 0
+    # by default, meaning "work it out from the rate and the interval", and
+    # reading it directly gave max(1, 0) = one item per five minutes - so the
+    # estimate described a job running twenty-five times slower than the one
+    # doing the work, and quoted 203 days against a real figure near eight.
+    batch = max(1, settings.mfc_effective_batch_size)
     interval = max(1, settings.mfc_run_interval_minutes) * 60
     # Each item costs one request when the barcode hits, two when it falls
     # back to a title search, so assume something in between.
@@ -296,3 +301,23 @@ def eta_seconds(db: Session) -> int | None:
         interval, batch * requests_per_item * (60.0 / max(0.1, settings.mfc_requests_per_minute))
     )
     return int(pending / batch * seconds_per_batch)
+
+
+def throughput_per_minute() -> float:
+    """Items an hour the linker is actually getting through, as configured.
+
+    The panel used to show the request allowance next to the estimate, which
+    are different numbers and looked like a contradiction: ten a minute
+    permitted, against a backlog said to take half a year. This is the one
+    that explains the other.
+    """
+    from ..config import settings
+
+    batch = max(1, settings.mfc_effective_batch_size)
+    interval = max(1, settings.mfc_run_interval_minutes)
+    requests_per_item = 1.4
+    # Whichever binds first: the batch could be large enough that the rate
+    # limit stretches a pass beyond its own interval.
+    per_minute_by_schedule = batch / interval
+    per_minute_by_rate = settings.mfc_requests_per_minute / requests_per_item
+    return round(min(per_minute_by_schedule, per_minute_by_rate), 1)

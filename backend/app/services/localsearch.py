@@ -181,9 +181,18 @@ def _apply_sort(stmt: Select, sort: str) -> Select:
     if sort == "price_desc":
         return stmt.order_by(Item.current_price.desc().nulls_last(), Item.id.desc())
     if sort == "discount":
-        # Largest gap between the shop's own list price and what it asks now.
+        # Furthest below the shop's own list price, as a share of it.
         return stmt.order_by(
             (Item.current_price / func.nullif(Item.list_price, 0)).asc().nulls_last(),
+            Item.id.desc(),
+        )
+    if sort == "saving":
+        # The same comparison read as money rather than as a proportion. A
+        # different question with a different answer: the biggest percentage
+        # off is usually a cheap figure, the biggest sum saved an expensive
+        # one, and neither ranking is a substitute for the other.
+        return stmt.order_by(
+            (Item.list_price - Item.current_price).desc().nulls_last(),
             Item.id.desc(),
         )
     if sort == "lowest_ever":

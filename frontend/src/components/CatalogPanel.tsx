@@ -7,7 +7,7 @@ import { ActivityPanel } from './ActivityPanel'
 import { BackupPanel } from './BackupPanel'
 import { LoadPanel } from './LoadPanel'
 import { Icon } from './Icon'
-import { Badge, Card, Field, SectionTitle, Spinner, Toggle } from './ui'
+import { Badge, Card, Field, SectionTitle, SegmentedControl, Spinner, Toggle } from './ui'
 import clsx from 'clsx'
 
 function Bar({ percent, tone = 'accent' }: { percent: number; tone?: 'accent' | 'positive' }) {
@@ -897,7 +897,14 @@ export function CatalogPanel() {
             {[
               ['Still queued', (mfc.pending_items ?? 0).toLocaleString('en-GB')],
               ['Known tags', (mfc.tags ?? 0).toLocaleString('en-GB')],
-              ['Rate', `${mfc.requests_per_minute ?? '—'} req/min`],
+              // Items an hour, not the request allowance. Those are different
+              // numbers and showing the allowance next to the estimate read as
+              // a contradiction: ten requests a minute permitted, against a
+              // backlog said to take half a year.
+              [
+                'Working through',
+                `${mfc.items_per_minute ?? '—'}/min · ${mfc.batch_size ?? '—'} per pass`,
+              ],
               ['Finishes in', eta(mfc.eta_seconds)],
             ].map(([label, value]) => (
               <div key={label as string} className="flex justify-between gap-3">
@@ -914,11 +921,6 @@ export function CatalogPanel() {
         </Card>
       </div>
 
-      <LoadPanel />
-      <ActivityPanel />
-      <BehaviourPanel />
-      <BackupPanel />
-      <ShelfLifePanel />
       <ImageCache />
       <MfcSession />
     </section>
@@ -1071,6 +1073,201 @@ function ImageCache() {
           <dd className="truncate font-mono text-[11px]">{d.path}</dd>
         </div>
       </dl>
+    </Card>
+  )
+}
+
+
+/** Live traffic and when the shop is busy. */
+export function TrafficPanels() {
+  return (
+    <section className="space-y-4">
+      <SectionTitle
+        title="Upstream traffic"
+        icon="chart"
+        subtitle="What the shared request budget is being spent on, and when the shop is worth asking"
+      />
+      <LoadPanel />
+      <ActivityPanel />
+    </section>
+  )
+}
+
+/** Shelf-life tracking and the daily movement it produces. */
+export function ShelfPanels() {
+  return (
+    <section className="space-y-4">
+      <SectionTitle
+        title="Used copies"
+        icon="clock"
+        subtitle="Following individual second-hand listings, so a copy that sells becomes a record rather than a gap"
+      />
+      <RecapPanel />
+      <ShelfLifePanel />
+    </section>
+  )
+}
+
+/** Instance behaviour and the backup tools. */
+export function MaintenancePanels() {
+  return (
+    <section className="space-y-4">
+      <SectionTitle
+        title="Instance"
+        icon="settings"
+        subtitle="How this instance behaves, and how to carry it somewhere else"
+      />
+      <BehaviourPanel />
+      <BackupPanel />
+    </section>
+  )
+}
+
+/**
+ * Used copies arriving and leaving, day by day.
+ *
+ * Counted over individual copies rather than products, because that is what
+ * the shop moves: one product can take in five copies in a morning and sell
+ * three by evening without ever changing whether it is listed.
+ */
+function RecapPanel() {
+  const [days, setDays] = useState('14')
+
+  const recap = useQuery({
+    queryKey: ['admin', 'recap', days],
+    queryFn: () => api.admin.recap(Number(days)),
+    refetchInterval: 300_000,
+  })
+
+  const d = recap.data?.detail as
+    | {
+        days: {
+          date: string
+          arrived: number
+          sold: number
+          withdrawn: number
+          gone: number
+          net: number
+        }[]
+        live_listings: number
+        typical_arrivals: number
+        typical_departures: number
+      }
+    | undefined
+
+  const busiest = Math.max(1, ...(d?.days ?? []).map((r) => Math.max(r.arrived, r.gone)))
+
+  return (
+    <Card className="p-4">
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div className="min-w-0">
+          <h3 className="flex items-center gap-2 text-sm font-semibold">
+            <Icon name="inbox" className="h-4 w-4 text-accent" />
+            Day by day
+          </h3>
+          <p className="mt-1 max-w-2xl text-xs leading-relaxed text-muted">
+            Individual used copies, not products. A product can take in five copies in a
+            morning and sell three by evening without ever changing whether it is listed, so
+            counting products would show none of this.
+          </p>
+        </div>
+        <SegmentedControl
+          value={days}
+          onChange={setDays}
+          options={[
+            { value: '7', label: '7 days' },
+            { value: '14', label: '14 days' },
+            { value: '30', label: '30 days' },
+          ]}
+        />
+      </div>
+
+      {d && (
+        <>
+          <dl className="mt-4 grid gap-x-6 gap-y-1.5 text-xs sm:grid-cols-3">
+            <div className="flex justify-between gap-3">
+              <dt className="text-muted">On sale now</dt>
+              <dd className="tabular-nums">{d.live_listings.toLocaleString('en-GB')}</dd>
+            </div>
+            <div className="flex justify-between gap-3">
+              <dt className="text-muted">Typical arrivals</dt>
+              <dd className="tabular-nums text-positive">+{d.typical_arrivals}/day</dd>
+            </div>
+            <div className="flex justify-between gap-3">
+              <dt className="text-muted">Typical departures</dt>
+              <dd className="tabular-nums text-warning">−{d.typical_departures}/day</dd>
+            </div>
+          </dl>
+
+          <div className="mt-4 overflow-x-auto">
+            <table className="w-full text-[11px] tabular-nums">
+              <thead className="text-faint">
+                <tr className="text-left">
+                  <th className="pb-1 pr-3 font-normal">Day</th>
+                  <th className="pb-1 pr-3 text-right font-normal">Arrived</th>
+                  <th className="pb-1 pr-3 text-right font-normal">Sold</th>
+                  <th className="pb-1 pr-3 text-right font-normal">Withdrawn</th>
+                  <th className="pb-1 pr-3 text-right font-normal">Net</th>
+                  <th className="pb-1 font-normal">In / out</th>
+                </tr>
+              </thead>
+              <tbody>
+                {d.days.map((row) => (
+                  <tr key={row.date} className="border-t border-line/60">
+                    <td className="py-1 pr-3 text-muted">
+                      {new Date(row.date).toLocaleDateString('en-GB', {
+                        day: '2-digit',
+                        month: 'short',
+                      })}
+                    </td>
+                    <td className="py-1 pr-3 text-right">
+                      {row.arrived || <span className="text-faint">0</span>}
+                    </td>
+                    <td className="py-1 pr-3 text-right">
+                      {row.sold || <span className="text-faint">0</span>}
+                    </td>
+                    <td className="py-1 pr-3 text-right">
+                      {row.withdrawn || <span className="text-faint">0</span>}
+                    </td>
+                    <td
+                      className={clsx(
+                        'py-1 pr-3 text-right font-medium',
+                        row.net > 0 ? 'text-positive' : row.net < 0 ? 'text-warning' : 'text-faint',
+                      )}
+                    >
+                      {row.net > 0 ? `+${row.net}` : row.net}
+                    </td>
+                    <td className="py-1">
+                      {/* Two bars from a shared middle, so a day's balance
+                          reads at a glance without doing the subtraction. */}
+                      <div className="flex h-2 items-center gap-0.5">
+                        <div className="flex flex-1 justify-end">
+                          <div
+                            className="h-full rounded-l-sm bg-warning"
+                            style={{ width: `${(row.gone / busiest) * 100}%` }}
+                          />
+                        </div>
+                        <div className="flex flex-1">
+                          <div
+                            className="h-full rounded-r-sm bg-positive"
+                            style={{ width: `${(row.arrived / busiest) * 100}%` }}
+                          />
+                        </div>
+                      </div>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+
+          <p className="mt-3 text-[11px] leading-relaxed text-faint">
+            &ldquo;Sold&rdquo; means the copy went while its product stayed on sale. When every
+            copy of a product disappears at once that is as easily the shop withdrawing it, so
+            it is recorded as the weaker claim rather than counted as sales.
+          </p>
+        </>
+      )}
     </Card>
   )
 }

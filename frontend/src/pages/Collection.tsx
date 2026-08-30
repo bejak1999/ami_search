@@ -1,10 +1,11 @@
-import { useState } from 'react'
+import { useMemo, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { api } from '@/api/client'
 import type { CollectionStatus } from '@/api/types'
 import { Icon } from '@/components/Icon'
-import { Badge, Card, EmptyState, Field, Modal, SegmentedControl, Skeleton, Spinner, Stat } from '@/components/ui'
+import { Badge, Card, EmptyState, Field, Modal, SegmentedControl, Skeleton, Spinner, Stat, Toggle } from '@/components/ui'
+import { ItemCard } from '@/components/ItemCard'
 import { money, relativeTime, tidyName } from '@/lib/format'
 import { useToast } from '@/lib/toast'
 import clsx from 'clsx'
@@ -25,6 +26,26 @@ export function CollectionPage() {
   // Opens on the wishlist: what you are still hunting is the question worth
   // asking most often, and what you already own does not change day to day.
   const [status, setStatus] = useState<CollectionStatus>('wishlist')
+  // Remembered per browser: whichever way someone reads their collection, they
+  // read it that way every time, and re-picking it on every visit is a small
+  // irritation that never stops.
+  const [view, setView] = useState<'list' | 'grid'>(() => {
+    try {
+      return localStorage.getItem('collection:view') === 'grid' ? 'grid' : 'list'
+    } catch {
+      return 'list'
+    }
+  })
+  const [inStockOnly, setInStockOnly] = useState(false)
+
+  function chooseView(next: 'list' | 'grid') {
+    setView(next)
+    try {
+      localStorage.setItem('collection:view', next)
+    } catch {
+      // A private window refuses this. The choice still applies to this visit.
+    }
+  }
   const [adding, setAdding] = useState(false)
   const [addInput, setAddInput] = useState('')
   const [addStatus, setAddStatus] = useState<CollectionStatus>('owned')
@@ -34,6 +55,14 @@ export function CollectionPage() {
     queryFn: () => api.collection.list({ status }),
   })
   const summary = useQuery({ queryKey: ['collection', 'summary'], queryFn: api.collection.summary })
+
+  // Filtered here rather than by the server: a collection is small enough that
+  // a round trip per toggle buys nothing, and the entries are already loaded.
+  const shown = useMemo(() => {
+    const all = entries.data ?? []
+    if (!inStockOnly) return all
+    return all.filter((entry) => entry.item.in_stock)
+  }, [entries.data, inStockOnly])
 
   const update = useMutation({
     mutationFn: ({ id, body }: { id: number; body: Record<string, unknown> }) =>
@@ -114,7 +143,32 @@ export function CollectionPage() {
         </div>
       )}
 
-      <SegmentedControl value={status} onChange={setStatus} options={STATUSES} />
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <SegmentedControl value={status} onChange={setStatus} options={STATUSES} />
+        <div className="flex items-center gap-2">
+          <Toggle
+            checked={inStockOnly}
+            onChange={setInStockOnly}
+            label="In stock only"
+          />
+          <SegmentedControl
+            value={view}
+            onChange={(next) => chooseView(next as 'list' | 'grid')}
+            options={[
+              { value: 'list', label: 'List' },
+              { value: 'grid', label: 'Grid' },
+            ]}
+          />
+        </div>
+      </div>
+
+      {inStockOnly && shown.length === 0 && (entries.data?.length ?? 0) > 0 && (
+        <p className="rounded-control border border-line bg-raised p-3 text-xs text-faint">
+          Nothing on this list is buyable right now. AmiAmi deletes a pre-owned listing when
+          it sells, so a wishlist of used figures is empty here most of the time — that is
+          what the watches are for.
+        </p>
+      )}
 
       {entries.isLoading ? (
         <div className="space-y-2">
@@ -122,9 +176,19 @@ export function CollectionPage() {
             <Skeleton key={index} className="h-24 rounded-card" />
           ))}
         </div>
-      ) : entries.data?.length ? (
+      ) : view === 'grid' && shown.length ? (
+        <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5">
+          {shown.map((entry) => (
+            <ItemCard
+              key={entry.id}
+              item={entry.item}
+              onOpen={() => entry.item.id && navigate(`/item/${entry.item.id}`)}
+            />
+          ))}
+        </div>
+      ) : shown.length ? (
         <div className="space-y-2">
-          {entries.data.map((entry) => (
+          {shown.map((entry) => (
             <Card key={entry.id} hover className="flex items-start gap-4 p-3.5">
               <button
                 onClick={() => entry.item.id && navigate(`/item/${entry.item.id}`)}

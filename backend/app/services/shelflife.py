@@ -37,7 +37,7 @@ import re
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from ..models import (
@@ -719,4 +719,99 @@ def summary(db: Session, item: Item, now: datetime | None = None) -> dict:
             (_as_aware(row.first_seen_at) for row in listings),
             default=None,
         ),
+    }
+
+
+def daily_recap(db: Session, days: int = 14) -> dict:
+    """Pre-owned copies arriving and leaving, day by day.
+
+    Counted over individual copies rather than products, because that is what
+    the shop actually moves: one product can take in five copies in a morning
+    and sell three of them by evening without ever changing whether it is
+    "listed". A product-level count would record none of that.
+
+    Departures are split by what we can honestly claim. A copy that vanished
+    while its product stayed on sale was sold; a whole product disappearing at
+    once is as easily a withdrawal by the shop, and is recorded as the weaker
+    claim - see reconcile().
+
+    Days with nothing at all are still returned, so a quiet day reads as a
+    quiet day rather than as a gap in the record.
+    """
+    now = utcnow()
+    since = (now - timedelta(days=days - 1)).replace(
+        hour=0, minute=0, second=0, microsecond=0
+    )
+
+    def day_of(moment: datetime | None) -> str | None:
+        if moment is None:
+            return None
+        if moment.tzinfo is None:
+            moment = moment.replace(tzinfo=timezone.utc)
+        return moment.date().isoformat()
+
+    buckets: dict[str, dict] = {}
+    for offset in range(days):
+        key = (since + timedelta(days=offset)).date().isoformat()
+        buckets[key] = {
+            "date": key,
+            "arrived": 0,
+            "sold": 0,
+            "withdrawn": 0,
+            "gone": 0,
+            "net": 0,
+        }
+
+    arrivals = db.execute(
+        select(Listing.first_seen_at).where(Listing.first_seen_at >= since)
+    ).scalars()
+    for moment in arrivals:
+        key = day_of(moment)
+        if key in buckets:
+            buckets[key]["arrived"] += 1
+
+    departures = db.execute(
+        select(Listing.vanished_before, Listing.outcome).where(
+            Listing.vanished_before.is_not(None), Listing.vanished_before >= since
+        )
+    ).all()
+    for moment, outcome in departures:
+        key = day_of(moment)
+        if key not in buckets:
+            continue
+        buckets[key]["gone"] += 1
+        if outcome == ListingOutcome.sold:
+            buckets[key]["sold"] += 1
+        else:
+            buckets[key]["withdrawn"] += 1
+
+    rows = []
+    for key in sorted(buckets, reverse=True):
+        entry = buckets[key]
+        entry["net"] = entry["arrived"] - entry["gone"]
+        rows.append(entry)
+
+    live = int(
+        db.execute(
+            select(func.count(Listing.id)).where(Listing.status == ListingStatus.live)
+        ).scalar_one()
+    )
+    # Yesterday rather than today: today is still happening, and comparing a
+    # part-day against whole ones makes every morning look like a collapse.
+    complete = [r for r in rows if r["date"] != now.date().isoformat()]
+    typical_in = (
+        round(sum(r["arrived"] for r in complete) / len(complete), 1) if complete else 0.0
+    )
+    typical_out = (
+        round(sum(r["gone"] for r in complete) / len(complete), 1) if complete else 0.0
+    )
+
+    return {
+        "days": rows,
+        "live_listings": live,
+        "typical_arrivals": typical_in,
+        "typical_departures": typical_out,
+        "tracking_since": db.execute(
+            select(func.min(Listing.first_seen_at))
+        ).scalar_one_or_none(),
     }
