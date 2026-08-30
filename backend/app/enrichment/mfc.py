@@ -243,13 +243,17 @@ class MfcClient:
 
         self.breaker.check()
         self.bucket.acquire(timeout=60.0)
+        from ..services import reqlog
+
         try:
             response = self.session.get(url)
         except Exception as exc:  # noqa: BLE001
             self.breaker.record_failure()
+            reqlog.record("mfc", ok=False)
             raise MfcError(f"MyFigureCollection request failed: {exc}") from exc
 
         self.requests_made += 1
+        reqlog.record("mfc", ok=response.status_code < 400)
         if response.status_code == 404:
             self.breaker.record_success()
             if not allow_missing:

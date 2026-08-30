@@ -5,6 +5,7 @@ import { useToast } from '@/lib/toast'
 import { duration, relativeTime } from '@/lib/format'
 import { ActivityPanel } from './ActivityPanel'
 import { BackupPanel } from './BackupPanel'
+import { LoadPanel } from './LoadPanel'
 import { Icon } from './Icon'
 import { Badge, Card, Field, SectionTitle, Spinner, Toggle } from './ui'
 import clsx from 'clsx'
@@ -365,19 +366,10 @@ function Slice({
             label="Re-check every"
             hint="How long to wait before reading the newest pages again."
           >
-            <div className="flex items-center gap-2">
-              <input
-                type="number"
-                min={5}
-                max={10080}
-                defaultValue={slice.recheck_minutes}
-                onBlur={(e) =>
-                  save.mutate({ recheck_interval_minutes: Number(e.target.value) })
-                }
-                className="field w-24 tabular-nums"
-              />
-              <span className="text-xs text-faint">minutes</span>
-            </div>
+            <Interval
+              minutes={slice.recheck_minutes}
+              onChange={(minutes) => save.mutate({ recheck_interval_minutes: minutes })}
+            />
           </Field>
           <p className="text-[11px] leading-relaxed text-faint sm:col-span-3">
             Every pass reads the whole slice. There used to be a shallow
@@ -387,6 +379,7 @@ function Slice({
             to when a listing was added, so the shallow pass re-read the same
             products for ever and never saw the rest.
           </p>
+          <RunLog runs={slice.recent_runs} />
           <p className="text-[11px] leading-relaxed text-faint sm:col-span-3">
             {slice.cycles_completed.toLocaleString('en-GB')} pass(es) so far,{' '}
             {slice.listings_checked.toLocaleString('en-GB')} listings checked in total. That
@@ -400,6 +393,163 @@ function Slice({
     </div>
   )
 }
+
+/**
+ * An interval in whichever unit reads naturally.
+ *
+ * Stored in minutes throughout, because that is what the scheduler compares
+ * against. Offered in days as well, since "every 14 days" is a schedule
+ * someone can picture and "every 20,160 minutes" is a number to be counted on
+ * fingers.
+ */
+function Interval({
+  minutes,
+  onChange,
+}: {
+  minutes: number
+  onChange: (minutes: number) => void
+}) {
+  const [unit, setUnit] = useState<'minutes' | 'hours' | 'days'>(
+    minutes % 1440 === 0 && minutes >= 1440
+      ? 'days'
+      : minutes % 60 === 0 && minutes >= 120
+        ? 'hours'
+        : 'minutes',
+  )
+  const per = unit === 'days' ? 1440 : unit === 'hours' ? 60 : 1
+  const [value, setValue] = useState(String(minutes / per))
+
+  function commit() {
+    const total = Math.round(Number(value) * per)
+    if (!Number.isFinite(total) || total <= 0) return
+    // The same bounds the server enforces, so a rejected value never looks
+    // accepted here first.
+    const clamped = Math.max(5, Math.min(total, 1440 * 90))
+    setValue(String(clamped / per))
+    if (clamped !== minutes) onChange(clamped)
+  }
+
+  return (
+    <div className="flex items-center gap-2">
+      <input
+        type="number"
+        min={unit === 'minutes' ? 5 : 1}
+        step={unit === 'minutes' ? 5 : 1}
+        value={value}
+        onChange={(e) => setValue(e.target.value)}
+        onBlur={commit}
+        className="field w-24 tabular-nums"
+      />
+      <select
+        value={unit}
+        onChange={(e) => {
+          // Keep the schedule, change only how it is written.
+          const next = e.target.value as 'minutes' | 'hours' | 'days'
+          const shown = minutes / (next === 'days' ? 1440 : next === 'hours' ? 60 : 1)
+          setUnit(next)
+          setValue(String(Number(shown.toFixed(2))))
+        }}
+        className="field w-24 text-xs"
+      >
+        <option value="minutes">minutes</option>
+        <option value="hours">hours</option>
+        <option value="days">days</option>
+      </select>
+    </div>
+  )
+}
+
+type Run = {
+  at: string
+  seconds: number
+  pages: number
+  items: number
+  new: number
+  changed: number
+  stopped: string | null
+  pages_per_minute: number | null
+  errors: number
+}
+
+/**
+ * What the last few runs of this slice actually managed.
+ *
+ * The pages-per-minute here is the speed while running, which is a different
+ * question from the pages-per-hour behind the sweep estimate: that one
+ * includes the hours spent waiting for a turn. A slice can be quick in this
+ * sense and still take a day to get round, and seeing both is what stops that
+ * looking like a contradiction.
+ */
+function RunLog({ runs }: { runs?: Run[] }) {
+  if (!runs || runs.length === 0) {
+    return (
+      <p className="text-[11px] text-faint sm:col-span-3">
+        No runs recorded yet. They appear here as the slice works.
+      </p>
+    )
+  }
+
+  return (
+    <div className="sm:col-span-3">
+      <p className="mb-1.5 text-[11px] font-medium text-muted">
+        Last {runs.length} run{runs.length === 1 ? '' : 's'}, newest first
+      </p>
+      <div className="overflow-x-auto">
+        <table className="w-full text-[11px] tabular-nums">
+          <thead className="text-faint">
+            <tr className="text-left">
+              <th className="pb-1 pr-3 font-normal">Finished</th>
+              <th className="pb-1 pr-3 font-normal">Ran for</th>
+              <th className="pb-1 pr-3 text-right font-normal">Pages</th>
+              <th className="pb-1 pr-3 text-right font-normal">Per min</th>
+              <th className="pb-1 pr-3 text-right font-normal">New</th>
+              <th className="pb-1 pr-3 text-right font-normal">Changed</th>
+              <th className="pb-1 font-normal">Ended because</th>
+            </tr>
+          </thead>
+          <tbody>
+            {runs.map((run) => (
+              <tr key={run.at} className="border-t border-line/60">
+                <td className="py-1 pr-3 text-muted">
+                  {new Date(run.at).toLocaleString('en-GB', {
+                    day: '2-digit',
+                    month: 'short',
+                    hour: '2-digit',
+                    minute: '2-digit',
+                  })}
+                </td>
+                <td className="py-1 pr-3 text-muted">{duration(run.seconds)}</td>
+                <td className="py-1 pr-3 text-right">{run.pages.toLocaleString('en-GB')}</td>
+                <td className="py-1 pr-3 text-right font-medium">
+                  {run.pages_per_minute?.toLocaleString('en-GB') ?? '\u2014'}
+                </td>
+                <td className="py-1 pr-3 text-right">
+                  {run.new > 0 ? (
+                    <span className="text-positive">+{run.new.toLocaleString('en-GB')}</span>
+                  ) : (
+                    <span className="text-faint">0</span>
+                  )}
+                </td>
+                <td className="py-1 pr-3 text-right">
+                  {run.changed > 0 ? (
+                    run.changed.toLocaleString('en-GB')
+                  ) : (
+                    <span className="text-faint">0</span>
+                  )}
+                </td>
+                <td className={clsx('py-1', run.errors > 0 ? 'text-warning' : 'text-faint')}>
+                  {run.stopped ?? 'finished the slice'}
+                  {run.errors > 0 && ` \u00b7 ${run.errors} error(s)`}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  )
+}
+
 
 /**
  * How much of the pre-owned catalogue is being followed copy by copy.
@@ -720,6 +870,7 @@ export function CatalogPanel() {
         </Card>
       </div>
 
+      <LoadPanel />
       <ActivityPanel />
       <BehaviourPanel />
       <BackupPanel />
@@ -815,21 +966,30 @@ function ImageCache() {
           </p>
           <Bar percent={d.percent_of_budget} tone={d.percent_of_budget > 90 ? 'accent' : 'positive'} />
           <p className="mt-1.5 text-[11px] text-faint">
-            {d.count.toLocaleString('en-GB')} photos, {bytes(d.average_bytes)} each on average
+            {d.downloaded.toLocaleString('en-GB')} files, {bytes(d.average_bytes)} each on
+            average
           </p>
         </div>
 
         <div>
           <p className="mb-1 flex items-baseline justify-between text-xs">
-            <span className="text-muted">Catalogue covered</span>
+            <span className="text-muted">Downloaded</span>
             <span className="font-medium tabular-nums">
-              {d.count.toLocaleString('en-GB')} / {d.expected_images.toLocaleString('en-GB')}
+              {d.downloaded.toLocaleString('en-GB')} /{' '}
+              {d.expected_images.toLocaleString('en-GB')}
             </span>
           </p>
           <Bar percent={d.coverage_percent} />
+          <p className="mt-1.5 text-[11px] leading-relaxed text-faint">
+            A photo is noted the moment the crawler sees it and fetched later, at{' '}
+            {d.requests_per_minute}/min, so downloading does not compete with the crawl. That
+            is why {d.count.toLocaleString('en-GB')} are known of while{' '}
+            {d.downloaded.toLocaleString('en-GB')} are on disk, with{' '}
+            {d.pending.toLocaleString('en-GB')} still queued.
+          </p>
           <p className="mt-1.5 text-[11px] text-faint">
-            {d.full_images ? 'Thumbnail and full image' : 'Thumbnails only'} per item; the whole
-            catalogue would need about {bytes(d.projected_bytes)}
+            {d.full_images ? 'Thumbnail and full image' : 'Thumbnails only'} per item; all of
+            them would need about {bytes(d.projected_bytes)}
           </p>
         </div>
       </div>

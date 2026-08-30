@@ -911,6 +911,11 @@ class CatalogCrawl(Base):
     #: share the time, the pacer scatters its requests and takes breaks, the
     #: night slows everything down and a due watch interrupts outright.
     pages_per_hour: Mapped[float | None] = mapped_column(Float)
+    #: The last handful of runs, newest first, so the admin view can show what
+    #: actually happened rather than what the settings permit. A short JSON
+    #: list rather than a table: it is a readout, never queried, and capping
+    #: the list keeps it pruned without a job to do the pruning.
+    recent_runs: Mapped[list] = mapped_column(JSON, default=list)
     items_seen: Mapped[int] = mapped_column(Integer, default=0)
     items_new: Mapped[int] = mapped_column(Integer, default=0)
     items_changed: Mapped[int] = mapped_column(Integer, default=0)

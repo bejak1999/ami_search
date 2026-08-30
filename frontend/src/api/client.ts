@@ -266,6 +266,7 @@ export const api = {
     behaviour: () => get<MessageResponse>('/admin/behaviour'),
     activity: (days = 30) => get<MessageResponse>(`/admin/activity${qs({ days })}`),
     resetActivity: () => post<MessageResponse>('/admin/activity/reset'),
+    load: (seconds = 60) => get<MessageResponse>(`/admin/load${qs({ seconds })}`),
     setBehaviour: (body: Record<string, boolean>) =>
       request<MessageResponse>('/admin/behaviour', {
         method: 'PUT',

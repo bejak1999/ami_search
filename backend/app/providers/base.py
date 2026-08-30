@@ -166,6 +166,8 @@ class ShopProvider(ABC):
         """Rate-limited, breaker-guarded HTTP call."""
         import time
 
+        from ..services import reqlog
+
         self.breaker.check()
         self.bucket.acquire()
         with self._semaphore:
@@ -174,9 +176,14 @@ class ShopProvider(ABC):
                 response = self.client.request(method, url, **kwargs)
             except Exception as exc:  # curl_cffi raises its own error tree
                 self.breaker.record_failure()
+                reqlog.record(self.id, ok=False)
                 raise ProviderError(f"{self.name}: {exc}") from exc
             finally:
                 self.last_latency_ms = (time.monotonic() - started) * 1000
+
+        # Counted here rather than at each call site, so nothing that reaches
+        # the shop can escape the tally by taking a different route.
+        reqlog.record(self.id, ok=response.status_code < 400)
 
         if response.status_code in (403, 429, 503):
             self.breaker.record_failure()

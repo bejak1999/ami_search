@@ -107,6 +107,8 @@ def _download(url: str) -> tuple[bytes, str]:
     """
     from curl_cffi import requests as curl_requests
 
+    from . import reqlog
+
     _bucket.acquire(timeout=30.0)
     response = curl_requests.get(
         url,
@@ -114,6 +116,9 @@ def _download(url: str) -> tuple[bytes, str]:
         timeout=30,
         headers={"Referer": "https://www.amiami.com/", "Accept": "image/avif,image/webp,image/*"},
     )
+    # Photos come from the shop's image host on their own allowance, but they
+    # are the same connection to the same company and belong in the tally.
+    reqlog.record("amiami", ok=response.status_code < 400, name="images")
     if response.status_code == 404:
         raise FileNotFoundError("origin no longer serves this image")
     if response.status_code >= 400:
@@ -443,18 +448,35 @@ def stats(db: Session) -> dict:
     gone = int(
         db.execute(select(func.count(CachedImage.id)).where(CachedImage.gone.is_(True))).scalar_one()
     )
+    # A row is created the moment a photo is *seen*, without downloading it,
+    # because the public route is a hash of the source URL and the server has
+    # to know the mapping before it can fetch anything. So the row count is
+    # how many photos we know of, and only the ones with a fetch time behind
+    # them are actually on disk. Reporting the first as "cached" is how the
+    # panel came to claim 131,716 photos in 200 MB, which is 1.5 kB each.
+    downloaded = int(
+        db.execute(
+            select(func.count(CachedImage.id)).where(CachedImage.fetched_at.is_not(None))
+        ).scalar_one()
+    )
     items = int(db.execute(select(func.count(Item.id))).scalar_one())
     budget = int(settings.image_cache_max_gb * 1024**3)
 
     # How many photos the current catalogue would need in total.
     per_item = 2 if settings.image_cache_full_images else 1
     expected = items * per_item
-    average = (int(total_bytes) / int(total_rows)) if total_rows else 0
+    # Averaged over what was actually downloaded, not over every row, or the
+    # figure collapses towards zero as more photos are merely known about.
+    average = (int(total_bytes) / downloaded) if downloaded else 0
 
     return {
         "enabled": settings.image_cache_enabled,
         "full_images": settings.image_cache_full_images,
+        # Known: a URL we have recorded. Downloaded: a file on disk. The gap
+        # between them is the prefetch backlog.
         "count": int(total_rows),
+        "downloaded": downloaded,
+        "pending": max(0, int(total_rows) - downloaded - gone),
         "bytes": int(total_bytes),
         "budget_bytes": budget,
         "percent_of_budget": round(int(total_bytes) / budget * 100, 1) if budget else 0.0,
@@ -462,8 +484,10 @@ def stats(db: Session) -> dict:
         "gone_upstream": gone,
         "items_known": items,
         "expected_images": expected,
-        "coverage_percent": round(int(total_rows) / expected * 100, 1) if expected else 0.0,
+        "coverage_percent": round(downloaded / expected * 100, 1) if expected else 0.0,
+        "known_percent": round(int(total_rows) / expected * 100, 1) if expected else 0.0,
         "average_bytes": int(average),
         "projected_bytes": int(average * expected) if average else 0,
+        "requests_per_minute": settings.image_cache_requests_per_minute,
         "path": str(cache_root()),
     }

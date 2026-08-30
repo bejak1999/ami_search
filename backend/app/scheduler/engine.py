@@ -31,6 +31,7 @@ from ..services import (
     health,
     images,
     matcher,
+    reqlog,
     shelfwatch,
 )
 
@@ -242,7 +243,8 @@ class PollingEngine:
                 watch = db.get(Watch, watch_id)
                 if watch is None or not watch.enabled:
                     return
-                outcome = matcher.run_watch(db, watch)
+                with reqlog.purpose("watch"):
+                    outcome = matcher.run_watch(db, watch)
             self.runs_total += 1
             self.alerts_total += outcome.alerts
             if outcome.error:
@@ -289,7 +291,8 @@ class PollingEngine:
     def run_crawler(self) -> None:
         try:
             with session_scope() as db:
-                outcome = crawler.run_once(db)
+                with reqlog.purpose("catalogue"):
+                    outcome = crawler.run_once(db)
             if outcome.pages:
                 self.crawl_pages_total += outcome.pages
                 self.crawl_items_total += outcome.items
@@ -300,7 +303,8 @@ class PollingEngine:
     def run_shelfwatch(self) -> None:
         try:
             with session_scope() as db:
-                outcome = shelfwatch.run_once(db)
+                with reqlog.purpose("shelf"):
+                    outcome = shelfwatch.run_once(db)
             if outcome.checked:
                 self.shelf_checked_total += outcome.checked
                 self.shelf_vanished_total += outcome.vanished
@@ -311,14 +315,15 @@ class PollingEngine:
     def run_enrichment(self) -> None:
         try:
             with session_scope() as db:
-                outcome = enrich.run_batch(db, limit=settings.mfc_effective_batch_size)
+                with reqlog.purpose("mfc"):
+                    outcome = enrich.run_batch(db, limit=settings.mfc_effective_batch_size)
             self.last_enrichment = outcome
         except Exception:  # noqa: BLE001
             log.exception("MFC enrichment batch failed")
 
     def run_image_prefetch(self) -> None:
         try:
-            with session_scope() as db:
+            with session_scope() as db, reqlog.purpose("images"):
                 self.last_image_prefetch = images.prefetch(db)
                 images.prune(db)
         except Exception:  # noqa: BLE001

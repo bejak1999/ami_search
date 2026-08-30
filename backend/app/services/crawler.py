@@ -454,6 +454,7 @@ def run_once(db: Session, provider_id: str = "amiami", budget_seconds: int | Non
     if crawl.state == CrawlState.running and run.stopped_because not in ("cycle complete",):
         crawl.state = CrawlState.paused
     _record_throughput(crawl, run.pages, previous_run_at)
+    _record_run(crawl, run)
     db.commit()
 
     run.seconds = time.monotonic() - started
@@ -468,6 +469,41 @@ def run_once(db: Session, provider_id: str = "amiami", budget_seconds: int | Non
             run.stopped_because,
         )
     return run
+
+
+#: How many runs to keep per slice. Enough to see whether a slow pass was one
+#: bad stretch or the normal speed, few enough that the row stays small.
+RUN_LOG_LENGTH = 12
+
+
+def _record_run(crawl: CatalogCrawl, run: "CrawlRun") -> None:
+    """Keep what this run actually managed, newest first.
+
+    The throughput here is pages per minute *while running*, which is a
+    different question from the pages per hour used for estimates: this says
+    how fast the slice moves when it has the budget, that one says how much
+    real time a sweep will take including waiting for its turn. Both are worth
+    seeing, and confusing them is how "about 33 minutes" came to mean an
+    afternoon.
+    """
+    if run.pages <= 0 and not run.errors:
+        return
+    entry = {
+        "at": utcnow().isoformat(),
+        "seconds": round(run.seconds, 1),
+        "pages": run.pages,
+        "items": run.items,
+        "new": run.new_items,
+        "changed": run.changed,
+        "stopped": run.stopped_because or None,
+        "pages_per_minute": (
+            round(run.pages / (run.seconds / 60.0), 1) if run.seconds > 1 else None
+        ),
+        "errors": len(run.errors),
+    }
+    # Reassigned rather than mutated: SQLAlchemy does not notice a list edited
+    # in place on a JSON column, so appending would silently save nothing.
+    crawl.recent_runs = ([entry] + list(crawl.recent_runs or []))[:RUN_LOG_LENGTH]
 
 
 def _record_throughput(crawl: CatalogCrawl, pages: int, previous_run_at) -> None:
@@ -743,6 +779,7 @@ def progress(db: Session, provider_id: str = "amiami") -> dict:
                 "pages_per_hour": (
                     round(crawl.pages_per_hour, 1) if crawl.pages_per_hour else None
                 ),
+                "recent_runs": list(crawl.recent_runs or []),
                 "next_run_in_seconds": _cooldown_remaining(crawl),
                 "recheck_minutes": crawl.recheck_interval_minutes,
                 "head_pages": crawl.head_pages,

@@ -2850,6 +2850,135 @@ def test_settings() -> None:
     check("postgres is not sqlite", not bare.is_sqlite)
 
 
+def test_run_log() -> None:
+    print("\n== Each slice keeps what its last runs managed ==")
+    from app.models import CatalogCrawl
+    from app.services.crawler import RUN_LOG_LENGTH, CrawlRun, _record_run
+
+    crawl = CatalogCrawl(provider="amiami", scope="figures_preowned", recent_runs=[])
+
+    _record_run(crawl, CrawlRun(pages=32, items=1600, new_items=4, changed=11,
+                                seconds=240.0, stopped_because="time budget reached"))
+    entry = crawl.recent_runs[0]
+    check("a run is written down", len(crawl.recent_runs) == 1)
+    check("with the speed it actually managed", entry["pages_per_minute"] == 8.0, entry)
+    check("and why it stopped", entry["stopped"] == "time budget reached")
+
+    # Newest first, so the panel does not have to reverse it and the reader
+    # sees the most recent line at the top where they are looking.
+    _record_run(crawl, CrawlRun(pages=18, items=900, new_items=0, changed=2, seconds=132.0))
+    check("the newest run comes first", crawl.recent_runs[0]["pages"] == 18,
+          [r["pages"] for r in crawl.recent_runs])
+
+    # The list prunes itself rather than needing a job to do it.
+    for _ in range(RUN_LOG_LENGTH * 2):
+        _record_run(crawl, CrawlRun(pages=5, items=250, new_items=0, changed=0, seconds=60.0))
+    check("the log stays capped", len(crawl.recent_runs) == RUN_LOG_LENGTH,
+          len(crawl.recent_runs))
+
+    # A run that did nothing is not worth a line; a run that only produced
+    # errors is exactly what someone comes here to find.
+    before = len(crawl.recent_runs)
+    _record_run(crawl, CrawlRun(pages=0, items=0, new_items=0, changed=0, seconds=1.0))
+    check("an empty run is not logged", len(crawl.recent_runs) == before)
+    _record_run(crawl, CrawlRun(pages=0, items=0, new_items=0, changed=0, seconds=8.0,
+                                errors=["upstream refused"]))
+    check("but a failed one is", crawl.recent_runs[0]["errors"] == 1)
+
+    # A very short run gives no honest rate, so it reports none rather than a
+    # number invented by dividing by nearly zero.
+    _record_run(crawl, CrawlRun(pages=1, items=50, new_items=0, changed=0, seconds=0.4))
+    check("too short to measure means no rate", crawl.recent_runs[0]["pages_per_minute"] is None)
+
+
+def test_request_accounting() -> None:
+    print("\n== The request budget is attributed to the job that spent it ==")
+    from app.services import reqlog
+
+    reqlog._events.clear()
+    for _ in range(12):
+        with reqlog.purpose("catalogue"):
+            reqlog.record("amiami")
+    for _ in range(6):
+        with reqlog.purpose("shelf"):
+            reqlog.record("amiami")
+    with reqlog.purpose("catalogue"):
+        reqlog.record("amiami", ok=False)
+    for _ in range(8):
+        with reqlog.purpose("mfc"):
+            reqlog.record("mfc")
+
+    out = reqlog.rates(60)
+    ami = out["hosts"]["amiami"]
+    check("both hosts are counted apart", set(out["hosts"]) == {"amiami", "mfc"})
+    check("every request is attributed", ami["total"] == 19, ami["total"])
+    check("failures are visible", ami["errors"] == 1)
+    check("shares add up", abs(sum(p["share"] for p in ami["purposes"]) - 100) < 0.5)
+    check("the biggest spender comes first", ami["purposes"][0]["key"] == "catalogue")
+    check("labels are readable", ami["purposes"][0]["label"] == "Catalogue sweep")
+
+    # A minute of sampling scaled to an hour is a projection, and says so.
+    check("an hourly figure from a minute is flagged", out["hourly_is_projected"])
+    check("and is the honest multiple", ami["per_hour"] == 19 * 60, ami["per_hour"])
+    check("a full hour is not flagged", not reqlog.rates(3600)["hourly_is_projected"])
+
+    # Anything that does not declare itself is still counted, under "other",
+    # rather than vanishing and making the totals disagree with reality.
+    reqlog.record("amiami")
+    check("untagged requests are not lost",
+          reqlog.rates(60)["hosts"]["amiami"]["purposes"][-1]["key"] == "other")
+
+    # The context manager restores what was running before it.
+    with reqlog.purpose("catalogue"):
+        with reqlog.purpose("images"):
+            inner = reqlog.current()
+        outer = reqlog.current()
+    check("nesting unwinds properly", (inner, outer) == ("images", "catalogue"))
+    check("and leaves nothing set afterwards", reqlog.current() == "other")
+
+    reqlog._events.clear()
+
+
+def test_photo_counts_distinguish_known_from_held() -> None:
+    print("\n== Photos known of and photos on disk are different numbers ==")
+    from app.db import SessionLocal, init_db
+    from app.models import CachedImage
+    from app.services import images
+
+    init_db()
+    db = SessionLocal()
+    db.query(CachedImage).delete()
+    db.commit()
+
+    # register() writes a row without fetching anything: the public route is a
+    # hash of the source URL, so the mapping has to exist before the download
+    # can happen. Reporting those rows as "cached" is what produced 131,716
+    # photos in 200 MB, which would be 1.5 kB each.
+    images.register(db, [f"https://img.amiami.com/{n}.jpg" for n in range(10)], commit=True)
+    stats = images.stats(db)
+    check("all ten are known of", stats["count"] == 10, stats["count"])
+    check("none are downloaded yet", stats["downloaded"] == 0)
+    check("and all ten are queued", stats["pending"] == 10)
+    check("so nothing counts as covered", stats["coverage_percent"] == 0.0)
+
+    for row in db.query(CachedImage).limit(3).all():
+        row.fetched_at = datetime.now(timezone.utc)
+        row.bytes = 40_000
+    db.commit()
+    stats = images.stats(db)
+    check("the three fetched ones show as downloaded", stats["downloaded"] == 3)
+    check("the rest stay queued", stats["pending"] == 7)
+    check(
+        "and the average is over the files, not the rows",
+        abs(stats["average_bytes"] - 40_000) < 1,
+        stats["average_bytes"],
+    )
+
+    db.query(CachedImage).delete()
+    db.commit()
+    db.close()
+
+
 def main() -> int:
     test_url_parsing()
     test_release_dates()
@@ -2905,6 +3034,9 @@ def main() -> int:
     test_local_search()
     test_watch_code_normalisation()
     test_image_fallback()
+    test_run_log()
+    test_request_accounting()
+    test_photo_counts_distinguish_known_from_held()
     test_settings()
 
     print(f"\n{'=' * 46}\n  {PASS} passed, {FAIL} failed\n{'=' * 46}")

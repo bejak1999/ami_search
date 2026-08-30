@@ -274,6 +274,27 @@ def run_catalog_crawl(
     )
 
 
+@admin.get("/load", response_model=MessageResponse)
+def upstream_load(
+    seconds: int = Query(default=60, ge=10, le=3600),
+    _admin: User = Depends(admin_user),
+) -> MessageResponse:
+    """What the request budget is actually being spent on, right now.
+
+    Four jobs share one allowance to each host and the per-job settings only
+    say what each is permitted, never what it took. This is the readout.
+    """
+    from ..config import settings as _settings
+    from ..services import reqlog
+
+    detail = reqlog.rates(seconds)
+    detail["budgets"] = {
+        "amiami": _settings.provider_requests_per_minute,
+        "mfc": _settings.mfc_requests_per_minute,
+    }
+    return MessageResponse(message="ok", detail=detail)
+
+
 @admin.get("/activity", response_model=MessageResponse)
 def shop_activity(
     days: int = Query(default=30, ge=1, le=365),
@@ -379,8 +400,11 @@ def update_catalog_slice(
 
     # How often this slice re-reads the shop's newest pages, and how deep.
     if "recheck_interval_minutes" in payload:
+        # Up to three months. The full-catalogue sweep is a backstop that only
+        # needs to run occasionally, and capping it at a week meant asking for
+        # 1,385 pages more often than there was any reason to.
         crawl.recheck_interval_minutes = max(
-            5, min(int(payload["recheck_interval_minutes"]), 60 * 24 * 7)
+            5, min(int(payload["recheck_interval_minutes"]), 60 * 24 * 90)
         )
     if "head_pages" in payload:
         crawl.head_pages = max(1, min(int(payload["head_pages"]), 500))
