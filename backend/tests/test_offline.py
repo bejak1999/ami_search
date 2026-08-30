@@ -4511,6 +4511,120 @@ def test_pruning_survives_a_large_catalogue() -> None:
     db.close()
 
 
+def test_a_recovered_breaker_stops_reporting_itself_as_open() -> None:
+    print("\n== A circuit that has served its backoff says so ==")
+    import time as _time
+
+    from app.providers.ratelimit import CircuitBreaker, CircuitOpen
+
+    breaker = CircuitBreaker(threshold=2, reset_after=0.3)
+    check("a fresh breaker is closed", not breaker.is_open)
+    breaker.check()  # must not raise
+
+    breaker.record_failure()
+    check("one failure is not enough", not breaker.is_open)
+    breaker.record_failure()
+    check("the threshold trips it", breaker.is_open)
+    check("and the snapshot agrees", breaker.snapshot()["open"])
+
+    raised = False
+    try:
+        breaker.check()
+    except CircuitOpen:
+        raised = True
+    check("requests are refused while it is open", raised)
+
+    _time.sleep(0.35)
+
+    # The bug this covers: is_open used to clear the trip as a side effect, so
+    # the breaker only noticed it had recovered when something happened to ask
+    # - and snapshot did not ask. The health check reads the snapshot and
+    # makes no request of its own, so it went on raising an urgent "the shop
+    # is refusing requests" alert after the backoff had elapsed. With every
+    # slice resting there was nothing to ask on the shop's behalf, so the
+    # alert repeated every quarter of an hour about a shop that was answering
+    # perfectly well.
+    check(
+        "once the backoff elapses the snapshot says closed",
+        not breaker.snapshot()["open"],
+        breaker.snapshot(),
+    )
+    check("without anything having to ask first", not breaker.is_open)
+    check("and it says how long is left", breaker.snapshot()["retry_in_seconds"] == 0.0)
+
+    breaker.check()  # the probe is let through
+    breaker.record_success()
+    check("a success clears the count", breaker.snapshot()["failures"] == 0)
+    check("and the backoff", breaker.snapshot()["backoff_seconds"] == 0.0)
+
+    # Reading the state must not change it, however often it is read.
+    breaker.record_failure()
+    breaker.record_failure()
+    for _ in range(5):
+        breaker.snapshot()
+        _ = breaker.is_open
+    check("repeated reads leave it open", breaker.is_open)
+
+    # A failed probe backs off further rather than starting over.
+    first = breaker.snapshot()["backoff_seconds"]
+    _time.sleep(0.35)
+    breaker.record_failure()
+    check(
+        "a failure after recovery backs off longer",
+        breaker.snapshot()["backoff_seconds"] > first,
+        (first, breaker.snapshot()["backoff_seconds"]),
+    )
+
+
+def test_missing_exchange_rates_are_reported() -> None:
+    print("\n== Having no exchange rate at all is worth saying out loud ==")
+    from app.config import settings
+    from app.db import SessionLocal, init_db
+    from app.models import FxRate
+    from app.services import fx, health
+
+    init_db()
+    db = SessionLocal()
+    db.query(FxRate).delete()
+    db.commit()
+
+    # Stale rates were reported; no rates at all were not, and that is the
+    # worse case. Every conversion returns nothing, so the landed price
+    # disappears from the interface entirely - which reads as a display quirk
+    # rather than as an instance that never reached either rate source.
+    check("nothing converts without a rate", fx.convert(db, 3920, "JPY", "EUR") is None)
+    keys = {issue.key for issue in health.collect_issues(db)}
+    check("and that is now reported", "fx:missing" in keys, sorted(keys))
+    urgent = [i for i in health.collect_issues(db) if i.key == "fx:missing"]
+    check("as something to act on", urgent and urgent[0].urgent)
+
+    # With a rate in place it goes quiet again.
+    base = settings.fx_base_currency.upper()
+    db.add(FxRate(base=base, quote="EUR", rate=0.0059, source="test"))
+    db.commit()
+    keys = {issue.key for issue in health.collect_issues(db)}
+    check("a fetched rate clears it", "fx:missing" not in keys, sorted(keys))
+    check("and nothing calls it stale either", "fx:stale" not in keys)
+    check(
+        "conversion works again",
+        abs((fx.convert(db, 10_000, base, "EUR") or 0) - 59) < 0.5,
+        fx.convert(db, 10_000, base, "EUR"),
+    )
+
+    # An old rate is still reported, separately, because a drifting price is a
+    # different problem from an absent one.
+    row = db.query(FxRate).filter_by(base=base, quote="EUR").one()
+    row.fetched_at = datetime.now(timezone.utc) - timedelta(days=30)
+    db.commit()
+    keys = {issue.key for issue in health.collect_issues(db)}
+    check("a month-old rate is called stale", "fx:stale" in keys, sorted(keys))
+    check("and not called missing", "fx:missing" not in keys)
+
+    db.query(FxRate).delete()
+    db.commit()
+    db.close()
+
+
 def main() -> int:
     test_url_parsing()
     test_release_dates()
@@ -4587,6 +4701,8 @@ def main() -> int:
     test_a_refresh_notices_a_copy_has_gone()
     test_a_short_pass_stops_at_its_own_edge()
     test_pruning_survives_a_large_catalogue()
+    test_a_recovered_breaker_stops_reporting_itself_as_open()
+    test_missing_exchange_rates_are_reported()
     test_newly_listed_used_is_not_newly_known()
     test_settings()
 

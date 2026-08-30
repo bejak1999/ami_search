@@ -189,7 +189,24 @@ def collect_issues(db: Session) -> list[Issue]:
     from . import fx
 
     age = fx.rates_age(db)
-    if age is not None and age > timedelta(hours=max(24, settings.fx_refresh_hours * 4)):
+    if age is None:
+        # Worse than stale, and the one case this used to pass over in
+        # silence: with no rate at all every conversion returns nothing, so
+        # the landed price simply is not there. Quietly missing prices look
+        # like a display quirk rather than a broken instance.
+        issues.append(
+            Issue(
+                key="fx:missing",
+                title="No exchange rates have been fetched",
+                detail=(
+                    "Nothing can be converted out of yen, so no landed price can be "
+                    "shown and no watch set in another currency can match."
+                ),
+                hint="Both rate sources were unreachable on start-up. Check the instance's outbound connectivity.",
+                urgent=True,
+            )
+        )
+    elif age > timedelta(hours=max(24, settings.fx_refresh_hours * 4)):
         issues.append(
             Issue(
                 key="fx:stale",

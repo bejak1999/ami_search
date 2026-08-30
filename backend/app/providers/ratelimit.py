@@ -78,21 +78,33 @@ class CircuitBreaker:
     _backoff: float = field(default=0.0, init=False)
     _lock: threading.Lock = field(default_factory=threading.Lock, init=False)
 
+    def _remaining(self) -> float:
+        """Seconds still to wait, zero once the backoff has run out.
+
+        Computed rather than remembered, and with no side effect. This used to
+        clear ``_opened_at`` as it went, which meant the breaker only noticed
+        it had recovered when something happened to ask - and ``snapshot`` did
+        not ask. So the health check, which reads the snapshot and makes no
+        request of its own, went on reporting "the shop is refusing requests"
+        as an urgent alert long after the backoff had elapsed. With every
+        slice resting there was nothing to ask on its behalf, so the alert
+        simply repeated every quarter of an hour about a shop that was fine.
+
+        Callers must hold the lock.
+        """
+        if self._opened_at is None:
+            return 0.0
+        return max(0.0, self._backoff - (time.monotonic() - self._opened_at))
+
     @property
     def is_open(self) -> bool:
         with self._lock:
-            if self._opened_at is None:
-                return False
-            if time.monotonic() - self._opened_at >= self._backoff:
-                # Half-open: let the next call through as a probe.
-                self._opened_at = None
-                return False
-            return True
+            return self._remaining() > 0
 
     def check(self) -> None:
-        if self.is_open:
-            with self._lock:
-                remaining = self._backoff - (time.monotonic() - (self._opened_at or 0))
+        with self._lock:
+            remaining = self._remaining()
+        if remaining > 0:
             raise CircuitOpen(f"upstream circuit open, retrying in {remaining:.0f}s")
 
     def record_success(self) -> None:
@@ -118,8 +130,10 @@ class CircuitBreaker:
 
     def snapshot(self) -> dict:
         with self._lock:
+            remaining = self._remaining()
             return {
-                "open": self._opened_at is not None,
+                "open": remaining > 0,
                 "failures": self._failures,
                 "backoff_seconds": round(self._backoff, 1),
+                "retry_in_seconds": round(remaining, 1),
             }
