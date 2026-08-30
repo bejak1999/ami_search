@@ -892,19 +892,19 @@ class CatalogCrawl(Base):
     total_results: Mapped[int] = mapped_column(Integer, default=0)
     pages_total: Mapped[int] = mapped_column(Integer, default=0)
 
-    #: After a first full sweep, later cycles only re-read the newest pages,
-    #: because the shop lists newest first and the tail rarely changes.
-    head_pages: Mapped[int] = mapped_column(Integer, default=20)
-    #: How far into the ordering this slice reads. NULL means all the way.
-    #: A slice with a cap is a head pass: it re-reads the front of an ordering
-    #: that genuinely puts recent activity there, cheaply and often, while a
-    #: separate uncapped slice covers the rest on a slower cycle.
+    #: How many of the newest pages a short pass re-reads. Zero means this
+    #: slice has no useful front and every pass reads all of it - which is
+    #: true of every ordering tested except "preowned". See crawler._page_limit.
+    head_pages: Mapped[int] = mapped_column(Integer, default=0)
     max_pages: Mapped[int | None] = mapped_column(Integer)
     #: How long to wait before re-reading the newest pages. Without a pause the
     #: crawler simply loops over the same first pages continuously, which is
     #: how one slice accumulated 43 passes in an afternoon.
     recheck_interval_minutes: Mapped[int] = mapped_column(Integer, default=30)
     full_sweep_interval_days: Mapped[int] = mapped_column(Integer, default=7)
+    #: The same thing in minutes, so both intervals use one control and one
+    #: set of units. NULL falls back to the days column above.
+    full_sweep_interval_minutes: Mapped[int | None] = mapped_column(Integer)
     last_full_sweep_at: Mapped[datetime | None] = mapped_column(UTCDateTime)
     cycles_completed: Mapped[int] = mapped_column(Integer, default=0)
 

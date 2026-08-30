@@ -94,7 +94,16 @@ def collect_issues(db: Session) -> list[Issue]:
     # Watches that keep failing are individually quiet but collectively fatal.
     broken = list(
         db.execute(
-            select(Watch).where(Watch.enabled.is_(True), Watch.consecutive_errors >= 5)
+            select(Watch).where(
+                Watch.enabled.is_(True),
+                Watch.consecutive_errors >= 5,
+                # A watch that has worked before is not broken; it is watching
+                # something that is not on sale today, which is the whole
+                # point of it. Only one that has never once found anything is
+                # worth a person's attention - that is a bad code or a search
+                # that matches nothing, and it will not fix itself.
+                Watch.last_success_at.is_(None),
+            )
         )
         .scalars()
         .all()

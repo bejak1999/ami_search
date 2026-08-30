@@ -37,6 +37,10 @@ log = logging.getLogger(__name__)
 #: be counted from the database instead of from a counter that only ever grows.
 SCOPE_FILTERS: dict[str, str] = {
     "figures_preowned": "preowned",
+    # Left over from the version that split the head into its own slice. Kept
+    # so an installation that ran it still counts that row against the right
+    # part of the catalogue while the migration removes it.
+    "figures_preowned_head": "preowned",
     "figures_in_stock": "in_stock",
     "figures_preorder": "preorder",
     "figures_all": "all",
@@ -85,28 +89,19 @@ SCOPE_FILTERS: dict[str, str] = {
 #: arrival within the hour, which is what the interval below is for.
 DEFAULT_SCOPES: list[dict] = [
     {
-        "scope": "figures_preowned_head",
-        "label": "Pre-owned, newest first",
-        "priority": 5,
-        "query": {"category_id": 1, "condition": "preowned", "sort": "updated"},
-        # The front of the "preowned" ordering, which is the one that actually
-        # tracks intake - see _page_limit for the measurement. 30 pages every
-        # half hour is 60 requests an hour against the 213 a full sweep costs,
-        # and it holds about nine tenths of the arrivals that are still on
-        # sale by the time anyone could have found them.
-        "max_pages": 30,
-        "recheck_interval_minutes": 30,
-    },
-    {
         "scope": "figures_preowned",
         "label": "Pre-owned figures",
         "priority": 10,
         "query": {"category_id": 1, "condition": "preowned", "sort": "updated"},
-        # The whole slice, 213 pages, about 25 minutes of requests. With the
-        # head pass above catching arrivals within the half hour, this is the
-        # backstop that sweeps up whatever the front never showed - once a day
-        # rather than every hour.
-        "recheck_interval_minutes": 1440,
+        # Two settings, because there are two jobs. The short pass re-reads the
+        # front of the "preowned" ordering, which is the one that actually
+        # tracks intake - 30 pages every half hour, 60 requests an hour against
+        # the 213 a full sweep costs. The full sweep behind it catches whatever
+        # the front never showed, once a day. See _page_limit for what was
+        # measured.
+        "head_pages": 30,
+        "recheck_interval_minutes": 30,
+        "full_sweep_interval_minutes": 1440,
     },
     {
         "scope": "figures_in_stock",
@@ -187,7 +182,8 @@ def ensure_scopes(db: Session, provider: str = "amiami") -> int:
                 priority=spec["priority"],
                 query=spec["query"],
                 recheck_interval_minutes=spec.get("recheck_interval_minutes", 30),
-                max_pages=spec.get("max_pages"),
+                head_pages=spec.get("head_pages", 0),
+                full_sweep_interval_minutes=spec.get("full_sweep_interval_minutes"),
                 enabled=spec.get("enabled", True),
             )
         )
@@ -320,16 +316,54 @@ def _page_limit(crawl: CatalogCrawl) -> int:
     listings still on sale at about nine in ten - a small sample, so read that
     as "most" rather than as a precise figure.
 
-    So a capped slice is worth having again, on that ordering and no other.
-    ``head_pages`` stays unread; ``max_pages`` is what a slice now honours.
+    So a short pass is worth having again, on that ordering and no other. A
+    slice sets ``head_pages`` to say how much of its front is worth re-reading
+    often; zero means the ordering earns no such shortcut and every pass reads
+    everything, which is where the other three slices stand.
 
     Column defaults only apply on insert, so the number is read defensively: a
     row that has not been flushed yet still carries None.
     """
     total = crawl.pages_total or 10_000  # unknown until the first response
-    if crawl.max_pages:
-        return min(total, crawl.max_pages)
-    return total
+    if full_sweep_due(crawl):
+        return total
+    head = crawl.head_pages or 0
+    return min(total, head) if head > 0 else total
+
+
+def full_sweep_interval_minutes(crawl: CatalogCrawl) -> int:
+    """How long between passes that read the whole slice.
+
+    Stored in minutes, falling back to the older days column so a row written
+    by an earlier version keeps the schedule it was given.
+    """
+    minutes = crawl.full_sweep_interval_minutes
+    if minutes:
+        return max(1, minutes)
+    return max(1, (crawl.full_sweep_interval_days or 7) * 1440)
+
+
+def full_sweep_due(crawl: CatalogCrawl) -> bool:
+    """Should this pass read everything rather than just the front?
+
+    A slice with no head pass configured is always sweeping in full, so the
+    question does not arise. Otherwise it is due when the last full sweep has
+    aged out - and once a sweep has started, it finishes as a sweep: the check
+    is against when the last one *completed*, so a pass that spans the moment
+    the head interval elapses does not silently truncate itself half way.
+    """
+    if not (crawl.head_pages or 0):
+        return True
+    last = crawl.last_full_sweep_at
+    if last is None:
+        return True  # never swept: the first pass reads everything
+    if last.tzinfo is None:
+        last = last.replace(tzinfo=timezone.utc)
+    due_at = last + timedelta(minutes=full_sweep_interval_minutes(crawl))
+    if datetime.now(timezone.utc) >= due_at:
+        return True
+    # Already part way past the head, so this pass was started as a sweep.
+    return (crawl.cursor_page or 1) > (crawl.head_pages or 0)
 
 
 def _cooldown_remaining(crawl: CatalogCrawl) -> int:
@@ -503,11 +537,15 @@ def run_once(db: Session, provider_id: str = "amiami", budget_seconds: int | Non
 
     if crawl.state == CrawlState.running and run.stopped_because not in ("cycle complete",):
         crawl.state = CrawlState.paused
+    # Measured before it is written down. This sat after _record_run, so
+    # every logged run claimed to have taken 0.0 seconds and no run ever had
+    # a pages-per-minute figure to show.
+    run.seconds = time.monotonic() - started
+
     _record_throughput(crawl, run.pages, previous_run_at)
     _record_run(crawl, run)
     db.commit()
 
-    run.seconds = time.monotonic() - started
     if run.pages:
         log.info(
             "Crawled %s: %s pages, %s items (%s new) in %.0fs, stopped because %s",
@@ -593,10 +631,10 @@ def _store_page(db: Session, items) -> tuple[int, int]:
 
 def _complete_cycle(db: Session, crawl: CatalogCrawl) -> None:
     """Wrap a finished pass and arm the next one."""
-    # Every completed pass reads the whole slice now, so every one of them is
-    # a full sweep. The distinction only existed while some passes were
-    # shallow.
-    was_full = True
+    # Whether this pass covered the whole slice or only its front. Read
+    # before the cursor is reset, since that is what says how far it got.
+    head = crawl.head_pages or 0
+    was_full = head <= 0 or (crawl.cursor_page or 1) > head
     crawl.cycles_completed = (crawl.cycles_completed or 0) + 1
     crawl.cursor_page = 1
     crawl.finished_at = utcnow()
@@ -833,7 +871,12 @@ def progress(db: Session, provider_id: str = "amiami") -> dict:
                 "next_run_in_seconds": _cooldown_remaining(crawl),
                 "recheck_minutes": crawl.recheck_interval_minutes,
                 "head_pages": crawl.head_pages,
-                "max_pages": crawl.max_pages,
+                "full_sweep_interval_minutes": full_sweep_interval_minutes(crawl),
+                # Which kind of pass this slice is on right now, so the view
+                # can say "reading the newest 30" rather than showing a bar
+                # that means two different things on alternate runs.
+                "sweeping_all": full_sweep_due(crawl),
+                "pages_this_pass": _page_limit(crawl),
                 "full_sweep_interval_days": crawl.full_sweep_interval_days,
             }
         )

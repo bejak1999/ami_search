@@ -553,7 +553,10 @@ export function ItemDetailPage() {
                   {(tags.data ?? []).map((tag) => (
                     <button
                       key={`${tag.kind}-${tag.slug}`}
-                      onClick={() => navigate(`/discover?tag=${encodeURIComponent(tag.slug)}`)}
+                      // The search page reads ?tag= and filters the catalogue by it.
+                        // Discover ignores the parameter, so clicking a tag
+                        // simply landed on the front page.
+                        onClick={() => navigate(`/search?tag=${encodeURIComponent(tag.slug)}`)}
                       className={clsx(
                         'chip transition-colors hover:border-accent/50 hover:text-accent',
                         tag.kind !== 'tag' && 'border-info/30 text-info',

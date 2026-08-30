@@ -1292,22 +1292,19 @@ def test_slices_take_turns() -> None:
     crawler.ensure_scopes(db, "amiami")
 
     rows = {c.scope: c for c in db.query(CatalogCrawl).all()}
-    check("the shop statuses are set up", len(rows) == 5, sorted(rows))
+    check("the shop statuses are set up", len(rows) == 4, sorted(rows))
     check(
         "every slice starts enabled",
         all(row.enabled for row in rows.values()),
         {s: r.enabled for s, r in rows.items()},
     )
 
-    # Only the pre-owned pair reads the intake ordering. It was measured on
-    # that slice and nowhere else, and for a slice that reads every page the
-    # ordering makes no difference anyway.
+    # Only pre-owned reads the intake ordering. It was measured on that slice
+    # and nowhere else, and for a slice that reads every page the ordering
+    # makes no difference anyway.
     check(
-        "the pre-owned slices read the ordering that tracks intake",
-        all(
-            (rows[s].query or {}).get("sort") == "updated"
-            for s in ("figures_preowned_head", "figures_preowned")
-        ),
+        "the pre-owned slice reads the ordering that tracks intake",
+        (rows["figures_preowned"].query or {}).get("sort") == "updated",
         {s: (r.query or {}).get("sort") for s, r in rows.items()},
     )
     check(
@@ -1318,31 +1315,29 @@ def test_slices_take_turns() -> None:
         ),
     )
 
-    # The head is the frequent one and it is the only capped slice: reading
-    # the front of an ordering often only pays when the front is where things
-    # turn up, which is true of this ordering and of no other tested.
-    check("only the head is capped", rows["figures_preowned_head"].max_pages == 30)
+    # One slice, two settings: how often the front is re-read, and how often
+    # the whole thing is. Re-reading a front only pays when the front is where
+    # things turn up, which is true of this ordering and of no other tested.
+    preowned = rows["figures_preowned"]
+    check("pre-owned has a short pass", preowned.head_pages == 30, preowned.head_pages)
     check(
-        "everything else reads to the end",
-        all(r.max_pages is None for s, r in rows.items() if s != "figures_preowned_head"),
+        "every other slice reads all of itself, every pass",
+        all(r.head_pages == 0 for s, r in rows.items() if s != "figures_preowned"),
+        {s: r.head_pages for s, r in rows.items()},
     )
     check(
-        "the head runs far more often than the sweep behind it",
-        rows["figures_preowned"].recheck_interval_minutes
-        >= rows["figures_preowned_head"].recheck_interval_minutes * 20,
-        (
-            rows["figures_preowned_head"].recheck_interval_minutes,
-            rows["figures_preowned"].recheck_interval_minutes,
-        ),
+        "the short pass runs far more often than the full sweep",
+        crawler.full_sweep_interval_minutes(preowned)
+        >= preowned.recheck_interval_minutes * 20,
+        (preowned.recheck_interval_minutes, crawler.full_sweep_interval_minutes(preowned)),
     )
     check(
-        "and the full catalogue is rarer still",
+        "and the whole catalogue is rarer still",
         rows["figures_all"].recheck_interval_minutes
-        > rows["figures_preowned"].recheck_interval_minutes,
+        > crawler.full_sweep_interval_minutes(preowned),
     )
 
     pages = {
-        "figures_preowned_head": 30,
         "figures_preowned": 213,
         "figures_in_stock": 59,
         "figures_preorder": 45,
@@ -1350,9 +1345,16 @@ def test_slices_take_turns() -> None:
     }
     from app.config import settings as _settings
 
-    per_day = sum(
-        pages[s] * (1440 / r.recheck_interval_minutes) for s, r in rows.items() if r.enabled
-    )
+    def cost_per_day(scope, row):
+        """Pages a day: short passes at their interval, plus the full sweeps."""
+        head = row.head_pages or 0
+        if head <= 0:
+            return pages[scope] * (1440 / row.recheck_interval_minutes)
+        sweeps = 1440 / crawler.full_sweep_interval_minutes(row)
+        shorts = (1440 / row.recheck_interval_minutes) - sweeps
+        return head * max(0, shorts) + pages[scope] * sweeps
+
+    per_day = sum(cost_per_day(s, r) for s, r in rows.items() if r.enabled)
     capacity = _settings.crawler_requests_per_minute * 60 * 24
     check(
         "and the schedule leaves budget for everything else",
@@ -1360,15 +1362,13 @@ def test_slices_take_turns() -> None:
         f"{per_day:.0f} of {capacity:.0f} pages a day",
     )
     # The point of the rearrangement: an hourly full sweep cost 213 pages an
-    # hour to catch arrivals. The head catches most of them for 60.
-    head_cost = pages["figures_preowned_head"] * (
-        1440 / rows["figures_preowned_head"].recheck_interval_minutes
-    )
+    # hour to catch arrivals. The short pass catches most of them for 60.
     old_hourly_sweep = 213 * 24
     check(
         "watching for arrivals costs a fraction of what it did",
-        head_cost < old_hourly_sweep / 3,
-        f"{head_cost:.0f} pages a day against {old_hourly_sweep}",
+        cost_per_day("figures_preowned", preowned) < old_hourly_sweep / 3,
+        f"{cost_per_day('figures_preowned', preowned):.0f} pages a day "
+        f"against {old_hourly_sweep}",
     )
 
     # --- who gets the next few minutes -------------------------------------
@@ -1394,30 +1394,30 @@ def test_slices_take_turns() -> None:
     # The half-hourly head comes due and takes over. The big one keeps its
     # cursor. This is the case the whole arrangement exists for: catching an
     # arrival must not wait behind a sweep that has hours left to run.
-    rows["figures_preowned_head"].finished_at = now - timedelta(hours=3)
+    rows["figures_preowned"].finished_at = now - timedelta(hours=3)
     db.commit()
     picked = crawler._select_crawl(db, "amiami")
     check(
         "due work outranks a sweep in progress",
-        picked.scope == "figures_preowned_head",
+        picked.scope == "figures_preowned",
         picked.scope if picked else None,
     )
 
     # And it stays chosen until its own pass completes, rather than being
     # swapped out every few minutes. That churn is what made this
     # incomprehensible to watch: nothing ever finished.
-    rows["figures_preowned_head"].cursor_page = 12
-    rows["figures_preowned_head"].last_run_at = datetime.now(timezone.utc)
+    rows["figures_preowned"].cursor_page = 12
+    rows["figures_preowned"].last_run_at = datetime.now(timezone.utc)
     db.commit()
     check(
         "and keeps the budget until that pass is done",
-        crawler._select_crawl(db, "amiami").scope == "figures_preowned_head",
+        crawler._select_crawl(db, "amiami").scope == "figures_preowned",
         crawler._select_crawl(db, "amiami").scope,
     )
 
     # Once it finishes, the interrupted sweep picks up where it left off.
-    rows["figures_preowned_head"].cursor_page = 1
-    rows["figures_preowned_head"].finished_at = datetime.now(timezone.utc)
+    rows["figures_preowned"].cursor_page = 1
+    rows["figures_preowned"].finished_at = datetime.now(timezone.utc)
     db.commit()
     resumed = crawler._select_crawl(db, "amiami")
     check(
@@ -2371,27 +2371,65 @@ def test_crawler_cycles() -> None:
     first = CatalogCrawl(provider="amiami", scope="s", pages_total=200, cycles_completed=0)
     check("the first pass reads everything", _page_limit(first) == 200)
 
-    # Head passes are gone. They rested on the shop listing newest first, and
-    # measured against the live API that is false: the pre-owned order is
-    # stable and unrelated to when a listing was added, so re-reading the
-    # front of the list found the same thousand products for ever.
+    # A short pass re-reads the front, but only where the front is worth
+    # re-reading. That was measured per ordering, and holds for exactly one of
+    # them: under "preowned" a 30-page front held three quarters of the known
+    # arrivals, under "regtimed" nine of 594.
     later = CatalogCrawl(
         provider="amiami",
         scope="s",
         pages_total=200,
         cycles_completed=1,
         head_pages=20,
+        full_sweep_interval_minutes=1440,
         last_full_sweep_at=datetime.now(timezone.utc),
     )
     check(
-        "later passes read the whole slice too",
-        _page_limit(later) == 200,
+        "between sweeps only the front is re-read",
+        _page_limit(later) == 20,
         _page_limit(later),
     )
-    check(
-        "and a leftover head-page setting is ignored",
-        _page_limit(later) != later.head_pages,
+
+    # Zero is the honest setting for a slice whose ordering puts nothing
+    # useful at the front, and it is what the other three carry.
+    no_head = CatalogCrawl(
+        provider="amiami",
+        scope="s",
+        pages_total=200,
+        cycles_completed=1,
+        head_pages=0,
+        last_full_sweep_at=datetime.now(timezone.utc),
     )
+    check(
+        "a slice with no front reads all of itself every pass",
+        _page_limit(no_head) == 200,
+        _page_limit(no_head),
+    )
+
+    # A short pass must not be truncated by a sweep that has already started.
+    # The interval elapsing halfway through would otherwise cut the sweep off
+    # at page 30 and mark it complete.
+    mid_sweep = CatalogCrawl(
+        provider="amiami",
+        scope="s",
+        pages_total=200,
+        cycles_completed=1,
+        head_pages=20,
+        cursor_page=90,
+        full_sweep_interval_minutes=1440,
+        last_full_sweep_at=datetime.now(timezone.utc),
+    )
+    check(
+        "a sweep already past the front finishes as a sweep",
+        _page_limit(mid_sweep) == 200,
+        _page_limit(mid_sweep),
+    )
+
+    short = CatalogCrawl(
+        provider="amiami", scope="s", pages_total=8, cycles_completed=1, head_pages=20,
+        full_sweep_interval_minutes=1440, last_full_sweep_at=datetime.now(timezone.utc),
+    )
+    check("a slice shorter than its front is not padded out", _page_limit(short) == 8)
 
     stale = CatalogCrawl(
         provider="amiami",
@@ -2403,6 +2441,21 @@ def test_crawler_cycles() -> None:
         last_full_sweep_at=datetime.now(timezone.utc) - td(days=8),
     )
     check("a full sweep comes round again", _page_limit(stale) == 200, _page_limit(stale))
+
+    # The interval moved to minutes so both settings share one control; a row
+    # written before that keeps the schedule it was given.
+    from app.services.crawler import full_sweep_interval_minutes
+
+    check(
+        "an older row still reads in days",
+        full_sweep_interval_minutes(stale) == 7 * 1440,
+        full_sweep_interval_minutes(stale),
+    )
+    stale.full_sweep_interval_minutes = 720
+    check(
+        "and minutes win once set",
+        full_sweep_interval_minutes(stale) == 720,
+    )
 
     check("nothing left means no estimate", _eta_seconds(0) is None)
     check("an estimate is produced when work remains", (_eta_seconds(100) or 0) > 0)
@@ -3346,19 +3399,25 @@ def test_head_slice_reads_only_its_front() -> None:
     from app.models import CatalogCrawl
     from app.services.crawler import _page_limit
 
-    full = CatalogCrawl(provider="amiami", scope="s", pages_total=213)
-    check("no cap means the whole slice", _page_limit(full) == 213)
+    swept = datetime.now(timezone.utc)
+    full = CatalogCrawl(
+        provider="amiami", scope="s", pages_total=213, head_pages=0,
+        last_full_sweep_at=swept,
+    )
+    check("no short pass means the whole slice", _page_limit(full) == 213)
 
-    head = CatalogCrawl(provider="amiami", scope="h", pages_total=213, max_pages=30)
-    check("a cap stops at the front", _page_limit(head) == 30)
+    head = CatalogCrawl(
+        provider="amiami", scope="s", pages_total=213, head_pages=30,
+        full_sweep_interval_minutes=1440, last_full_sweep_at=swept,
+    )
+    check("a short pass stops at the front", _page_limit(head) == 30)
 
-    # The cap is a ceiling, not a target: a slice shorter than its cap is not
-    # read past its own end.
-    short = CatalogCrawl(provider="amiami", scope="h", pages_total=8, max_pages=30)
-    check("a short slice is not padded out", _page_limit(short) == 8)
-
-    unknown = CatalogCrawl(provider="amiami", scope="h", max_pages=30)
-    check("a cap holds before the first response too", _page_limit(unknown) == 30)
+    due = CatalogCrawl(
+        provider="amiami", scope="s", pages_total=213, head_pages=30,
+        full_sweep_interval_minutes=1440,
+        last_full_sweep_at=swept - timedelta(days=2),
+    )
+    check("and the sweep still comes round", _page_limit(due) == 213)
 
     # --- what an existing installation gets ---------------------------------
     init_db()
@@ -3366,7 +3425,9 @@ def test_head_slice_reads_only_its_front() -> None:
     db.query(CatalogCrawl).delete()
     db.commit()
 
-    # As shipped before: hourly, on the registration ordering.
+    # As shipped before: hourly, on the registration ordering, and - if this
+    # installation ran the release that split them - a second row for the
+    # front pages, counting itself against the whole catalogue.
     db.add(
         CatalogCrawl(
             provider="amiami",
@@ -3377,15 +3438,30 @@ def test_head_slice_reads_only_its_front() -> None:
             cursor_page=88,
         )
     )
+    db.add(
+        CatalogCrawl(
+            provider="amiami",
+            scope="figures_preowned_head",
+            label="Pre-owned, newest first",
+            query={"category_id": 1, "condition": "preowned", "sort": "updated"},
+            recheck_interval_minutes=30,
+        )
+    )
     db.commit()
     db.close()
 
-    check("the slice is moved over", adopt_intake_ordering() == 1)
+    check("the slice is moved over", adopt_intake_ordering() > 0)
 
     db = SessionLocal()
+    check(
+        "the split-out row is gone",
+        db.query(CatalogCrawl).filter_by(scope="figures_preowned_head").count() == 0,
+    )
     row = db.query(CatalogCrawl).filter_by(scope="figures_preowned").one()
     check("onto the ordering that tracks intake", row.query["sort"] == "updated", row.query)
-    check("and eased to a daily sweep", row.recheck_interval_minutes == 1440)
+    check("with a short pass of its own", row.head_pages == 30, row.head_pages)
+    check("run every half hour", row.recheck_interval_minutes == 30)
+    check("and a full sweep daily", row.full_sweep_interval_minutes == 1440)
     check(
         "a pass ordered the old way restarts rather than resuming",
         row.cursor_page == 1,

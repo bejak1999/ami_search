@@ -150,6 +150,17 @@ SORT_KEYS: dict[str, str] = {
 #: the expensive listings from the whole result, just shuffled.
 SORT_KEYS_NEEDING_LOCAL_SORT = frozenset({"price_desc"})
 
+#: One second-hand copy, as opposed to the product it is a copy of. AmiAmi
+#: numbers them per product and counts up for ever, so "-R124" is the 124th
+#: used copy of FIGURE-184067 the shop has taken in, and "-R" with nothing
+#: after it is the product those copies hang under.
+_COPY_CODE = re.compile(r"-R\d+$")
+
+
+def is_copy_code(code: str) -> bool:
+    """Is this an scode - one graded copy - rather than a product gcode?"""
+    return bool(_COPY_CODE.search(code or ""))
+
 
 class AmiAmiProvider(ShopProvider):
     id = "amiami"
@@ -283,14 +294,34 @@ class AmiAmiProvider(ShopProvider):
         )
 
     def get_item(self, code: str) -> NormalizedItem:
-        response = self.request(
-            "GET", API_ROOT + "/item", params={"gcode": code, "lang": "eng"}
-        )
-        payload = self._decode(response)
-        raw = payload.get("item")
-        if not raw:
-            raise ItemNotFound("AmiAmi has no item with code " + code)
-        return self._normalize_detail(raw, payload.get("_embedded") or {})
+        """Look up one product or one graded copy.
+
+        These are different keys and neither substitutes for the other. A
+        product is a gcode (FIGURE-184067-R); one second-hand copy of it is an
+        scode (FIGURE-184067-R124). Asked for a copy under "gcode" the API
+        answers that it has no such item, and asked for a product under
+        "scode" it rejects the request outright - so a watch on a copy failed
+        on every single poll and reported the shop had deleted the listing.
+
+        The parameter is chosen from the shape of the code, and the other one
+        is tried if that turns out wrong: the pattern covers what AmiAmi
+        issues today, and guessing wrong should cost a request rather than an
+        answer.
+        """
+        first = "scode" if is_copy_code(code) else "gcode"
+        for key in (first, "gcode" if first == "scode" else "scode"):
+            try:
+                response = self.request(
+                    "GET", API_ROOT + "/item", params={key: code, "lang": "eng"}
+                )
+            except ProviderError:
+                # "Invalid Request 22" is what a gcode passed as scode gets.
+                continue
+            payload = self._decode(response)
+            raw = payload.get("item")
+            if raw:
+                return self._normalize_detail(raw, payload.get("_embedded") or {})
+        raise ItemNotFound("AmiAmi has no item with code " + code)
 
     def suggest(self, term: str) -> list[FacetOption]:
         """Category suggestions, used by the narrow-down UI."""

@@ -407,11 +407,13 @@ def update_catalog_slice(
             5, min(int(payload["recheck_interval_minutes"]), 60 * 24 * 90)
         )
     if "head_pages" in payload:
-        crawl.head_pages = max(1, min(int(payload["head_pages"]), 500))
-    if "max_pages" in payload:
-        # Empty means no cap: read the slice to the end.
-        raw = payload["max_pages"]
-        crawl.max_pages = None if raw in (None, "", 0) else max(1, min(int(raw), 5_000))
+        # Zero is meaningful: this slice has no front worth re-reading, so
+        # every pass reads all of it.
+        crawl.head_pages = max(0, min(int(payload["head_pages"]), 500))
+    if "full_sweep_interval_minutes" in payload:
+        crawl.full_sweep_interval_minutes = max(
+            5, min(int(payload["full_sweep_interval_minutes"]), 60 * 24 * 90)
+        )
     if "full_sweep_interval_days" in payload:
         crawl.full_sweep_interval_days = max(1, min(int(payload["full_sweep_interval_days"]), 365))
     if "priority" in payload:

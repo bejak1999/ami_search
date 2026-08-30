@@ -363,21 +363,65 @@ function Slice({
       {open && (
         <div className="mt-2 grid gap-3 rounded-control border border-line bg-raised p-3 sm:grid-cols-3">
           <Field
-            label="Re-check every"
-            hint="How long to wait before reading the newest pages again."
+            label={slice.head_pages > 0 ? 'Read the newest pages every' : 'Re-check every'}
+            hint={
+              slice.head_pages > 0
+                ? 'The short pass. Cheap enough to run often, so a new listing is seen within this long.'
+                : 'How long to wait before reading this slice again. Every pass reads all of it.'
+            }
           >
             <Interval
               minutes={slice.recheck_minutes}
               onChange={(minutes) => save.mutate({ recheck_interval_minutes: minutes })}
             />
           </Field>
+
+          <Field
+            label="Newest pages to read"
+            hint="0 reads the whole slice every time, which is right unless its ordering puts new listings at the front."
+          >
+            <div className="flex items-center gap-2">
+              <input
+                type="number"
+                min={0}
+                max={500}
+                defaultValue={slice.head_pages}
+                onBlur={(e) => save.mutate({ head_pages: Number(e.target.value) })}
+                className="field w-24 tabular-nums"
+              />
+              <span className="text-xs text-faint">
+                of {slice.pages_total ? slice.pages_total.toLocaleString('en-GB') : '?'}
+              </span>
+            </div>
+          </Field>
+
+          {slice.head_pages > 0 && (
+            <Field
+              label="Read all of it every"
+              hint="The full sweep behind the short pass, catching whatever the front never showed."
+            >
+              <Interval
+                minutes={slice.full_sweep_interval_minutes}
+                onChange={(minutes) => save.mutate({ full_sweep_interval_minutes: minutes })}
+              />
+            </Field>
+          )}
           <p className="text-[11px] leading-relaxed text-faint sm:col-span-3">
-            Every pass reads the whole slice. There used to be a shallow
-            re-check of the first few pages between full sweeps, on the
-            assumption that the shop lists newest first — measured against the
-            live API, it does not. The pre-owned order is stable and unrelated
-            to when a listing was added, so the shallow pass re-read the same
-            products for ever and never saw the rest.
+            {slice.head_pages > 0 ? (
+              <>
+                Whether re-reading the front pays depends entirely on the ordering, and only
+                one of AmiAmi&rsquo;s eight puts recent activity there. Measured against 594
+                known arrivals, the first 30 pages of this one held 452 of them; the ordering
+                the slice used before held 9 in its first 20, which is worse than picking
+                pages at random. The full sweep behind this catches the rest.
+              </>
+            ) : (
+              <>
+                This slice reads all of itself on every pass. No ordering tested puts anything
+                useful at the front of it, so re-reading the first few pages would return the
+                same products for ever — which is exactly what it used to do.
+              </>
+            )}
           </p>
           <RunLog runs={slice.recent_runs} />
           <p className="text-[11px] leading-relaxed text-faint sm:col-span-3">

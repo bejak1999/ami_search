@@ -530,20 +530,22 @@ def rebuild_price_aggregates() -> int:
 
 
 def adopt_intake_ordering() -> int:
-    """Move the pre-owned sweep off "regtimed" and onto "preowned".
+    """Give the pre-owned slice its short pass back, on the right ordering.
 
-    Both are real orderings and the shop offers both. The difference is which
-    field they read: "regtimed" is when the *product record* was registered,
-    so a used copy taken in today attaches to a record made years ago and
-    never reaches the front. Measured against 594 known arrivals, its first
-    twenty pages held nine of them - worse than picking at random. The same
-    twenty pages of "preowned" held three hundred.
+    Two corrections at once, both of them things this application shipped
+    wrong rather than choices anyone made.
 
-    So this is a correction, not a preference, and it is applied only to a
-    slice still carrying the value this application shipped. Its interval is
-    eased at the same time, because the new head slice alongside it now covers
-    the hourly job: a full 213-page sweep every hour was paying for cover the
-    head provides in thirty pages.
+    The ordering: "regtimed" is when the *product record* was registered, so a
+    used copy taken in today attaches to a record made years ago and never
+    reaches the front. Measured against 594 known arrivals its first twenty
+    pages held nine of them, worse than picking at random; the same twenty
+    pages of "preowned" held three hundred.
+
+    The shape: one release split the short pass into a slice of its own. That
+    made two rows where the settings belong to one job, and left the second
+    row counting itself against the whole catalogue rather than the pre-owned
+    part of it - which is why it read "70,538 here" against ten thousand
+    listed. The row is removed and its settings folded back where they were.
 
     Anything someone has set by hand is left exactly as they set it.
     """
@@ -552,23 +554,46 @@ def adopt_intake_ordering() -> int:
     changed = 0
     with session_scope() as db:
         try:
-            crawls = db.query(models.CatalogCrawl).filter_by(scope="figures_preowned").all()
+            crawls = db.query(models.CatalogCrawl).all()
         except Exception:  # pragma: no cover - table may not exist yet
             return 0
-        for crawl in crawls:
-            query = dict(crawl.query or {})
-            if query.get("sort") != "newest":
-                continue  # already moved, or chosen deliberately
-            query["sort"] = "updated"
-            crawl.query = query
-            # Only if it is still on an interval we shipped. 60 was the hourly
-            # sweep; 30 was the one before that.
-            if crawl.recheck_interval_minutes in (30, 60):
-                crawl.recheck_interval_minutes = 1440
-            # A pass in progress was ordered the old way, so its cursor points
-            # into a list that no longer exists. Start the new ordering at the
-            # top rather than resuming into the middle of a different one.
-            crawl.cursor_page = 1
+
+        by_scope = {c.scope: c for c in crawls}
+
+        # The split-out row, if this installation ever ran that version. Its
+        # own progress is not worth keeping: the slice it stands for is the
+        # one that remains.
+        stray = by_scope.pop("figures_preowned_head", None)
+        if stray is not None:
+            db.delete(stray)
             changed += 1
+
+        crawl = by_scope.get("figures_preowned")
+        if crawl is not None:
+            query = dict(crawl.query or {})
+            if query.get("sort") == "newest":
+                query["sort"] = "updated"
+                crawl.query = query
+                # A pass in progress was ordered the old way, so its cursor
+                # points into a list that no longer exists. Start again at the
+                # top rather than resuming into the middle of a different one.
+                crawl.cursor_page = 1
+                changed += 1
+            # Only touch intervals still sitting on something we shipped: 30
+            # and 60 were the hourly sweep, 1440 the daily one from the split.
+            if not (crawl.head_pages or 0) and crawl.recheck_interval_minutes in (30, 60, 1440):
+                crawl.head_pages = 30
+                crawl.recheck_interval_minutes = 30
+                crawl.full_sweep_interval_minutes = 1440
+                changed += 1
+
+        # The other slices have no front worth re-reading - no ordering tested
+        # puts anything useful there - so they read everything, every pass.
+        for scope in ("figures_in_stock", "figures_preorder", "figures_all"):
+            row = by_scope.get(scope)
+            if row is not None and (row.head_pages or 0) and row.head_pages == 20:
+                row.head_pages = 0  # the old shipped default, never chosen
+                changed += 1
+
         db.commit()
     return changed

@@ -619,7 +619,17 @@ def _collect_items(db: Session, watch: Watch) -> tuple[list[Item], str]:
             if existing is not None:
                 catalog.mark_unavailable(db, existing)
                 return [existing], provider.name
-            raise
+            # Nothing stored either. For a used figure that is the ordinary
+            # state of the world - there is no listing because nobody has sold
+            # one back yet - and it is exactly what the watch is waiting for.
+            # Treating it as an error meant five polls made it "failing" and
+            # every daily health digest complained about it for ever after.
+            #
+            # A code that never resolves at all is a different matter, and is
+            # still reported: see health.check, which now asks whether the
+            # watch has ever found anything rather than whether it failed.
+            log.debug("Watch %s: %s is not listed at the moment", watch.id, code)
+            return [], provider.name
         item, _ = catalog.upsert_item(db, normalized)
         return [item], provider.name
 
