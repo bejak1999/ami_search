@@ -362,81 +362,92 @@ function Slice({
 
       {open && (
         <div className="mt-2 grid gap-3 rounded-control border border-line bg-raised p-3 sm:grid-cols-3">
-          <Field
-            label={slice.head_pages > 0 ? 'Read the newest pages every' : 'Re-check every'}
-            hint={
-              slice.head_pages > 0
-                ? 'The short pass. Cheap enough to run often, so a new listing is seen within this long.'
-                : 'How long to wait before reading this slice again. Every pass reads all of it.'
-            }
-          >
-            <Interval
-              minutes={slice.recheck_minutes}
-              onChange={(minutes) => save.mutate({ recheck_interval_minutes: minutes })}
-            />
-          </Field>
+          {slice.head_supported ? (
+            <>
+              {/* Three settings, and only here. This is the one slice where a
+                  listing can appear and sell inside a morning, and the only
+                  one whose ordering carries new intake to the front — so it
+                  is the only one where re-reading just the front pays. */}
+              <Field
+                label="Newest pages to read"
+                hint="The short pass. 0 turns it off and reads the whole slice every time."
+              >
+                <div className="flex items-center gap-2">
+                  <input
+                    type="number"
+                    min={0}
+                    max={500}
+                    defaultValue={slice.head_pages}
+                    onBlur={(e) => save.mutate({ head_pages: Number(e.target.value) })}
+                    className="field w-24 tabular-nums"
+                  />
+                  <span className="text-xs text-faint">
+                    of {slice.pages_total ? slice.pages_total.toLocaleString('en-GB') : '?'}
+                  </span>
+                </div>
+              </Field>
 
-          {/* Both settings, on every slice. They were hidden on slices whose
-              ordering does not reward a short pass, which was meant to stop
-              someone repeating a measured mistake — but hiding a control is a
-              worse answer than explaining it, and it made the two settings
-              vanish from the one slice they matter most on. The note below
-              says where a short pass pays and where it does not. */}
-          <Field
-            label="Newest pages to read"
-            hint="0 reads the whole slice on every pass."
-          >
-            <div className="flex items-center gap-2">
-              <input
-                type="number"
-                min={0}
-                max={500}
-                defaultValue={slice.head_pages}
-                onBlur={(e) => save.mutate({ head_pages: Number(e.target.value) })}
-                className="field w-24 tabular-nums"
-              />
-              <span className="text-xs text-faint">
-                of {slice.pages_total ? slice.pages_total.toLocaleString('en-GB') : '?'}
-              </span>
-            </div>
-          </Field>
+              {slice.head_pages > 0 && (
+                <Field
+                  label="Read the newest pages every"
+                  hint="Cheap enough to run often, so a new listing is seen within this long."
+                >
+                  <Interval
+                    minutes={slice.recheck_minutes}
+                    onChange={(minutes) =>
+                      save.mutate({ recheck_interval_minutes: minutes })
+                    }
+                  />
+                </Field>
+              )}
 
-          {slice.head_pages > 0 && (
-            <Field
-              label="Read all of it every"
-              hint="The full sweep behind the short pass, catching whatever the front never showed."
-            >
-              <Interval
-                minutes={slice.full_sweep_interval_minutes}
-                onChange={(minutes) => save.mutate({ full_sweep_interval_minutes: minutes })}
-              />
-            </Field>
+              <Field
+                label="Read all of it every"
+                hint="The full sweep behind the short pass, catching whatever the front never showed."
+              >
+                <Interval
+                  minutes={
+                    slice.head_pages > 0
+                      ? slice.full_sweep_interval_minutes
+                      : slice.recheck_minutes
+                  }
+                  onChange={(minutes) =>
+                    save.mutate(
+                      slice.head_pages > 0
+                        ? { full_sweep_interval_minutes: minutes }
+                        : { recheck_interval_minutes: minutes },
+                    )
+                  }
+                />
+              </Field>
+
+              <p className="text-[11px] leading-relaxed text-faint sm:col-span-3">
+                Re-reading the front only pays because of how this slice is ordered: measured
+                against 594 known arrivals, its first 30 pages held 452 of them. No other
+                ordering AmiAmi offers does that, which is why no other slice has this
+                setting.
+              </p>
+            </>
+          ) : (
+            <>
+              {/* One setting. Nothing useful sits at the front of these
+                  orderings, so there is no short pass to configure and no
+                  page count to argue about. */}
+              <Field
+                label="Read all of it every"
+                hint="Every pass reads the whole slice."
+              >
+                <Interval
+                  minutes={slice.recheck_minutes}
+                  onChange={(minutes) => save.mutate({ recheck_interval_minutes: minutes })}
+                />
+              </Field>
+
+            </>
           )}
-          <p className="text-[11px] leading-relaxed text-faint sm:col-span-3">
-            {!slice.head_supported ? (
-              <>
-                Reading only the front of <em>this</em> slice would find nothing new: its
-                ordering does not put recent activity there, so the same products would come
-                back for ever. Leave the page count at 0 unless you have measured otherwise.
-              </>
-            ) : slice.head_pages > 0 ? (
-              <>
-                Whether re-reading the front pays depends entirely on the ordering, and only
-                one of AmiAmi&rsquo;s eight puts recent activity there. Measured against 594
-                known arrivals, the first 30 pages of this one held 452 of them; the ordering
-                the slice used before held 9 in its first 20, which is worse than picking
-                pages at random. The full sweep behind this catches the rest.
-              </>
-            ) : (
-              <>
-                Every pass reads the whole slice. Set a page count above to re-read just the
-                front between full sweeps — worth it here, because this ordering does put
-                newly taken-in copies near the top: measured against 594 known arrivals, its
-                first 30 pages held 452 of them.
-              </>
-            )}
-          </p>
+
           <RunLog runs={slice.recent_runs} />
+
           <p className="text-[11px] leading-relaxed text-faint sm:col-span-3">
             {slice.cycles_completed.toLocaleString('en-GB')} pass(es) so far,{' '}
             {slice.listings_checked.toLocaleString('en-GB')} listings checked in total. That

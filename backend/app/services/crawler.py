@@ -967,11 +967,16 @@ def progress(db: Session, provider_id: str = "amiami") -> dict:
                 "queue_position": queue.get(crawl.scope),
                 "resting": _cooldown_remaining(crawl) > 0,
                 "sort_key": (crawl.query or {}).get("sort") or "newest",
-                # Whether re-reading the front of this slice would find
-                # anything. It depends entirely on the ordering, and of the
-                # eight AmiAmi offers exactly one qualifies - so this is not a
-                # setting to expose everywhere and hope for the best.
-                "head_supported": (crawl.query or {}).get("sort") in HEAD_WORTH_READING,
+                # Whether a short pass means anything here. Only for the
+                # second-hand slice: it is the only one where a listing can
+                # appear and sell inside a morning, and the only one whose
+                # ordering carries new intake to the front.
+                #
+                # Keyed on what the slice *contains*, not on its sort key.
+                # The sort key version of this went false on an installation
+                # whose query held something else, and took the settings away
+                # from the one slice they belong to. The scope cannot drift.
+                "head_supported": SCOPE_FILTERS.get(crawl.scope) == "preowned",
                 "label": crawl.label or crawl.scope,
                 "state": crawl.state.value,
                 "enabled": crawl.enabled,
