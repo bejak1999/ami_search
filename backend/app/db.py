@@ -584,7 +584,17 @@ def adopt_intake_ordering() -> int:
                 changed += 1
             # Only touch intervals still sitting on something we shipped: 30
             # and 60 were the hourly sweep, 1440 the daily one from the split.
-            if not (crawl.head_pages or 0) and crawl.recheck_interval_minutes in (30, 60, 1440):
+            # 20 was the head this application shipped for years, 0 the one
+            # it shipped briefly while the short pass was removed. Neither was
+            # ever chosen by anyone, so both count as unconfigured - the first
+            # version of this only recognised 0 and therefore left every
+            # long-lived installation reading 20 pages with no full-sweep
+            # interval of its own.
+            if (crawl.head_pages or 0) in (0, 20) and crawl.recheck_interval_minutes in (
+                30,
+                60,
+                1440,
+            ):
                 crawl.head_pages = 30
                 crawl.recheck_interval_minutes = 60
                 crawl.full_sweep_interval_minutes = 1440
