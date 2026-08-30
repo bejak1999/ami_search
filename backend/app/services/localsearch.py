@@ -175,12 +175,17 @@ def _apply_tags(stmt: Select, db: Session, req) -> Select | None:
 
 
 def _apply_grades(stmt: Select, req) -> Select:
-    """Only items with a copy on sale in at least this condition.
+    """Only items with a copy on sale in the condition asked for.
 
     AmiAmi grades used stock S, A, B+, B, C, D - best first - and grades the
     figure and its box separately, because a mint figure in a crushed box is
-    common and priced accordingly. Both filters are minimums: asking for B+
-    means B+ or better, which is how someone shops.
+    common and priced accordingly.
+
+    Exact by default rather than a floor. Someone asking for C is usually
+    asking for the cheap ones, and treating it as "C or better" would bury
+    them under every nicer copy in the catalogue - the opposite of what was
+    wanted. ``grade_or_better`` turns it back into a floor for the case where
+    a minimum is what was meant.
 
     Matched against individual copies rather than the product, because that is
     where the grade lives. A product with nine copies has nine conditions, and
@@ -193,14 +198,18 @@ def _apply_grades(stmt: Select, req) -> Select:
     """
     from ..providers.amiami import GRADE_ORDER
 
-    wanted_item = getattr(req, "min_item_grade", None)
-    wanted_box = getattr(req, "min_box_grade", None)
+    wanted_item = getattr(req, "item_grade", None)
+    wanted_box = getattr(req, "box_grade", None)
     if not wanted_item and not wanted_box:
         return stmt
 
-    def acceptable(minimum: str | None) -> list[str]:
-        """Every grade at least as good as this one."""
-        return list(GRADE_ORDER[: GRADE_ORDER.index(minimum) + 1])
+    or_better = bool(getattr(req, "grade_or_better", False))
+
+    def acceptable(grade: str) -> list[str]:
+        """The grades this filter admits."""
+        if not or_better:
+            return [grade]
+        return list(GRADE_ORDER[: GRADE_ORDER.index(grade) + 1])
 
     conditions = [Listing.item_id == Item.id, Listing.status == ListingStatus.live]
     if wanted_item:

@@ -77,6 +77,7 @@ export interface Item {
   jan_code?: string | null
   spec?: string | null
   remarks?: string | null
+  condition_note?: string | null
   condition: string
   condition_grade: string | null
   in_stock: boolean

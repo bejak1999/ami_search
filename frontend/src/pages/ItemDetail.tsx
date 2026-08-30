@@ -9,6 +9,7 @@ import { PriceChart } from '@/components/PriceChart'
 import { Lightbox } from '@/components/Lightbox'
 import { ShelfLifePanel } from '@/components/ShelfLife'
 import { shopUrl } from '@/lib/shop'
+import { ConditionNote } from '@/components/ConditionNote'
 import { WatchEditor } from '@/components/WatchEditor'
 import { LandedTooltip } from '@/components/ItemCard'
 import { Badge, Card, SegmentedControl, Skeleton, Spinner, Tooltip } from '@/components/ui'
@@ -379,6 +380,8 @@ export function ItemDetailPage() {
             )}
           </Card>
 
+          <ConditionNote note={item.condition_note} />
+
           {item.variants.length > 1 && (
             <Card className="p-4">
               <h2 className="mb-1 flex items-center gap-2 text-sm font-semibold">
@@ -493,7 +496,11 @@ export function ItemDetailPage() {
             )}
           </Card>
 
-          <ShelfLifePanel itemId={id} preowned={item.condition === 'preowned'} />
+          <ShelfLifePanel
+            itemId={id}
+            preowned={item.condition === 'preowned'}
+            conditionNote={item.condition_note}
+          />
 
           <Card className="p-4">
             <div className="mb-3 flex items-center justify-between gap-3">

@@ -150,6 +150,10 @@ def upsert_item(db: Session, normalized: NormalizedItem, commit: bool = True) ->
         item.spec = normalized.spec
     if normalized.remarks:
         item.remarks = normalized.remarks
+    # Assigned even when empty: a note that has been removed upstream, because
+    # the copy carrying it sold, must not linger on the product for ever.
+    if normalized.detail_loaded:
+        item.condition_note = normalized.condition_note
 
     item.figure_code = figure_code(item.code)
     item.product_url = normalized.url or item.product_url

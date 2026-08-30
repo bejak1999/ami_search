@@ -37,6 +37,7 @@ interface Filters {
   //: The worst condition still worth showing, figure and box separately.
   itemGrade: string
   boxGrade: string
+  gradeOrBetter: boolean
 }
 
 /**
@@ -46,14 +47,19 @@ interface Filters {
  * box is common and priced accordingly - so someone who only wants to display
  * it and someone who collects the packaging want different things from the
  * same listing.
+ *
+ * Matching is exact unless "or better" is ticked. Asking for C is usually
+ * asking for the cheap ones, and treating it as a floor would bury them under
+ * every nicer copy in the catalogue.
  */
 const GRADES = [
   { value: '', label: 'Any' },
   { value: 'S', label: 'S — as new' },
-  { value: 'A', label: 'A or better' },
-  { value: 'B+', label: 'B+ or better' },
-  { value: 'B', label: 'B or better' },
-  { value: 'C', label: 'C or better' },
+  { value: 'A', label: 'A' },
+  { value: 'B+', label: 'B+' },
+  { value: 'B', label: 'B' },
+  { value: 'C', label: 'C — often marked down' },
+  { value: 'D', label: 'D — heavily marked down' },
 ]
 
 const EMPTY: Filters = {
@@ -74,6 +80,7 @@ const EMPTY: Filters = {
   atLowestEver: false,
   itemGrade: '',
   boxGrade: '',
+  gradeOrBetter: false,
   exclude: '',
   onSale: false,
 }
@@ -139,6 +146,7 @@ export function SearchPage() {
     onSale: params.get('sale') === '1',
     itemGrade: params.get('item_grade') ?? '',
     boxGrade: params.get('box_grade') ?? '',
+    gradeOrBetter: params.get('grade_up') === '1',
   })
 
   const source: Source = params.get('src') === 'shop' ? 'shop' : 'local'
@@ -180,6 +188,7 @@ export function SearchPage() {
     if (f.minDiscount) search.set('min_discount_pct', f.minDiscount)
     if (f.itemGrade) search.set('item_grade', f.itemGrade)
     if (f.boxGrade) search.set('box_grade', f.boxGrade)
+    if (f.gradeOrBetter) search.set('grade_up', '1')
     if (f.ignoreBlocklist) search.set('unblock', '1')
     if (f.minPrice) search.set('min', f.minPrice)
     if (f.maxPrice) search.set('max', f.maxPrice)
@@ -238,8 +247,9 @@ export function SearchPage() {
               ? Number(applied.belowAverage)
               : undefined,
             min_discount_pct: applied.minDiscount ? Number(applied.minDiscount) : undefined,
-            min_item_grade: applied.itemGrade || undefined,
-            min_box_grade: applied.boxGrade || undefined,
+            item_grade: applied.itemGrade || undefined,
+            box_grade: applied.boxGrade || undefined,
+            grade_or_better: applied.gradeOrBetter || undefined,
             ignore_blocklist: applied.ignoreBlocklist,
           })
         : api.search.run({
@@ -501,6 +511,16 @@ export function SearchPage() {
                           ))}
                         </select>
                       </Field>
+                      {(draft.itemGrade || draft.boxGrade) && (
+                        <Field label="Match">
+                          <Toggle
+                            checked={draft.gradeOrBetter}
+                            onChange={(gradeOrBetter) => setDraft({ ...draft, gradeOrBetter })}
+                            label="…or better"
+                            hint="Off, the grade is matched exactly — which is what you want when hunting the cheap end. On, it becomes a floor."
+                          />
+                        </Field>
+                      )}
                     </>
                   )}
                   <Field label="Sort by">

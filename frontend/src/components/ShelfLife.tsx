@@ -6,6 +6,7 @@ import { Icon } from '@/components/Icon'
 import { Card, Spinner, Tooltip } from '@/components/ui'
 import { money, shortDate } from '@/lib/format'
 import { shopUrl } from '@/lib/shop'
+import { ConditionNote } from '@/components/ConditionNote'
 import clsx from 'clsx'
 
 /**
@@ -106,7 +107,16 @@ function Bar({ row, span }: { row: ListingRow; span: { start: number; end: numbe
   )
 }
 
-export function ShelfLifePanel({ itemId, preowned }: { itemId: number; preowned: boolean }) {
+export function ShelfLifePanel({
+  itemId,
+  preowned,
+  conditionNote,
+}: {
+  itemId: number
+  preowned: boolean
+  /** Why this product is marked down, if the shop said. */
+  conditionNote?: string | null
+}) {
   const query = useQuery({
     queryKey: ['shelfLife', itemId],
     queryFn: () => api.items.shelfLife(itemId),
@@ -191,6 +201,12 @@ export function ShelfLifePanel({ itemId, preowned }: { itemId: number; preowned:
           Not enough history yet to say how long copies last. Every check adds to it.
         </p>
       )}
+
+      {/* Beside the shelf-life figures rather than only at the top of the
+          page. A copy that sold in three days looks like a bargain everyone
+          wanted; it reads differently once you know it had stains on its
+          legs, and this is where someone is doing that reasoning. */}
+      <ConditionNote note={conditionNote} className="mb-3" />
 
       {span && data.listings.length > 0 ? (
         <>

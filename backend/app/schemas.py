@@ -235,6 +235,8 @@ class ItemOut(ItemBase):
     jan_code: str | None = None
     spec: str | None = None
     remarks: str | None = None
+    #: Why a used copy is marked down, in AmiAmi's own words.
+    condition_note: str | None = None
     lowest_price: float | None = None
     highest_price: float | None = None
     average_price: float | None = None
@@ -345,10 +347,18 @@ class SearchRequest(BaseModel):
 class LocalSearchRequest(BaseModel):
     """Searching this instance's own catalogue rather than the shop.
 
+    Unknown fields are refused rather than ignored. A filter that does not
+    apply is worse than one that errors: renaming min_item_grade to item_grade
+    left every request still sending the old name returning the whole
+    catalogue, silently, looking exactly like a search with no matches
+    excluded.
+
     The local catalogue keeps listings the shop has deleted, so it grows past
     what AmiAmi will show you and can answer questions the shop cannot: what a
     figure has ever cost, and whether today's price is the lowest it has been.
     """
+
+    model_config = ConfigDict(extra="forbid")
 
     q: str = ""
     provider: str | None = None
@@ -370,15 +380,19 @@ class LocalSearchRequest(BaseModel):
     #: Only items whose current price equals the lowest ever recorded here.
     at_lowest_ever: bool = False
 
-    #: The worst condition still worth showing, for either the figure or its
-    #: box. AmiAmi grades used stock S, A, B+, B, C, D, best first, and grades
-    #: each separately - a mint figure in a battered box is common and priced
+    #: The condition asked for, for the figure and its box separately.
+    #: AmiAmi grades used stock S, A, B+, B, C, D, best first, and grades the
+    #: two apart - a mint figure in a battered box is common and priced
     #: accordingly. Matching is per copy: an item qualifies when at least one
-    #: of its copies currently on sale is this good or better, so the filter
-    #: answers "can I buy one in this condition" rather than "is this product
-    #: associated with that grade somewhere".
-    min_item_grade: Literal["S", "A", "B+", "B", "C", "D"] | None = None
-    min_box_grade: Literal["S", "A", "B+", "B", "C", "D"] | None = None
+    #: of its copies currently on sale meets it, so the filter answers "can I
+    #: buy one like this" rather than "is this product associated with that
+    #: grade somewhere".
+    item_grade: Literal["S", "A", "B+", "B", "C", "D"] | None = None
+    box_grade: Literal["S", "A", "B+", "B", "C", "D"] | None = None
+    #: Whether the grades above are an exact match or a floor. Exact by
+    #: default: asking for C usually means wanting the cheap ones, and a
+    #: floor would bury them under every better copy in the catalogue.
+    grade_or_better: bool = False
 
     # Lists, because a Discover rail is defined by every series or character
     # on your list rather than by one of them. Handing over only the first was

@@ -3771,31 +3771,31 @@ def test_condition_filter_asks_about_copies() -> None:
     check("without a filter both are shown", codes() == ["P-1", "P-2"], codes())
     check(
         "asking for an A finds the product whose dear copy is one",
-        codes(min_item_grade="A") == ["P-1"],
-        codes(min_item_grade="A"),
+        codes(item_grade="A") == ["P-1"],
+        codes(item_grade="A"),
     )
     check(
-        "a minimum means that grade or better",
-        codes(min_item_grade="C") == ["P-1", "P-2"],
-        codes(min_item_grade="C"),
+        "widening it means that grade or better",
+        codes(item_grade="C", grade_or_better=True) == ["P-1", "P-2"],
+        codes(item_grade="C", grade_or_better=True),
     )
     check(
         "a copy that has already sold does not qualify its product",
-        codes(min_box_grade="S") == [],
-        codes(min_box_grade="S"),
+        codes(box_grade="S") == [],
+        codes(box_grade="S"),
     )
     check(
         "both filters must hold for the same copy",
-        codes(min_item_grade="A", min_box_grade="B") == ["P-1"],
-        codes(min_item_grade="A", min_box_grade="B"),
+        codes(item_grade="A", box_grade="B") == ["P-1"],
+        codes(item_grade="A", box_grade="B"),
     )
     # P-1's A copy has a B box; P-2's live copy is C/D. Asking for an A figure
     # in an A box matches neither, and must not match P-1 by pairing its A
     # figure with some other copy's box.
     check(
         "and never by pairing two different copies",
-        codes(min_item_grade="A", min_box_grade="A") == [],
-        codes(min_item_grade="A", min_box_grade="A"),
+        codes(item_grade="A", box_grade="A") == [],
+        codes(item_grade="A", box_grade="A"),
     )
 
     db.query(Listing).delete()
@@ -3855,6 +3855,116 @@ def test_newly_listed_used_is_not_newly_known() -> None:
         codes("newest_copy"),
     )
 
+    db.query(Item).delete()
+    db.commit()
+    db.close()
+
+
+def test_condition_notes_are_told_from_shipping_notices() -> None:
+    print("\n== The red text that explains a low price, and the red text that does not ==")
+    from app.providers.amiami import condition_note
+
+    # Both of these are real, both are red, and both live in "remarks". The
+    # first is the entire reason the figure costs 3,920 instead of 19,580; the
+    # second is about the parcel and has nothing to do with condition.
+    defect = (
+        "<font color=red><b>[Discoloration] Upper body skin area has become white\n"
+        "Both legs are sticky and have stains</b></font>"
+    )
+    shipping = (
+        "<font color=red><b>*Shipping costs for this item may be very high due to "
+        "package size or/and weight.</b></font>\n*This item must be delivered alone "
+        "and it cannot be combined with other items."
+    )
+
+    note = condition_note(defect)
+    check("the defect note survives", note is not None)
+    check("with its category kept", note.startswith("[Discoloration]"), note)
+    check("and both sentences", "sticky" in note and "white" in note, note)
+    check("the markup is gone", "<" not in note and ">" not in note, note)
+    check("and the line break with it", "\n" not in note, repr(note))
+
+    check("a shipping warning is not a defect", condition_note(shipping) is None)
+    check("nor is a plain description", condition_note("Sculptor: Makio") is None)
+    check("nor nothing at all", condition_note(None) is None)
+    check("nor an empty red tag", condition_note("<font color=red></font>") is None)
+
+    # Seen in the wild while sampling the catalogue, in a different shape from
+    # the one that prompted this.
+    check(
+        "a shorter note works the same",
+        condition_note("<font color=red><b>[Missing] Shoes</b></font>") == "[Missing] Shoes",
+    )
+
+    # Unrecognised red text is kept rather than dropped. A defect that goes
+    # unshown is the failure that matters: it is the difference between a
+    # bargain and a figure with stains on its legs. A shipping notice shown by
+    # mistake is only noise.
+    check(
+        "unfamiliar wording is kept, not discarded",
+        condition_note("<font color=red>Left arm has a repair mark</font>")
+        == "Left arm has a repair mark",
+    )
+
+    # Two red passages, one of each kind, on the same product.
+    both = (
+        "<font color=red><b>[Scratches] On the base</b></font> and "
+        "<font color=red><b>*Shipping costs for this item may be very high.</b></font>"
+    )
+    check(
+        "the useful half is kept when they are mixed",
+        condition_note(both) == "[Scratches] On the base",
+        condition_note(both),
+    )
+
+
+def test_grades_match_exactly_unless_widened() -> None:
+    print("\n== A condition filter matches that grade, not everything above it ==")
+    from app.db import SessionLocal, init_db
+    from app.models import Condition, Item, Listing, ListingStatus
+    from app.schemas import LocalSearchRequest
+    from app.services import localsearch
+
+    init_db()
+    db = SessionLocal()
+    db.query(Listing).delete()
+    db.query(Item).delete()
+    db.commit()
+
+    now = datetime.now(timezone.utc)
+    for code, grades in (
+        ("CHEAP-C", [("C", "B")]),
+        ("MINT-A", [("A", "A")]),
+        ("MIXED", [("C", "C"), ("A", "B")]),
+    ):
+        item = Item(provider="amiami", code=code, name=code,
+                    condition=Condition.preowned, in_stock=True)
+        db.add(item)
+        db.flush()
+        for n, (item_grade, box_grade) in enumerate(grades):
+            db.add(Listing(item_id=item.id, code=f"{code}-R{n}", currency="JPY",
+                           status=ListingStatus.live, item_grade=item_grade,
+                           box_grade=box_grade, first_seen_at=now, last_seen_at=now))
+    db.commit()
+
+    def codes(**kw):
+        return sorted(i.code for i in localsearch.search(db, LocalSearchRequest(**kw)).items)
+
+    # Asking for C is asking for the cheap ones. As a floor it would return
+    # the mint copy too, which is the opposite of what was wanted.
+    check("exactly C leaves the mint one out", codes(item_grade="C") == ["CHEAP-C", "MIXED"],
+          codes(item_grade="C"))
+    check(
+        "and widening it brings that one in",
+        codes(item_grade="C", grade_or_better=True) == ["CHEAP-C", "MINT-A", "MIXED"],
+        codes(item_grade="C", grade_or_better=True),
+    )
+    check("exactly A finds the A copies", codes(item_grade="A") == ["MINT-A", "MIXED"],
+          codes(item_grade="A"))
+    check("D matches nothing here", codes(item_grade="D") == [], codes(item_grade="D"))
+    check("no grade asked for means no filtering", len(codes()) == 3)
+
+    db.query(Listing).delete()
     db.query(Item).delete()
     db.commit()
     db.close()
@@ -3928,6 +4038,8 @@ def main() -> int:
     test_linking_estimate_describes_the_job_that_runs()
     test_daily_recap_counts_copies_not_products()
     test_condition_filter_asks_about_copies()
+    test_grades_match_exactly_unless_widened()
+    test_condition_notes_are_told_from_shipping_notices()
     test_newly_listed_used_is_not_newly_known()
     test_settings()
 

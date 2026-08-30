@@ -329,6 +329,12 @@ class Item(Base):
 
     spec: Mapped[str | None] = mapped_column(Text)
     remarks: Mapped[str | None] = mapped_column(Text)
+    #: The red warning on a used listing saying why it is marked down -
+    #: discolouration, stains, a missing part. Kept apart from remarks
+    #: because that field also carries shipping notices and the plain
+    #: product description, and a defect shown among those is a defect
+    #: nobody reads.
+    condition_note: Mapped[str | None] = mapped_column(Text)
     raw: Mapped[dict] = mapped_column(JSON, default=dict)
 
     first_seen_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utcnow)

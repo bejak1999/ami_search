@@ -80,6 +80,53 @@ def _clean_condition(sname: str | None) -> str:
     return " ".join(match.group(1).split()) if match else ""
 
 
+#: The red text on a product page, whatever it says.
+_RED_TEXT = re.compile(r"<font[^>]*color[^>]*red[^>]*>(.*?)</font>", re.IGNORECASE | re.DOTALL)
+_HTML_TAG = re.compile(r"<[^>]+>")
+
+#: Red text that is about the parcel rather than the figure. AmiAmi uses one
+#: field for both, so the shipping warning would otherwise be presented as a
+#: reason a used copy is cheap - worse than saying nothing, because it reads
+#: as a defect that is not there.
+_LOGISTICS = re.compile(
+    r"shipping cost|package size|delivered alone|cannot be combined|"
+    r"combined with other items|separate shipment|single shipment|"
+    r"postage|freight|oversized",
+    re.IGNORECASE,
+)
+
+
+def condition_note(remarks: str | None) -> str | None:
+    """The red warning explaining why a used copy is marked down.
+
+    AmiAmi puts these in ``remarks``, wrapped in a red font tag, and puts
+    shipping warnings in exactly the same place - so the two have to be told
+    apart by what they say. A condition note describes the object:
+
+        [Discoloration] Upper body skin area has become white
+        Both legs are sticky and have stains
+
+    A logistics note describes the parcel, and is dropped:
+
+        *Shipping costs for this item may be very high due to package size
+        or/and weight.
+
+    Anything red that is not recognisably about postage is kept, because a
+    condition note that goes unshown is the failure that matters here: it is
+    the difference between a bargain and a figure with stains on its legs.
+    """
+    if not remarks:
+        return None
+    kept: list[str] = []
+    for chunk in _RED_TEXT.findall(remarks):
+        text = _HTML_TAG.sub("", chunk)
+        text = " ".join(text.split())
+        if not text or _LOGISTICS.search(text):
+            continue
+        kept.append(text)
+    return " · ".join(kept) or None
+
+
 def parse_grades(text: str | None) -> tuple[str | None, str | None]:
     """Split a condition string into (item grade, box grade).
 
@@ -564,6 +611,7 @@ class AmiAmiProvider(ShopProvider):
             release_date_parsed=self._parse_release(raw.get("releasedate")),
             spec=raw.get("spec"),
             remarks=raw.get("remarks") or raw.get("memo"),
+            condition_note=condition_note(raw.get("remarks")),
             detail_loaded=True,
             raw=raw,
         )
