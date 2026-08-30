@@ -895,6 +895,11 @@ class CatalogCrawl(Base):
     #: After a first full sweep, later cycles only re-read the newest pages,
     #: because the shop lists newest first and the tail rarely changes.
     head_pages: Mapped[int] = mapped_column(Integer, default=20)
+    #: How far into the ordering this slice reads. NULL means all the way.
+    #: A slice with a cap is a head pass: it re-reads the front of an ordering
+    #: that genuinely puts recent activity there, cheaply and often, while a
+    #: separate uncapped slice covers the rest on a slower cycle.
+    max_pages: Mapped[int | None] = mapped_column(Integer)
     #: How long to wait before re-reading the newest pages. Without a pause the
     #: crawler simply loops over the same first pages continuously, which is
     #: how one slice accumulated 43 passes in an afternoon.

@@ -1292,32 +1292,58 @@ def test_slices_take_turns() -> None:
     crawler.ensure_scopes(db, "amiami")
 
     rows = {c.scope: c for c in db.query(CatalogCrawl).all()}
-    check("the four shop statuses are set up", len(rows) == 4, sorted(rows))
+    check("the shop statuses are set up", len(rows) == 5, sorted(rows))
     check(
         "every slice starts enabled",
         all(row.enabled for row in rows.values()),
         {s: r.enabled for s, r in rows.items()},
     )
+
+    # Only the pre-owned pair reads the intake ordering. It was measured on
+    # that slice and nowhere else, and for a slice that reads every page the
+    # ordering makes no difference anyway.
     check(
-        "and every one reads newest-updated first",
-        all((c.query or {}).get("sort") == "newest" for c in rows.values()),
+        "the pre-owned slices read the ordering that tracks intake",
+        all(
+            (rows[s].query or {}).get("sort") == "updated"
+            for s in ("figures_preowned_head", "figures_preowned")
+        ),
+        {s: (r.query or {}).get("sort") for s, r in rows.items()},
+    )
+    check(
+        "and the others are left on what they had",
+        all(
+            (rows[s].query or {}).get("sort") == "newest"
+            for s in ("figures_in_stock", "figures_preorder", "figures_all")
+        ),
     )
 
-    # The three narrow slices carry the changes; the full sweep is the
-    # backstop. Anything in none of the three is sold out and frozen, so
-    # re-reading it often buys nothing.
-    fast = max(
-        rows[s].recheck_interval_minutes
-        for s in ("figures_preowned", "figures_in_stock", "figures_preorder")
+    # The head is the frequent one and it is the only capped slice: reading
+    # the front of an ordering often only pays when the front is where things
+    # turn up, which is true of this ordering and of no other tested.
+    check("only the head is capped", rows["figures_preowned_head"].max_pages == 30)
+    check(
+        "everything else reads to the end",
+        all(r.max_pages is None for s, r in rows.items() if s != "figures_preowned_head"),
     )
     check(
-        "the narrow slices run far more often than the full sweep",
-        rows["figures_all"].recheck_interval_minutes > fast * 20,
-        (fast, rows["figures_all"].recheck_interval_minutes),
+        "the head runs far more often than the sweep behind it",
+        rows["figures_preowned"].recheck_interval_minutes
+        >= rows["figures_preowned_head"].recheck_interval_minutes * 20,
+        (
+            rows["figures_preowned_head"].recheck_interval_minutes,
+            rows["figures_preowned"].recheck_interval_minutes,
+        ),
+    )
+    check(
+        "and the full catalogue is rarer still",
+        rows["figures_all"].recheck_interval_minutes
+        > rows["figures_preowned"].recheck_interval_minutes,
     )
 
     pages = {
-        "figures_preowned": 211,
+        "figures_preowned_head": 30,
+        "figures_preowned": 213,
         "figures_in_stock": 59,
         "figures_preorder": 45,
         "figures_all": 1385,
@@ -1332,6 +1358,17 @@ def test_slices_take_turns() -> None:
         "and the schedule leaves budget for everything else",
         per_day < capacity * 0.75,
         f"{per_day:.0f} of {capacity:.0f} pages a day",
+    )
+    # The point of the rearrangement: an hourly full sweep cost 213 pages an
+    # hour to catch arrivals. The head catches most of them for 60.
+    head_cost = pages["figures_preowned_head"] * (
+        1440 / rows["figures_preowned_head"].recheck_interval_minutes
+    )
+    old_hourly_sweep = 213 * 24
+    check(
+        "watching for arrivals costs a fraction of what it did",
+        head_cost < old_hourly_sweep / 3,
+        f"{head_cost:.0f} pages a day against {old_hourly_sweep}",
     )
 
     # --- who gets the next few minutes -------------------------------------
@@ -1354,27 +1391,33 @@ def test_slices_take_turns() -> None:
         picked.scope if picked else None,
     )
 
-    # An hourly slice comes due and takes over. The big one keeps its cursor.
-    rows["figures_preowned"].finished_at = now - timedelta(hours=3)
+    # The half-hourly head comes due and takes over. The big one keeps its
+    # cursor. This is the case the whole arrangement exists for: catching an
+    # arrival must not wait behind a sweep that has hours left to run.
+    rows["figures_preowned_head"].finished_at = now - timedelta(hours=3)
     db.commit()
     picked = crawler._select_crawl(db, "amiami")
-    check("due work outranks a sweep in progress", picked.scope == "figures_preowned")
+    check(
+        "due work outranks a sweep in progress",
+        picked.scope == "figures_preowned_head",
+        picked.scope if picked else None,
+    )
 
     # And it stays chosen until its own pass completes, rather than being
     # swapped out every few minutes. That churn is what made this
     # incomprehensible to watch: nothing ever finished.
-    rows["figures_preowned"].cursor_page = 40
-    rows["figures_preowned"].last_run_at = datetime.now(timezone.utc)
+    rows["figures_preowned_head"].cursor_page = 12
+    rows["figures_preowned_head"].last_run_at = datetime.now(timezone.utc)
     db.commit()
     check(
         "and keeps the budget until that pass is done",
-        crawler._select_crawl(db, "amiami").scope == "figures_preowned",
+        crawler._select_crawl(db, "amiami").scope == "figures_preowned_head",
         crawler._select_crawl(db, "amiami").scope,
     )
 
     # Once it finishes, the interrupted sweep picks up where it left off.
-    rows["figures_preowned"].cursor_page = 1
-    rows["figures_preowned"].finished_at = datetime.now(timezone.utc)
+    rows["figures_preowned_head"].cursor_page = 1
+    rows["figures_preowned_head"].finished_at = datetime.now(timezone.utc)
     db.commit()
     resumed = crawler._select_crawl(db, "amiami")
     check(
@@ -3297,6 +3340,78 @@ def test_price_history_follows_the_cheapest_copy() -> None:
     db.close()
 
 
+def test_head_slice_reads_only_its_front() -> None:
+    print("\n== A capped slice reads the front, an uncapped one reads it all ==")
+    from app.db import SessionLocal, adopt_intake_ordering, init_db
+    from app.models import CatalogCrawl
+    from app.services.crawler import _page_limit
+
+    full = CatalogCrawl(provider="amiami", scope="s", pages_total=213)
+    check("no cap means the whole slice", _page_limit(full) == 213)
+
+    head = CatalogCrawl(provider="amiami", scope="h", pages_total=213, max_pages=30)
+    check("a cap stops at the front", _page_limit(head) == 30)
+
+    # The cap is a ceiling, not a target: a slice shorter than its cap is not
+    # read past its own end.
+    short = CatalogCrawl(provider="amiami", scope="h", pages_total=8, max_pages=30)
+    check("a short slice is not padded out", _page_limit(short) == 8)
+
+    unknown = CatalogCrawl(provider="amiami", scope="h", max_pages=30)
+    check("a cap holds before the first response too", _page_limit(unknown) == 30)
+
+    # --- what an existing installation gets ---------------------------------
+    init_db()
+    db = SessionLocal()
+    db.query(CatalogCrawl).delete()
+    db.commit()
+
+    # As shipped before: hourly, on the registration ordering.
+    db.add(
+        CatalogCrawl(
+            provider="amiami",
+            scope="figures_preowned",
+            label="Pre-owned figures",
+            query={"category_id": 1, "condition": "preowned", "sort": "newest"},
+            recheck_interval_minutes=60,
+            cursor_page=88,
+        )
+    )
+    db.commit()
+    db.close()
+
+    check("the slice is moved over", adopt_intake_ordering() == 1)
+
+    db = SessionLocal()
+    row = db.query(CatalogCrawl).filter_by(scope="figures_preowned").one()
+    check("onto the ordering that tracks intake", row.query["sort"] == "updated", row.query)
+    check("and eased to a daily sweep", row.recheck_interval_minutes == 1440)
+    check(
+        "a pass ordered the old way restarts rather than resuming",
+        row.cursor_page == 1,
+        row.cursor_page,
+    )
+    check("a second upgrade changes nothing", adopt_intake_ordering() == 0)
+
+    # An interval someone chose is theirs, and so is a sort they picked.
+    row.recheck_interval_minutes = 240
+    row.query = {"category_id": 1, "condition": "preowned", "sort": "newest"}
+    db.commit()
+    db.close()
+    adopt_intake_ordering()
+    db = SessionLocal()
+    row = db.query(CatalogCrawl).filter_by(scope="figures_preowned").one()
+    check(
+        "a hand-set interval survives the move",
+        row.recheck_interval_minutes == 240,
+        row.recheck_interval_minutes,
+    )
+
+    db.query(CatalogCrawl).delete()
+    db.commit()
+    db.close()
+
+
 def main() -> int:
     test_url_parsing()
     test_release_dates()
@@ -3358,6 +3473,7 @@ def main() -> int:
     test_prefetch_works_through_its_backlog()
     test_tag_search_reaches_past_the_popular_ones()
     test_price_history_follows_the_cheapest_copy()
+    test_head_slice_reads_only_its_front()
     test_settings()
 
     print(f"\n{'=' * 46}\n  {PASS} passed, {FAIL} failed\n{'=' * 46}")

@@ -95,6 +95,9 @@ def init_db() -> None:
     rebuilt = rebuild_price_aggregates()
     if rebuilt:
         log.info("Recomputed the price range on %s item(s) from product-level points", rebuilt)
+    resorted = adopt_intake_ordering()
+    if resorted:
+        log.info("Moved %s pre-owned slice(s) onto the ordering that tracks intake", resorted)
     log.info("Database ready at %s", settings.resolved_database_url.split("://", 1)[0])
 
 
@@ -521,6 +524,51 @@ def rebuild_price_aggregates() -> int:
             item.lowest_price = wanted_low
             item.highest_price = wanted_high
             item.average_price = wanted_avg
+            changed += 1
+        db.commit()
+    return changed
+
+
+def adopt_intake_ordering() -> int:
+    """Move the pre-owned sweep off "regtimed" and onto "preowned".
+
+    Both are real orderings and the shop offers both. The difference is which
+    field they read: "regtimed" is when the *product record* was registered,
+    so a used copy taken in today attaches to a record made years ago and
+    never reaches the front. Measured against 594 known arrivals, its first
+    twenty pages held nine of them - worse than picking at random. The same
+    twenty pages of "preowned" held three hundred.
+
+    So this is a correction, not a preference, and it is applied only to a
+    slice still carrying the value this application shipped. Its interval is
+    eased at the same time, because the new head slice alongside it now covers
+    the hourly job: a full 213-page sweep every hour was paying for cover the
+    head provides in thirty pages.
+
+    Anything someone has set by hand is left exactly as they set it.
+    """
+    from . import models
+
+    changed = 0
+    with session_scope() as db:
+        try:
+            crawls = db.query(models.CatalogCrawl).filter_by(scope="figures_preowned").all()
+        except Exception:  # pragma: no cover - table may not exist yet
+            return 0
+        for crawl in crawls:
+            query = dict(crawl.query or {})
+            if query.get("sort") != "newest":
+                continue  # already moved, or chosen deliberately
+            query["sort"] = "updated"
+            crawl.query = query
+            # Only if it is still on an interval we shipped. 60 was the hourly
+            # sweep; 30 was the one before that.
+            if crawl.recheck_interval_minutes in (30, 60):
+                crawl.recheck_interval_minutes = 1440
+            # A pass in progress was ordered the old way, so its cursor points
+            # into a list that no longer exists. Start the new ordering at the
+            # top rather than resuming into the middle of a different one.
+            crawl.cursor_page = 1
             changed += 1
         db.commit()
     return changed

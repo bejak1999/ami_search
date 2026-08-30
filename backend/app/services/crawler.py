@@ -85,15 +85,28 @@ SCOPE_FILTERS: dict[str, str] = {
 #: arrival within the hour, which is what the interval below is for.
 DEFAULT_SCOPES: list[dict] = [
     {
+        "scope": "figures_preowned_head",
+        "label": "Pre-owned, newest first",
+        "priority": 5,
+        "query": {"category_id": 1, "condition": "preowned", "sort": "updated"},
+        # The front of the "preowned" ordering, which is the one that actually
+        # tracks intake - see _page_limit for the measurement. 30 pages every
+        # half hour is 60 requests an hour against the 213 a full sweep costs,
+        # and it holds about nine tenths of the arrivals that are still on
+        # sale by the time anyone could have found them.
+        "max_pages": 30,
+        "recheck_interval_minutes": 30,
+    },
+    {
         "scope": "figures_preowned",
         "label": "Pre-owned figures",
         "priority": 10,
-        "query": {"category_id": 1, "condition": "preowned", "sort": "newest"},
-        # 211 pages, about 25 minutes of requests. Measured churn is 24
-        # arrivals and 21 departures an hour, so an hourly sweep sees every
-        # one of them within the hour. Half-hourly would only halve a latency
-        # nobody is waiting on, and it never stops running.
-        "recheck_interval_minutes": 60,
+        "query": {"category_id": 1, "condition": "preowned", "sort": "updated"},
+        # The whole slice, 213 pages, about 25 minutes of requests. With the
+        # head pass above catching arrivals within the half hour, this is the
+        # backstop that sweeps up whatever the front never showed - once a day
+        # rather than every hour.
+        "recheck_interval_minutes": 1440,
     },
     {
         "scope": "figures_in_stock",
@@ -174,6 +187,7 @@ def ensure_scopes(db: Session, provider: str = "amiami") -> int:
                 priority=spec["priority"],
                 query=spec["query"],
                 recheck_interval_minutes=spec.get("recheck_interval_minutes", 30),
+                max_pages=spec.get("max_pages"),
                 enabled=spec.get("enabled", True),
             )
         )
@@ -276,10 +290,46 @@ def _page_limit(crawl: CatalogCrawl) -> int:
     ``head_pages`` is left on the model so an existing row still loads, but
     nothing reads it any more.
 
+    That was measured on "regtimed", and the conclusion held for it. It does
+    not hold for every ordering, which took a second round of measuring to
+    establish. AmiAmi's own dropdown offers eight keys; asked about the same
+    594 known arrivals, they differ enormously (.probe/intake_order.py):
+
+      * "preowned" (中古) held 300 of them in its first twenty pages, 5.35
+        times what a random slice of that size would catch
+      * "releasedated" managed 1.30 times chance, the unsorted default 0.59
+      * "regtimed" managed 0.20 - genuinely worse than a shuffle, which is
+        what the 24.7-hour run had already shown from the other direction
+
+    "regtime" is a real field and it does sort: read ascending it hands back
+    the oldest product records first, ids around 1,100, and its last page is
+    the first page of the descending order. It is simply the wrong field - it
+    records when the *product* was registered, so a used copy taken in today
+    attaches to a record made years ago and never moves to the front.
+
+    Under "preowned" the recall by depth is (.probe/preowned_depth.py):
+
+        10 pages   211 of 594   36%
+        20 pages   300 of 594   51%
+        30 pages   452 of 594   76%
+        40 pages   452 of 594   76%   - not one more
+
+    A plateau that flat is not an ordering missing things; it is the rest no
+    longer being there. Of fourteen sampled arrivals the head had not shown,
+    ten had already sold (.probe/missing_check.py), which puts recall among
+    listings still on sale at about nine in ten - a small sample, so read that
+    as "most" rather than as a precise figure.
+
+    So a capped slice is worth having again, on that ordering and no other.
+    ``head_pages`` stays unread; ``max_pages`` is what a slice now honours.
+
     Column defaults only apply on insert, so the number is read defensively: a
     row that has not been flushed yet still carries None.
     """
-    return crawl.pages_total or 10_000  # unknown until the first response
+    total = crawl.pages_total or 10_000  # unknown until the first response
+    if crawl.max_pages:
+        return min(total, crawl.max_pages)
+    return total
 
 
 def _cooldown_remaining(crawl: CatalogCrawl) -> int:
@@ -783,6 +833,7 @@ def progress(db: Session, provider_id: str = "amiami") -> dict:
                 "next_run_in_seconds": _cooldown_remaining(crawl),
                 "recheck_minutes": crawl.recheck_interval_minutes,
                 "head_pages": crawl.head_pages,
+                "max_pages": crawl.max_pages,
                 "full_sweep_interval_days": crawl.full_sweep_interval_days,
             }
         )

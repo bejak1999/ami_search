@@ -117,11 +117,22 @@ def meets_grade(grade: str | None, minimum: str | None) -> bool:
 #: to be holding. Anything absent here has no upstream equivalent and is
 #: sorted locally, which only ever orders the current page.
 #:
-#: "regtimed" is the one the shop's menu calls "Recently Updated Items". It
-#: puts listings the shop has just taken copies in for at the front, measured
-#: rather than assumed: of the twelve products on its first page, eleven were
-#: holding the last numbers the shop had issued for them, consecutively. The
-#: default order does no such thing.
+#: What AmiAmi's own dropdown offers, with the names it gives them. Two of
+#: these - releasedatea and buy_priced - are commented out in the shop's
+#: markup, so a visitor is not offered them, but the API honours both.
+#:
+#: The one that matters is "preowned" (中古). Measured against 594 known
+#: arrivals, its first twenty pages held 300 of them, 5.35 times what a random
+#: slice of that size would catch. "regtimed" (新着順, "newest") held nine -
+#: 0.20x, worse than a shuffle - because it orders by when the *product
+#: record* was registered, not by when a used copy was taken in, so a copy
+#: arriving today attaches to a record made years ago and never moves to the
+#: front. An earlier note here claimed the opposite on the strength of twelve
+#: products on one page; two longitudinal runs say otherwise.
+#:
+#: "buy_priced" is AmiAmi's buyback price, highest first - what the shop will
+#: pay for a figure. Nothing reads it yet; it is listed so the next person
+#: knows it exists.
 SORT_KEYS: dict[str, str] = {
     "newest": "regtimed",
     "updated": "preowned",
@@ -131,6 +142,7 @@ SORT_KEYS: dict[str, str] = {
     "oldest": "regtimea",
     "price_asc": "pricea",
     "price_desc": "priced",
+    "buyback": "buy_priced",
 }
 
 #: "priced" returns dear listings but not in order, so the page it hands back

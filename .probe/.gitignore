@@ -2,3 +2,4 @@
 # the data it collects is not.
 order-*.json
 regtime-watch.json
+watch-*.json

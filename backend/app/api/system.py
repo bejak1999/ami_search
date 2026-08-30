@@ -408,6 +408,10 @@ def update_catalog_slice(
         )
     if "head_pages" in payload:
         crawl.head_pages = max(1, min(int(payload["head_pages"]), 500))
+    if "max_pages" in payload:
+        # Empty means no cap: read the slice to the end.
+        raw = payload["max_pages"]
+        crawl.max_pages = None if raw in (None, "", 0) else max(1, min(int(raw), 5_000))
     if "full_sweep_interval_days" in payload:
         crawl.full_sweep_interval_days = max(1, min(int(payload["full_sweep_interval_days"]), 365))
     if "priority" in payload:

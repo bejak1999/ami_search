@@ -20,8 +20,17 @@ snapshots say whether a head pass would have caught it, and on which page. If
 most arrivals show up on the first pages, the head pass is enough and the
 crawler can stop reading 211 pages an hour. If they are scattered, it cannot.
 
-    .probe\\regtime-watch.bat            start it, leave it, Ctrl+C to stop
-    python .probe/regtime_watch.py report
+The ordering under test is an argument, because the answer turned out to
+depend on it: "regtimed" scored 9 of 592 while "preowned", asked the same
+question afterwards, held roughly half the arrivals in a third of the pages.
+The head size is an argument too, so a candidate can be tried at the depth it
+would actually be crawled at.
+
+    .probe\\preowned-watch.bat           the ordering now in use, 30 pages
+    .probe\\regtime-watch.bat            the old one, 20 pages, for comparison
+
+    python .probe/regtime_watch.py watch preowned 30
+    python .probe/regtime_watch.py report preowned
 
 State is written to disk after every step, so stopping the machine or closing
 the window loses at most the hour in progress. Running "watch" again resumes
@@ -44,10 +53,16 @@ os.environ.setdefault("SECRET_KEY", "regtime-watch-not-a-real-secret")
 from app.providers.amiami import API_ROOT, AmiAmiProvider  # noqa: E402
 
 HERE = pathlib.Path(__file__).resolve().parent
-STATE = HERE / "regtime-watch.json"
 
-#: The head a crawler would re-read, and how long to keep this up.
-HEAD_PAGES = 20
+
+def state_path() -> pathlib.Path:
+    """One file per ordering, so two runs cannot overwrite each other."""
+    return HERE / f"watch-{SORT_KEY}.json"
+
+#: Defaults, overridden by the command line. The head is what a crawler
+#: would re-read each cycle; the ordering is which one it would read.
+SORT_KEY = "preowned"
+HEAD_PAGES = 30
 HOURS = 24
 #: Deliberately gentle. The application is very likely crawling from the same
 #: address at the same time, and this is a measurement, not a race.
@@ -73,7 +88,7 @@ def fetch(page: int) -> tuple[list[dict], int]:
                 "pagecnt": page,
                 "s_cate_tag": 1,
                 "s_st_condition_flg": 1,
-                "s_sortkey": "regtimed",
+                "s_sortkey": SORT_KEY,
                 "lang": "eng",
             },
         )
@@ -93,13 +108,20 @@ def digest(raw: dict) -> list:
 
 
 def load() -> dict:
-    if STATE.exists():
-        return json.loads(STATE.read_text(encoding="utf-8"))
+    path = state_path()
+    if path.exists():
+        return json.loads(path.read_text(encoding="utf-8"))
+    # The first run of this script wrote one file under a fixed name, before
+    # the ordering was a variable. Read it rather than discarding 24 hours of
+    # measurement.
+    legacy = HERE / "regtime-watch.json"
+    if SORT_KEY == "regtimed" and legacy.exists():
+        return json.loads(legacy.read_text(encoding="utf-8"))
     return {"full": {}, "heads": []}
 
 
 def save(state: dict) -> None:
-    STATE.write_text(json.dumps(state), encoding="utf-8")
+    state_path().write_text(json.dumps(state), encoding="utf-8")
 
 
 def enumerate_all(label: str) -> dict:
@@ -219,7 +241,8 @@ def report() -> None:
         if code in before and after[code] != before[code]
     }
 
-    print(f"Over {hours:.1f} hours, with {len(heads)} snapshots of the first {HEAD_PAGES} pages")
+    print(f"Ordering: {SORT_KEY!r}, first {HEAD_PAGES} pages")
+    print(f"Over {hours:.1f} hours, with {len(heads)} snapshot(s) of that head")
     print(f"  {len(before):,} listings at the start, {len(after):,} at the end")
     print(f"  {len(arrived):,} arrived, {len(departed):,} disappeared, "
           f"{len(moved):,} changed price range")
@@ -237,10 +260,18 @@ def report() -> None:
             continue
         caught = {code: first_seen[code] for code in group if code in first_seen}
         share = len(caught) / len(group) * 100
+        # What the same number of slots would have caught at random, so the
+        # share can be read against something rather than admired on its own.
+        slots = HEAD_PAGES * PER_PAGE
+        expected = len(group) * min(1.0, slots / max(1, len(after)))
+        factor = (len(caught) / expected) if expected else 0
         print(f"{label}: {len(caught):,} of {len(group):,} appeared in the head ({share:.0f}%)")
+        print(f"    that is {factor:.2f}x what {slots:,} random slots would have caught")
         if caught:
             positions = sorted(caught.values())
-            for pages in (1, 2, 3, 5, 10, 20):
+            for pages in (1, 2, 3, 5, 10, 20, 30, 40):
+                if pages > HEAD_PAGES:
+                    break
                 within = sum(1 for p in positions if p <= pages * PER_PAGE)
                 print(
                     f"    within the first {pages:>2} page(s): "
@@ -249,11 +280,9 @@ def report() -> None:
         print()
 
     print("Reading it")
-    print("  If nearly every arrival turns up within the first few pages, a head")
-    print("  pass finds what a full sweep finds and the crawler can stop reading")
-    print("  211 pages an hour. If a large share never appears in the head at all,")
-    print("  the ordering does not put new listings at the front and the full")
-    print("  sweep has to stay.")
+    print("  Above 1.00x the ordering is doing something; at or below it, the")
+    print("  head is no better than reading any other part of the slice, and")
+    print("  the full sweep is the only thing finding anything.")
     print()
     print("  One caveat this cannot escape: an arrival that appeared and sold out")
     print("  between two snapshots is invisible to both the head and the closing")
@@ -262,10 +291,15 @@ def report() -> None:
 
 if __name__ == "__main__":
     action = sys.argv[1] if len(sys.argv) > 1 else "watch"
+    if len(sys.argv) > 2:
+        SORT_KEY = sys.argv[2]
+    if len(sys.argv) > 3:
+        HEAD_PAGES = int(sys.argv[3])
+
     if action == "report":
         report()
     elif action == "reset":
-        STATE.unlink(missing_ok=True)
-        print("Cleared. The next watch starts a fresh measurement.")
+        state_path().unlink(missing_ok=True)
+        print(f"Cleared {state_path().name}. The next watch starts fresh.")
     else:
         watch()
