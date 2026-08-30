@@ -115,6 +115,11 @@ export function ItemDetailPage() {
     onSuccess: () => {
       toast.success('Refreshed from the shop')
       void queryClient.invalidateQueries({ queryKey: ['item', id] })
+      // A refresh is a detail fetch, and a detail fetch is the only thing
+      // that can tell which individual copies have gone. The panel showing
+      // them keys on 'shelfLife', so without this the copy that just sold
+      // went on being drawn as still on the shelf until a reload.
+      void queryClient.invalidateQueries({ queryKey: ['shelfLife', id] })
     },
     onError: (error) => toast.error('Refresh failed', (error as Error).message),
   })

@@ -232,12 +232,28 @@ def upsert_item(db: Session, normalized: NormalizedItem, commit: bool = True) ->
 
     # Only a detail response knows the individual graded copies, so only a
     # detail response can tell which of them have gone.
-    if normalized.detail_loaded and normalized.variants:
+    #
+    # An empty list of copies is information too, and used to be discarded:
+    # when the last copy sells, the product answers with no buyable copies at
+    # all, and skipping reconcile left every one of them recorded as still on
+    # the shelf for ever. That is precisely the moment the shelf-life figure
+    # is waiting for.
+    #
+    # But only when the shop agrees there is nothing to buy. If it says the
+    # product is in stock and we parsed no copies out of the response, that is
+    # far more likely a change in their payload than a sell-out, and acting on
+    # it would close every copy of every item in one pass.
+    nothing_buyable = not normalized.in_stock or normalized.order_closed
+    if normalized.detail_loaded and (normalized.variants or nothing_buyable):
         from . import shelflife
 
         db.flush()  # the item needs an id before copies can point at it
         shelflife.reconcile(
-            db, item, normalized.variants, observed_at=item.last_detail_fetch_at
+            db,
+            item,
+            normalized.variants,
+            observed_at=item.last_detail_fetch_at,
+            sold_out=nothing_buyable,
         )
 
     if commit:

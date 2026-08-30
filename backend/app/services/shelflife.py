@@ -325,6 +325,7 @@ def reconcile(
     variants: list[dict],
     observed_at: datetime | None = None,
     commit: bool = False,
+    sold_out: bool = False,
 ) -> ReconcileResult:
     """Match one detail fetch's copies against what we already knew.
 
@@ -341,9 +342,14 @@ def reconcile(
     observed_at = _as_aware(observed_at) or utcnow()
     result = ReconcileResult()
 
-    if not variants:
-        # A detail fetch with no buyable copies says nothing about which ones
-        # sold; treating it as "everything vanished" would invent sales.
+    if not variants and not sold_out:
+        # An empty list on its own says nothing about which copies sold. It is
+        # as easily a response we failed to read, and treating that as
+        # "everything vanished" would invent sales across the catalogue.
+        #
+        # It means something only when the shop itself says there is nothing
+        # to buy, and only the caller can see that - so the caller says so
+        # rather than this guessing from an absence.
         return result
 
     seen: dict[str, dict] = {}

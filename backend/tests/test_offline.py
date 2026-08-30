@@ -4280,6 +4280,92 @@ def test_each_copy_carries_its_own_price_trail() -> None:
     db.close()
 
 
+def test_a_refresh_notices_a_copy_has_gone() -> None:
+    print("\n== Refreshing an item settles which copies are still there ==")
+    from app.db import SessionLocal, init_db
+    from app.models import Condition, Item, Listing, ListingStatus, PricePoint
+    from app.providers.base import NormalizedItem
+    from app.services import catalog
+
+    init_db()
+    db = SessionLocal()
+    db.query(PricePoint).delete()
+    db.query(Listing).delete()
+    db.query(Item).delete()
+    db.commit()
+
+    now = datetime.now(timezone.utc)
+
+    def detail(variants, *, in_stock=True, closed=False) -> NormalizedItem:
+        return NormalizedItem(
+            provider="amiami",
+            code="R-1",
+            name="Used figure",
+            url="https://www.amiami.com/eng/detail/?gcode=R-1",
+            currency="JPY",
+            price=variants[0]["price"] if variants else None,
+            condition="preowned",
+            in_stock=in_stock,
+            order_closed=closed,
+            detail_loaded=True,
+            variants=variants,
+        )
+
+    three = [
+        {"code": "R-1-R10", "price": 5880, "condition": "Item:B Box:B",
+         "item_grade": "B", "box_grade": "B", "note": None},
+        {"code": "R-1-R11", "price": 7480, "condition": "Item:A Box:B",
+         "item_grade": "A", "box_grade": "B", "note": None},
+        {"code": "R-1-R12", "price": 9780, "condition": "Item:A Box:A",
+         "item_grade": "A", "box_grade": "A", "note": None},
+    ]
+    item, _ = catalog.upsert_item(db, detail(three))
+    db.commit()
+    live = lambda: db.query(Listing).filter_by(status=ListingStatus.live).count()  # noqa: E731
+    check("all three copies are recorded", live() == 3, live())
+
+    # One sells. A refresh is a detail fetch, and a detail fetch is the only
+    # thing that can see which of them has gone.
+    catalog.upsert_item(db, detail(three[1:]))
+    db.commit()
+    check("the sold copy is closed", live() == 2, live())
+    gone = db.query(Listing).filter_by(code="R-1-R10").one()
+    check("and recorded as sold", gone.outcome.value == "sold", gone.outcome)
+    check("with a date it vanished before", gone.vanished_before is not None)
+
+    # Then the last two go and the product has nothing buyable left. This used
+    # to be discarded - an empty variant list meant reconcile never ran - so
+    # the copies stayed on the shelf for ever, which is exactly the moment the
+    # shelf-life figure is waiting for.
+    catalog.upsert_item(db, detail([], in_stock=False, closed=True))
+    db.commit()
+    check("a sold-out product closes the rest", live() == 0, live())
+
+    # But only when the shop agrees. If it says the product is in stock and
+    # the response yielded no copies, that is far likelier a change in their
+    # payload than a sell-out, and acting on it would close every copy of
+    # every item in a single pass.
+    db.query(Listing).delete()
+    db.commit()
+    db.expire_all()  # item.listings still holds the rows just deleted
+    item2, _ = catalog.upsert_item(db, detail(three))
+    db.commit()
+    check("three copies again", live() == 3)
+    catalog.upsert_item(db, detail([], in_stock=True))
+    db.commit()
+    check(
+        "an unparseable response closes nothing",
+        live() == 3,
+        live(),
+    )
+
+    db.query(PricePoint).delete()
+    db.query(Listing).delete()
+    db.query(Item).delete()
+    db.commit()
+    db.close()
+
+
 def main() -> int:
     test_url_parsing()
     test_release_dates()
@@ -4353,6 +4439,7 @@ def main() -> int:
     test_shop_notes_hold_up_on_wording_never_seen()
     test_a_note_belongs_to_one_copy()
     test_each_copy_carries_its_own_price_trail()
+    test_a_refresh_notices_a_copy_has_gone()
     test_newly_listed_used_is_not_newly_known()
     test_settings()
 
