@@ -923,6 +923,12 @@ class CatalogCrawl(Base):
     #: The same thing in minutes, so both intervals use one control and one
     #: set of units. NULL falls back to the days column above.
     full_sweep_interval_minutes: Mapped[int | None] = mapped_column(Integer)
+    #: What the pass under way has managed so far, accumulated across the
+    #: scheduler slots it is spread over. A pass is what someone means by
+    #: "a crawl" - front to back - and it takes many slots, so recording
+    #: each slot separately produced a log full of four-second fragments
+    #: that answered nothing.
+    current_pass: Mapped[dict] = mapped_column(JSON, default=dict)
     #: Whether the pass currently under way is reading the whole slice.
     #: Decided once when the pass starts and held, because it cannot be
     #: inferred afterwards: a cursor past the front means either a short

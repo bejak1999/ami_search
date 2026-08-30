@@ -154,6 +154,8 @@ class CrawlRun:
     new_items: int = 0
     changed: int = 0
     seconds: float = 0.0
+    #: How often this run stood aside for a watch and picked up again.
+    interruptions: int = 0
     stopped_because: str = ""
     errors: list[str] = field(default_factory=list)
 
@@ -209,6 +211,30 @@ def _pacer() -> HumanPacer:
         quiet_hours=(settings.crawler_quiet_hours_start, settings.crawler_quiet_hours_end),
         quiet_slowdown=settings.crawler_quiet_slowdown,
     )
+
+
+#: How long to hold still while a watch takes its turn, and how often to
+#: look again. The scheduler polls due watches every five seconds, so waiting
+#: in shorter steps than that only burns queries.
+_YIELD_STEP_SECONDS = 2.0
+
+
+def _wait_for_watches(db: Session, deadline: float) -> bool:
+    """Hold still until no watch is waiting. False if the budget ran out.
+
+    The session is expired between looks so the next one reads what the watch
+    poller has committed rather than this transaction's snapshot - otherwise
+    the crawler would wait for a state it can no longer see change.
+    """
+    from ..scheduler.engine import engine
+
+    while True:
+        if time.monotonic() >= deadline or getattr(engine, "stopping", False):
+            return False
+        time.sleep(min(_YIELD_STEP_SECONDS, max(0.0, deadline - time.monotonic())))
+        db.expire_all()
+        if not watches_are_due(db):
+            return True
 
 
 def watches_are_due(db: Session) -> bool:
@@ -484,6 +510,17 @@ def run_once(db: Session, provider_id: str = "amiami", budget_seconds: int | Non
         # mind half way would either stop a sweep short or turn a short pass
         # into a sweep.
         crawl.sweeping_all = full_sweep_due(crawl)
+        crawl.current_pass = {
+            "started_at": utcnow().isoformat(),
+            "pages": 0,
+            "items": 0,
+            "new": 0,
+            "changed": 0,
+            "errors": 0,
+            "slots": 0,
+            "working_seconds": 0.0,
+            "interruptions": 0,
+        }
     crawl.state = CrawlState.running
     # Kept before it is overwritten: the gap since this slice last ran is what
     # turns pages-per-run into pages-per-hour of real time, and the idle part
@@ -506,8 +543,23 @@ def run_once(db: Session, provider_id: str = "amiami", budget_seconds: int | Non
             run.stopped_because = "time budget reached"
             break
         if watches_are_due(db):
-            run.stopped_because = "yielded to a due watch"
-            break
+            # Stand aside for the watch, then carry on within the same budget.
+            #
+            # This used to end the run outright, which sounds like the same
+            # thing and is not: the crawler is given four minutes every five,
+            # and abandoning that at the ten-second mark forfeited the rest of
+            # it. Watches poll every minute or two, so nearly every run ended
+            # within seconds - measured over an hour, eleven runs covered 176
+            # pages where the budget allowed 470, and a twenty-page pass took
+            # the hour instead of the two and a half minutes it costs.
+            #
+            # The watch still goes first. Only the waiting is no longer paid
+            # for twice.
+            run.interruptions += 1
+            if not _wait_for_watches(db, deadline):
+                run.stopped_because = "time budget reached"
+                break
+            continue
 
         limit = _page_limit(crawl)
         if crawl.cursor_page > limit:
@@ -564,7 +616,7 @@ def run_once(db: Session, provider_id: str = "amiami", budget_seconds: int | Non
     run.seconds = time.monotonic() - started
 
     _record_throughput(crawl, run.pages, previous_run_at)
-    _record_run(crawl, run)
+    _accumulate(crawl, run)
     db.commit()
 
     if run.pages:
@@ -585,34 +637,87 @@ def run_once(db: Session, provider_id: str = "amiami", budget_seconds: int | Non
 RUN_LOG_LENGTH = 12
 
 
-def _record_run(crawl: CatalogCrawl, run: "CrawlRun") -> None:
-    """Keep what this run actually managed, newest first.
+def _accumulate(crawl: CatalogCrawl, run: "CrawlRun") -> None:
+    """Fold one scheduler slot into the pass it belongs to.
 
-    The throughput here is pages per minute *while running*, which is a
-    different question from the pages per hour used for estimates: this says
-    how fast the slice moves when it has the budget, that one says how much
-    real time a sweep will take including waiting for its turn. Both are worth
-    seeing, and confusing them is how "about 33 minutes" came to mean an
-    afternoon.
+    Nothing is written to the log here. A pass is what someone means by "a
+    crawl" - the front-to-back read - and it is spread over however many slots
+    the scheduler gives it. Logging each slot filled the history with
+    four-second fragments and a pages-per-minute figure that regularly
+    exceeded the configured rate limit, because two pages fetched from banked
+    tokens is not a speed anything can hold.
     """
-    if run.pages <= 0 and not run.errors:
+    state = dict(crawl.current_pass or {})
+    if not state:
+        # A slot that arrived without a pass start behind it - a resumed
+        # cursor after a restart. Begin the accounting from here rather than
+        # dropping the work on the floor.
+        state = {
+            "started_at": utcnow().isoformat(),
+            "pages": 0, "items": 0, "new": 0, "changed": 0,
+            "errors": 0, "slots": 0, "working_seconds": 0.0, "interruptions": 0,
+        }
+    state["pages"] = state.get("pages", 0) + run.pages
+    state["items"] = state.get("items", 0) + run.items
+    state["new"] = state.get("new", 0) + run.new_items
+    state["changed"] = state.get("changed", 0) + run.changed
+    state["errors"] = state.get("errors", 0) + len(run.errors)
+    state["interruptions"] = state.get("interruptions", 0) + run.interruptions
+    state["slots"] = state.get("slots", 0) + 1
+    state["working_seconds"] = round(state.get("working_seconds", 0.0) + run.seconds, 1)
+    # Reassigned rather than mutated: SQLAlchemy does not notice a dict edited
+    # in place on a JSON column, so the update would silently save nothing.
+    crawl.current_pass = state
+
+
+def _record_pass(crawl: CatalogCrawl, ended_because: str) -> None:
+    """Write down one whole pass, front to back.
+
+    Two durations, because they answer different questions. The elapsed time
+    is how long the pass took in the world - start to finish, waiting
+    included - which is what someone means by "how long did the crawl take".
+    The working time is how much of that it spent fetching; the rest was
+    spent waiting for its turn behind watches and between scheduler slots.
+    Only the first of those makes pages-per-minute mean anything.
+    """
+    state = dict(crawl.current_pass or {})
+    if not state or not state.get("pages"):
         return
+
+    started = state.get("started_at")
+    finished = utcnow()
+    try:
+        began = datetime.fromisoformat(started) if started else finished
+    except ValueError:  # pragma: no cover - a hand-edited row
+        began = finished
+    if began.tzinfo is None:
+        began = began.replace(tzinfo=timezone.utc)
+
+    elapsed = max(0.0, (finished - began).total_seconds())
+    working = float(state.get("working_seconds") or 0.0)
+    pages = int(state.get("pages") or 0)
+
     entry = {
-        "at": utcnow().isoformat(),
-        "seconds": round(run.seconds, 1),
-        "pages": run.pages,
-        "items": run.items,
-        "new": run.new_items,
-        "changed": run.changed,
-        "stopped": run.stopped_because or None,
-        "pages_per_minute": (
-            round(run.pages / (run.seconds / 60.0), 1) if run.seconds > 1 else None
-        ),
-        "errors": len(run.errors),
+        "at": finished.isoformat(),
+        "started_at": began.isoformat(),
+        # Front to back, waiting included.
+        "seconds": round(elapsed, 1),
+        # Of which actually fetching.
+        "working_seconds": round(min(working, elapsed), 1),
+        "waiting_seconds": round(max(0.0, elapsed - working), 1),
+        "slots": int(state.get("slots") or 0),
+        "interruptions": int(state.get("interruptions") or 0),
+        "pages": pages,
+        "items": int(state.get("items") or 0),
+        "new": int(state.get("new") or 0),
+        "changed": int(state.get("changed") or 0),
+        "errors": int(state.get("errors") or 0),
+        "stopped": ended_because or None,
+        # Over the whole pass, so it is a rate the slice can actually hold.
+        "pages_per_minute": round(pages / (elapsed / 60.0), 1) if elapsed >= 30 else None,
     }
-    # Reassigned rather than mutated: SQLAlchemy does not notice a list edited
-    # in place on a JSON column, so appending would silently save nothing.
     crawl.recent_runs = ([entry] + list(crawl.recent_runs or []))[:RUN_LOG_LENGTH]
+    crawl.current_pass = {}
 
 
 def _record_throughput(crawl: CatalogCrawl, pages: int, previous_run_at) -> None:
@@ -654,6 +759,7 @@ def _complete_cycle(db: Session, crawl: CatalogCrawl) -> None:
     """Wrap a finished pass and arm the next one."""
     # What kind of pass this was, as decided when it started.
     was_full = bool(crawl.sweeping_all) or not (crawl.head_pages or 0)
+    _record_pass(crawl, "read to the end")
     crawl.cycles_completed = (crawl.cycles_completed or 0) + 1
     crawl.cursor_page = 1
     crawl.finished_at = utcnow()

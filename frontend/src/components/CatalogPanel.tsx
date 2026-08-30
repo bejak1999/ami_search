@@ -518,7 +518,12 @@ function Interval({
 
 type Run = {
   at: string
+  started_at?: string
   seconds: number
+  working_seconds?: number
+  waiting_seconds?: number
+  slots?: number
+  interruptions?: number
   pages: number
   items: number
   new: number
@@ -529,19 +534,25 @@ type Run = {
 }
 
 /**
- * What the last few runs of this slice actually managed.
+ * What each of the last few passes managed, front to back.
  *
- * The pages-per-minute here is the speed while running, which is a different
- * question from the pages-per-hour behind the sweep estimate: that one
- * includes the hours spent waiting for a turn. A slice can be quick in this
- * sense and still take a day to get round, and seeing both is what stops that
- * looking like a contradiction.
+ * One row per pass, not per scheduler slot. A pass is what "a crawl" means -
+ * the whole read from the first page to the last - and the scheduler hands it
+ * out in four-minute slots, so a twenty-page pass is spread over several. The
+ * log used to record each slot, which filled it with four-second fragments
+ * and a pages-per-minute figure that regularly exceeded the configured rate
+ * limit: two pages fetched from banked tokens is not a speed anything holds.
+ *
+ * Two durations, because they answer different questions. "Took" is the wall
+ * clock from start to finish. "Waiting" is how much of that went on standing
+ * aside for watches and sitting between slots, which is usually most of it
+ * and is the number to look at when a pass seems slow.
  */
 function RunLog({ runs }: { runs?: Run[] }) {
   if (!runs || runs.length === 0) {
     return (
       <p className="text-[11px] text-faint sm:col-span-3">
-        No runs recorded yet. They appear here as the slice works.
+        No completed passes yet. One appears here each time this slice reaches the end.
       </p>
     )
   }
@@ -549,19 +560,20 @@ function RunLog({ runs }: { runs?: Run[] }) {
   return (
     <div className="sm:col-span-3">
       <p className="mb-1.5 text-[11px] font-medium text-muted">
-        Last {runs.length} run{runs.length === 1 ? '' : 's'}, newest first
+        Last {runs.length} pass{runs.length === 1 ? '' : 'es'}, newest first
       </p>
       <div className="overflow-x-auto">
         <table className="w-full text-[11px] tabular-nums">
           <thead className="text-faint">
             <tr className="text-left">
               <th className="pb-1 pr-3 font-normal">Finished</th>
-              <th className="pb-1 pr-3 font-normal">Ran for</th>
+              <th className="pb-1 pr-3 font-normal">Took</th>
+              <th className="pb-1 pr-3 font-normal">Waiting</th>
               <th className="pb-1 pr-3 text-right font-normal">Pages</th>
               <th className="pb-1 pr-3 text-right font-normal">Per min</th>
               <th className="pb-1 pr-3 text-right font-normal">New</th>
               <th className="pb-1 pr-3 text-right font-normal">Changed</th>
-              <th className="pb-1 font-normal">Ended because</th>
+              <th className="pb-1 font-normal">Ended</th>
             </tr>
           </thead>
           <tbody>
@@ -575,10 +587,24 @@ function RunLog({ runs }: { runs?: Run[] }) {
                     minute: '2-digit',
                   })}
                 </td>
-                <td className="py-1 pr-3 text-muted">{duration(run.seconds)}</td>
+                <td className="py-1 pr-3">{duration(run.seconds)}</td>
+                <td className="py-1 pr-3 text-faint">
+                  {run.waiting_seconds === undefined ? (
+                    '—'
+                  ) : (
+                    <>
+                      {duration(run.waiting_seconds)}
+                      {run.interruptions ? (
+                        <span className="ml-1">
+                          · stood aside {run.interruptions}×
+                        </span>
+                      ) : null}
+                    </>
+                  )}
+                </td>
                 <td className="py-1 pr-3 text-right">{run.pages.toLocaleString('en-GB')}</td>
                 <td className="py-1 pr-3 text-right font-medium">
-                  {run.pages_per_minute?.toLocaleString('en-GB') ?? '\u2014'}
+                  {run.pages_per_minute?.toLocaleString('en-GB') ?? '—'}
                 </td>
                 <td className="py-1 pr-3 text-right">
                   {run.new > 0 ? (
@@ -595,18 +621,22 @@ function RunLog({ runs }: { runs?: Run[] }) {
                   )}
                 </td>
                 <td className={clsx('py-1', run.errors > 0 ? 'text-warning' : 'text-faint')}>
-                  {run.stopped ?? 'finished the slice'}
-                  {run.errors > 0 && ` \u00b7 ${run.errors} error(s)`}
+                  {run.stopped ?? 'read to the end'}
+                  {run.errors > 0 && ` · ${run.errors} error(s)`}
                 </td>
               </tr>
             ))}
           </tbody>
         </table>
       </div>
+      <p className="mt-1.5 text-[11px] leading-relaxed text-faint">
+        A pass is the whole read, front to back. It is handed out in slots of a few minutes,
+        so most of the elapsed time is spent waiting for the next one or standing aside for a
+        watch — which is why the per-minute figure is well under the request limit.
+      </p>
     </div>
   )
 }
-
 
 /**
  * How much of the pre-owned catalogue is being followed copy by copy.

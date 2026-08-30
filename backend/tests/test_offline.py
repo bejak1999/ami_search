@@ -2966,44 +2966,100 @@ def test_settings() -> None:
 
 
 def test_run_log() -> None:
-    print("\n== Each slice keeps what its last runs managed ==")
+    print("\n== The log records whole passes, not the slots they were spread over ==")
     from app.models import CatalogCrawl
-    from app.services.crawler import RUN_LOG_LENGTH, CrawlRun, _record_run
+    from app.services.crawler import (
+        RUN_LOG_LENGTH,
+        CrawlRun,
+        _accumulate,
+        _record_pass,
+    )
 
-    crawl = CatalogCrawl(provider="amiami", scope="figures_preowned", recent_runs=[])
+    def fresh(started_minutes_ago: float) -> CatalogCrawl:
+        crawl = CatalogCrawl(provider="amiami", scope="figures_preowned", recent_runs=[])
+        began = datetime.now(timezone.utc) - timedelta(minutes=started_minutes_ago)
+        crawl.current_pass = {
+            "started_at": began.isoformat(), "pages": 0, "items": 0, "new": 0,
+            "changed": 0, "errors": 0, "slots": 0, "working_seconds": 0.0,
+            "interruptions": 0,
+        }
+        return crawl
 
-    _record_run(crawl, CrawlRun(pages=32, items=1600, new_items=4, changed=11,
-                                seconds=240.0, stopped_because="time budget reached"))
+    # A real hour from the instance: eleven scheduler slots, 176 pages, the
+    # crawler standing aside for a watch on nearly every one. Logged per slot
+    # this produced eleven rows, several of them four seconds long, and a
+    # pages-per-minute column showing 27 against a configured limit of 8 -
+    # because two pages fetched from banked tokens is not a speed.
+    slots = ((22, 120, 1), (25, 180, 2), (11, 59, 1), (12, 60, 1), (18, 120, 1),
+             (2, 17, 1), (28, 180, 2), (22, 60, 1), (10, 50, 1), (13, 120, 1), (13, 55, 0))
+    crawl = fresh(63)
+    for pages, seconds, interruptions in slots:
+        _accumulate(crawl, CrawlRun(pages=pages, items=pages * 50, new_items=0,
+                                    changed=1 if pages > 20 else 0, seconds=seconds,
+                                    interruptions=interruptions))
+    check("nothing is logged mid-pass", crawl.recent_runs == [], crawl.recent_runs)
+
+    _record_pass(crawl, "read to the end")
+    check("finishing writes exactly one row", len(crawl.recent_runs) == 1)
+
     entry = crawl.recent_runs[0]
-    check("a run is written down", len(crawl.recent_runs) == 1)
-    check("with the speed it actually managed", entry["pages_per_minute"] == 8.0, entry)
-    check("and why it stopped", entry["stopped"] == "time budget reached")
+    check("holding every page of the pass", entry["pages"] == 176, entry["pages"])
+    check("and every slot it took", entry["slots"] == len(slots), entry["slots"])
+    check("counting the times it stood aside", entry["interruptions"] == 12,
+          entry["interruptions"])
 
-    # Newest first, so the panel does not have to reverse it and the reader
-    # sees the most recent line at the top where they are looking.
-    _record_run(crawl, CrawlRun(pages=18, items=900, new_items=0, changed=2, seconds=132.0))
-    check("the newest run comes first", crawl.recent_runs[0]["pages"] == 18,
-          [r["pages"] for r in crawl.recent_runs])
+    # Two durations, answering different questions: how long it took in the
+    # world, and how much of that was spent fetching rather than waiting.
+    check("the elapsed time is the wall clock", 3700 < entry["seconds"] < 3900,
+          entry["seconds"])
+    check("the working time is far less", entry["working_seconds"] < entry["seconds"] / 2,
+          (entry["working_seconds"], entry["seconds"]))
+    check(
+        "and the two account for the whole of it",
+        abs(entry["working_seconds"] + entry["waiting_seconds"] - entry["seconds"]) < 0.2,
+        entry,
+    )
 
-    # The list prunes itself rather than needing a job to do it.
+    # Over the whole pass the rate is one the slice can actually hold, which
+    # the per-slot figure never was.
+    check("the rate is inside the request limit", entry["pages_per_minute"] < 8,
+          entry["pages_per_minute"])
+    check("and is not zero", entry["pages_per_minute"] > 0)
+
+    # A pass too short to time honestly reports no rate rather than a number
+    # invented by dividing by nearly nothing.
+    brief = fresh(0)
+    _accumulate(brief, CrawlRun(pages=2, items=100, seconds=4.0))
+    _record_pass(brief, "read to the end")
+    check("a pass of seconds quotes no rate",
+          brief.recent_runs[0]["pages_per_minute"] is None,
+          brief.recent_runs[0]["pages_per_minute"])
+
+    # A pass that fetched nothing is not worth a line.
+    empty = fresh(5)
+    _record_pass(empty, "read to the end")
+    check("an empty pass is not logged", empty.recent_runs == [])
+
+    # The log prunes itself rather than needing a job to do it.
+    keeper = fresh(10)
     for _ in range(RUN_LOG_LENGTH * 2):
-        _record_run(crawl, CrawlRun(pages=5, items=250, new_items=0, changed=0, seconds=60.0))
-    check("the log stays capped", len(crawl.recent_runs) == RUN_LOG_LENGTH,
-          len(crawl.recent_runs))
+        keeper.current_pass = {
+            "started_at": (datetime.now(timezone.utc) - timedelta(minutes=10)).isoformat(),
+            "pages": 5, "items": 250, "new": 0, "changed": 0, "errors": 0,
+            "slots": 1, "working_seconds": 60.0, "interruptions": 0,
+        }
+        _record_pass(keeper, "read to the end")
+    check("the log stays capped", len(keeper.recent_runs) == RUN_LOG_LENGTH,
+          len(keeper.recent_runs))
+    check("and the accumulator is cleared for the next pass",
+          keeper.current_pass == {}, keeper.current_pass)
 
-    # A run that did nothing is not worth a line; a run that only produced
-    # errors is exactly what someone comes here to find.
-    before = len(crawl.recent_runs)
-    _record_run(crawl, CrawlRun(pages=0, items=0, new_items=0, changed=0, seconds=1.0))
-    check("an empty run is not logged", len(crawl.recent_runs) == before)
-    _record_run(crawl, CrawlRun(pages=0, items=0, new_items=0, changed=0, seconds=8.0,
-                                errors=["upstream refused"]))
-    check("but a failed one is", crawl.recent_runs[0]["errors"] == 1)
-
-    # A very short run gives no honest rate, so it reports none rather than a
-    # number invented by dividing by nearly zero.
-    _record_run(crawl, CrawlRun(pages=1, items=50, new_items=0, changed=0, seconds=0.4))
-    check("too short to measure means no rate", crawl.recent_runs[0]["pages_per_minute"] is None)
+    # A slot arriving with no pass behind it - a cursor resumed after a
+    # restart - starts the accounting rather than dropping the work.
+    orphan = CatalogCrawl(provider="amiami", scope="s", recent_runs=[], current_pass={})
+    _accumulate(orphan, CrawlRun(pages=7, items=350, seconds=40.0))
+    check("an orphaned slot still counts", orphan.current_pass["pages"] == 7,
+          orphan.current_pass)
 
 
 def test_request_accounting() -> None:
