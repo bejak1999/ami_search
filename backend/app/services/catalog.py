@@ -270,7 +270,13 @@ def _refresh_aggregates(db: Session, item: Item) -> None:
             func.min(PricePoint.price),
             func.max(PricePoint.price),
             func.avg(PricePoint.price),
-        ).where(PricePoint.item_id == item.id, PricePoint.price.is_not(None))
+        ).where(
+            PricePoint.item_id == item.id,
+            # Product level only. A per-copy point is one grade's price, not
+            # this product's asking price - see history().
+            PricePoint.listing_id.is_(None),
+            PricePoint.price.is_not(None),
+        )
     ).one()
     low, high, avg = row
     candidates = [v for v in (low, item.current_price) if v is not None]
@@ -318,7 +324,26 @@ def mark_unavailable(db: Session, item: Item, commit: bool = True) -> bool:
 
 
 def history(db: Session, item_id: int, days: int | None = 365) -> list[PricePoint]:
-    stmt = select(PricePoint).where(PricePoint.item_id == item_id)
+    """The product's asking price over time: the cheapest copy on offer.
+
+    Two different things are stored against one item and only one of them is a
+    price history. A point with no listing attached is the product level - the
+    cheapest of however many graded copies were on sale at that moment, which
+    is the figure quoted at the top of the page and the one a watch compares
+    against. A point *with* a listing is one particular second-hand copy at
+    its own grade's price, written when that copy is repriced or leaves the
+    shelf; it is the sale record for that copy.
+
+    Drawing both as one line makes the chart step to whichever grade happened
+    to be touched last - a product whose cheapest copy never moved from
+    JP¥34,380 showed a jump to JP¥42,980 because the sampler had looked at the
+    A-grade copy. Same series, two meanings, so the line was answering neither
+    question.
+    """
+    stmt = select(PricePoint).where(
+        PricePoint.item_id == item_id,
+        PricePoint.listing_id.is_(None),
+    )
     if days:
         cutoff = datetime.now(timezone.utc) - timedelta(days=days)
         stmt = stmt.where(PricePoint.recorded_at >= cutoff)
@@ -326,18 +351,28 @@ def history(db: Session, item_id: int, days: int | None = 365) -> list[PricePoin
 
 
 def price_stats(db: Session, item_id: int) -> dict:
+    """Lowest, highest and average asking price, over the same series.
+
+    Product-level points only, for the reason in :func:`history`: mixing in
+    the per-copy points would report the dearest grade ever sampled as this
+    product's high, which is true of some copy and false of the product.
+    """
     row = db.execute(
         select(
             func.min(PricePoint.price),
             func.max(PricePoint.price),
             func.avg(PricePoint.price),
             func.count(PricePoint.id),
-        ).where(PricePoint.item_id == item_id, PricePoint.price.is_not(None))
+        ).where(
+            PricePoint.item_id == item_id,
+            PricePoint.listing_id.is_(None),
+            PricePoint.price.is_not(None),
+        )
     ).one()
     low, high, avg, count = row
     first = db.execute(
         select(PricePoint.recorded_at)
-        .where(PricePoint.item_id == item_id)
+        .where(PricePoint.item_id == item_id, PricePoint.listing_id.is_(None))
         .order_by(PricePoint.recorded_at)
         .limit(1)
     ).scalar_one_or_none()

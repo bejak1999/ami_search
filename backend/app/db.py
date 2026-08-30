@@ -92,6 +92,9 @@ def init_db() -> None:
     eased = ease_quiet_slices()
     if eased:
         log.info("Eased the re-read interval on %s slow-moving slice(s)", eased)
+    rebuilt = rebuild_price_aggregates()
+    if rebuilt:
+        log.info("Recomputed the price range on %s item(s) from product-level points", rebuilt)
     log.info("Database ready at %s", settings.resolved_database_url.split("://", 1)[0])
 
 
@@ -459,3 +462,65 @@ def create_missing_indexes() -> list[str]:
             except SQLAlchemyError:
                 log.exception("Could not create index %s", index.name)
     return created
+
+
+def rebuild_price_aggregates() -> int:
+    """Recompute lowest/highest/average from the product-level points only.
+
+    A price point with a listing attached is one particular second-hand copy
+    at its own grade's price; one without is the product's asking price, the
+    cheapest copy on offer. The aggregates on the item row were built over
+    both, so an item whose A-grade copy had been sampled reported that grade
+    as its highest price ever - true of a copy, false of the product, and the
+    figure the "highest seen" box shows.
+
+    Only rows this actually changes are written, so a second run is free and
+    the log line stays honest.
+    """
+    from sqlalchemy import func, select
+
+    from . import models
+
+    changed = 0
+    with session_scope() as db:
+        try:
+            rows = db.execute(
+                select(
+                    models.PricePoint.item_id,
+                    func.min(models.PricePoint.price),
+                    func.max(models.PricePoint.price),
+                    func.avg(models.PricePoint.price),
+                )
+                .where(
+                    models.PricePoint.listing_id.is_(None),
+                    models.PricePoint.price.is_not(None),
+                )
+                .group_by(models.PricePoint.item_id)
+            ).all()
+        except Exception:  # pragma: no cover - table may not exist yet
+            return 0
+
+        for item_id, low, high, avg in rows:
+            item = db.get(models.Item, item_id)
+            if item is None:
+                continue
+            # The current price counts as an observation in its own right: it
+            # is what the shop is asking now, whether or not it has been
+            # written to the history yet.
+            lows = [v for v in (low, item.current_price) if v is not None]
+            highs = [v for v in (high, item.current_price) if v is not None]
+            wanted_low = min(lows) if lows else None
+            wanted_high = max(highs) if highs else None
+            wanted_avg = float(avg) if avg is not None else item.current_price
+            if (
+                item.lowest_price == wanted_low
+                and item.highest_price == wanted_high
+                and item.average_price == wanted_avg
+            ):
+                continue
+            item.lowest_price = wanted_low
+            item.highest_price = wanted_high
+            item.average_price = wanted_avg
+            changed += 1
+        db.commit()
+    return changed

@@ -3189,6 +3189,114 @@ def test_tag_search_reaches_past_the_popular_ones() -> None:
     db.close()
 
 
+def test_price_history_follows_the_cheapest_copy() -> None:
+    print("\n== The price line is the product's price, not one copy's ==")
+    from app.db import SessionLocal, init_db, rebuild_price_aggregates
+    from app.models import Condition, Item, Listing, ListingStatus, PricePoint
+    from app.services import catalog
+
+    init_db()
+    db = SessionLocal()
+    db.query(PricePoint).delete()
+    db.query(Listing).delete()
+    db.query(Item).delete()
+    db.commit()
+
+    # The real shape of the bug, from FIGURE-184067-R: nine graded copies,
+    # cheapest at 34,380, dearest at 42,980. The product's asking price never
+    # moved; the chart showed a step up to 42,980 all the same.
+    item = Item(
+        provider="amiami",
+        code="FIGURE-184067-R",
+        name="Shibuna 1/7",
+        condition=Condition.preowned,
+        currency="JPY",
+        current_price=34_380,
+        in_stock=True,
+    )
+    db.add(item)
+    db.flush()
+
+    started = datetime.now(timezone.utc) - timedelta(days=4)
+    # Product level: the cheapest copy, twice, unchanged.
+    for offset in (0, 1):
+        db.add(
+            PricePoint(
+                item=item,
+                recorded_at=started + timedelta(days=offset),
+                price=34_380,
+                currency="JPY",
+                in_stock=True,
+            )
+        )
+    # Per copy: the shelf-life sampler pricing individual graded copies.
+    for code, price in (("R091", 42_980), ("R125", 38_680)):
+        listing = Listing(
+            item_id=item.id,
+            code=f"FIGURE-184067-{code}",
+            price=price,
+            last_price=price,
+            currency="JPY",
+            status=ListingStatus.live,
+            first_seen_at=started,
+            last_seen_at=started,
+        )
+        db.add(listing)
+        db.flush()
+        db.add(
+            PricePoint(
+                item=item,
+                listing=listing,
+                recorded_at=started + timedelta(days=2),
+                price=price,
+                currency="JPY",
+                in_stock=True,
+            )
+        )
+    db.commit()
+
+    points = catalog.history(db, item.id)
+    check("the line is the product-level series", len(points) == 2, len(points))
+    check(
+        "so it never steps to a dearer grade",
+        {p.price for p in points} == {34_380},
+        sorted({p.price for p in points}),
+    )
+    check(
+        "and the per-copy points are still stored",
+        db.query(PricePoint).filter(PricePoint.listing_id.is_not(None)).count() == 2,
+    )
+
+    stats = catalog.price_stats(db, item.id)
+    check("the highest seen is the product's, not a copy's", stats["highest"] == 34_380, stats)
+    check("as is the lowest", stats["lowest"] == 34_380)
+    check("the average too", stats["average"] == 34_380)
+    check("and the count matches the line", stats["points"] == 2)
+    check("tracked since the first product-level point", stats["tracked_since"] is not None)
+
+    # A database that already mixed the two is corrected on upgrade.
+    item.lowest_price = 34_380
+    item.highest_price = 42_980
+    item.average_price = 38_680
+    db.commit()
+    db.close()
+
+    changed = rebuild_price_aggregates()
+    check("the stored range is rebuilt", changed == 1, changed)
+
+    db = SessionLocal()
+    item = db.query(Item).filter_by(code="FIGURE-184067-R").one()
+    check("the highest is the product's again", item.highest_price == 34_380, item.highest_price)
+    check("the average follows", item.average_price == 34_380, item.average_price)
+    check("and a second run finds nothing to do", rebuild_price_aggregates() == 0)
+
+    db.query(PricePoint).delete()
+    db.query(Listing).delete()
+    db.query(Item).delete()
+    db.commit()
+    db.close()
+
+
 def main() -> int:
     test_url_parsing()
     test_release_dates()
@@ -3249,6 +3357,7 @@ def main() -> int:
     test_photo_counts_distinguish_known_from_held()
     test_prefetch_works_through_its_backlog()
     test_tag_search_reaches_past_the_popular_ones()
+    test_price_history_follows_the_cheapest_copy()
     test_settings()
 
     print(f"\n{'=' * 46}\n  {PASS} passed, {FAIL} failed\n{'=' * 46}")

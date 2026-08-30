@@ -62,6 +62,20 @@ export function PriceChart({
     )
   }
 
+  // The tick format has to follow the span. Every tick used to read
+  // "month + 2-digit year", so four days of history came out as three
+  // identical labels - and "Aug 26" is read as the 26th of August by anyone
+  // who has not stopped to think about it, which is the opposite of what it
+  // says.
+  const span = data.length > 1 ? data[data.length - 1].t - data[0].t : 0
+  const DAY = 86_400_000
+  const tickFormat: Intl.DateTimeFormatOptions =
+    span < 2 * DAY
+      ? { hour: '2-digit', minute: '2-digit' }
+      : span < 120 * DAY
+        ? { day: 'numeric', month: 'short' }
+        : { month: 'short', year: 'numeric' }
+
   const prices = data.map((row) => row.price)
   const min = Math.min(...prices)
   const max = Math.max(...prices)
@@ -88,9 +102,7 @@ export function PriceChart({
           type="number"
           scale="time"
           domain={['dataMin', 'dataMax']}
-          tickFormatter={(value) =>
-            new Intl.DateTimeFormat(undefined, { month: 'short', year: '2-digit' }).format(value)
-          }
+          tickFormatter={(value) => new Intl.DateTimeFormat(undefined, tickFormat).format(value)}
           stroke="rgb(var(--c-faint))"
           tick={{ fontSize: 11 }}
           tickLine={false}
