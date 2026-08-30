@@ -34,7 +34,27 @@ interface Filters {
   atLowestEver: boolean
   exclude: string
   onSale: boolean
+  //: The worst condition still worth showing, figure and box separately.
+  itemGrade: string
+  boxGrade: string
 }
+
+/**
+ * AmiAmi's condition scale, best first.
+ *
+ * The figure and its box are graded apart, because a mint figure in a crushed
+ * box is common and priced accordingly - so someone who only wants to display
+ * it and someone who collects the packaging want different things from the
+ * same listing.
+ */
+const GRADES = [
+  { value: '', label: 'Any' },
+  { value: 'S', label: 'S — as new' },
+  { value: 'A', label: 'A or better' },
+  { value: 'B+', label: 'B+ or better' },
+  { value: 'B', label: 'B or better' },
+  { value: 'C', label: 'C or better' },
+]
 
 const EMPTY: Filters = {
   q: '',
@@ -52,16 +72,19 @@ const EMPTY: Filters = {
   minPrice: '',
   maxPrice: '',
   atLowestEver: false,
+  itemGrade: '',
+  boxGrade: '',
   exclude: '',
   onSale: false,
 }
 
 /** Sorting the catalogue can do, some of which the shop cannot. */
 const LOCAL_SORTS = [
+  { value: 'newest_copy', label: 'Newly listed used' },
   { value: 'newest', label: 'Newest here' },
   { value: 'changed', label: 'Recently updated' },
-  { value: 'price_asc', label: 'Cheapest' },
-  { value: 'price_desc', label: 'Dearest' },
+  { value: 'price_asc', label: 'Cheapest first' },
+  { value: 'price_desc', label: 'Most expensive first' },
   { value: 'discount', label: 'Biggest discount (%)' },
   { value: 'saving', label: 'Biggest saving (yen)' },
   { value: 'lowest_ever', label: 'Near its lowest ever' },
@@ -79,8 +102,8 @@ const SHOP_SORTS = [
   { value: 'newest', label: 'Recently updated' },
   { value: 'updated', label: 'Recently updated (alternate)' },
   { value: 'oldest', label: 'Oldest first' },
-  { value: 'price_asc', label: 'Cheapest' },
-  { value: 'price_desc', label: 'Dearest' },
+  { value: 'price_asc', label: 'Cheapest first' },
+  { value: 'price_desc', label: 'Most expensive first' },
   { value: 'release', label: 'Newest release' },
   { value: 'release_asc', label: 'Oldest release' },
   { value: 'discount', label: 'Biggest discount (this page)' },
@@ -114,6 +137,8 @@ export function SearchPage() {
     atLowestEver: params.get('lowest') === '1',
     exclude: params.get('exclude') ?? '',
     onSale: params.get('sale') === '1',
+    itemGrade: params.get('item_grade') ?? '',
+    boxGrade: params.get('box_grade') ?? '',
   })
 
   const source: Source = params.get('src') === 'shop' ? 'shop' : 'local'
@@ -153,6 +178,8 @@ export function SearchPage() {
     f.maker.forEach((v) => search.append('maker', v))
     if (f.belowAverage) search.set('below_average_ratio', f.belowAverage)
     if (f.minDiscount) search.set('min_discount_pct', f.minDiscount)
+    if (f.itemGrade) search.set('item_grade', f.itemGrade)
+    if (f.boxGrade) search.set('box_grade', f.boxGrade)
     if (f.ignoreBlocklist) search.set('unblock', '1')
     if (f.minPrice) search.set('min', f.minPrice)
     if (f.maxPrice) search.set('max', f.maxPrice)
@@ -211,6 +238,8 @@ export function SearchPage() {
               ? Number(applied.belowAverage)
               : undefined,
             min_discount_pct: applied.minDiscount ? Number(applied.minDiscount) : undefined,
+            min_item_grade: applied.itemGrade || undefined,
+            min_box_grade: applied.boxGrade || undefined,
             ignore_blocklist: applied.ignoreBlocklist,
           })
         : api.search.run({
@@ -280,6 +309,8 @@ export function SearchPage() {
     applied.maker.length +
     (applied.belowAverage ? 1 : 0) +
     (applied.minDiscount ? 1 : 0) +
+    (applied.itemGrade ? 1 : 0) +
+    (applied.boxGrade ? 1 : 0) +
     (applied.exclude ? 1 : 0) +
     (applied.onSale ? 1 : 0) +
     tags.include.length +
@@ -433,6 +464,45 @@ export function SearchPage() {
                       ]}
                     />
                   </Field>
+                  {/* Only for used stock: new items have no condition to
+                      grade, and offering the control there would filter
+                      everything out with no way to tell why. */}
+                  {draft.condition === 'preowned' && source === 'local' && (
+                    <>
+                      <Field
+                        label="Figure condition"
+                        hint="At least this good. AmiAmi grades S, A, B+, B, C, D."
+                      >
+                        <select
+                          value={draft.itemGrade}
+                          onChange={(e) => setDraft({ ...draft, itemGrade: e.target.value })}
+                          className="field"
+                        >
+                          {GRADES.map((grade) => (
+                            <option key={grade.value} value={grade.value}>
+                              {grade.label}
+                            </option>
+                          ))}
+                        </select>
+                      </Field>
+                      <Field
+                        label="Box condition"
+                        hint="Graded separately — a mint figure often comes in a battered box."
+                      >
+                        <select
+                          value={draft.boxGrade}
+                          onChange={(e) => setDraft({ ...draft, boxGrade: e.target.value })}
+                          className="field"
+                        >
+                          {GRADES.map((grade) => (
+                            <option key={grade.value} value={grade.value}>
+                              {grade.label}
+                            </option>
+                          ))}
+                        </select>
+                      </Field>
+                    </>
+                  )}
                   <Field label="Sort by">
                     <select
                       value={draft.sort}

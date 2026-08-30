@@ -333,6 +333,13 @@ class Item(Base):
 
     first_seen_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utcnow)
     last_seen_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utcnow)
+    #: When a second-hand copy of this product was most recently taken in.
+    #: Distinct from first_seen_at, which is when the *product* first appeared
+    #: here: a figure known for months can take in a copy today without moving
+    #: at all under that. This is the one that answers "what is newly on sale
+    #: used" - a question AmiAmi's own newest-first ordering does not answer
+    #: either, since it sorts by when the product record was registered.
+    last_listing_at: Mapped[datetime | None] = mapped_column(UTCDateTime, index=True)
     last_detail_fetch_at: Mapped[datetime | None] = mapped_column(UTCDateTime)
     # The fetch before that one. Without it a copy that appeared between two
     # polls has no upper bound on how long it had been listed, and the whole

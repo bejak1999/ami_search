@@ -391,6 +391,10 @@ def reconcile(
             )
             db.add(listing)
             result.appeared.append(listing)
+            # The product's own clock for used stock. Only moved forwards, so
+            # a re-read of an older copy cannot make the product look fresh.
+            if item.last_listing_at is None or observed_at > item.last_listing_at:
+                item.last_listing_at = observed_at
             continue
 
         if listing.item_id is not None and listing.item_id != item.id:

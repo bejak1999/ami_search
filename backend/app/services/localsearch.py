@@ -17,7 +17,7 @@ from dataclasses import dataclass
 from sqlalchemy import Select, and_, func, or_, select
 from sqlalchemy.orm import Session
 
-from ..models import Condition, Item, ItemTag, Tag
+from ..models import Condition, Item, ItemTag, Listing, ListingStatus, Tag
 
 log = logging.getLogger(__name__)
 
@@ -169,11 +169,56 @@ def _apply_tags(stmt: Select, db: Session, req) -> Select | None:
         blocked = select(ItemTag.item_id).where(ItemTag.tag_id.in_(unwanted))
         stmt = stmt.where(Item.id.not_in(blocked))
 
+    stmt = _apply_grades(stmt, req)
+
     return stmt
+
+
+def _apply_grades(stmt: Select, req) -> Select:
+    """Only items with a copy on sale in at least this condition.
+
+    AmiAmi grades used stock S, A, B+, B, C, D - best first - and grades the
+    figure and its box separately, because a mint figure in a crushed box is
+    common and priced accordingly. Both filters are minimums: asking for B+
+    means B+ or better, which is how someone shops.
+
+    Matched against individual copies rather than the product, because that is
+    where the grade lives. A product with nine copies has nine conditions, and
+    the product-level grade is only ever the cheapest one's - filtering on it
+    would drop a product whose dear copy is exactly what was asked for. When
+    both filters are given they must hold for the *same* copy: an A figure and
+    an A box on two different copies is not an A copy.
+
+    Only copies still on sale count. A grade filter is a shopping question.
+    """
+    from ..providers.amiami import GRADE_ORDER
+
+    wanted_item = getattr(req, "min_item_grade", None)
+    wanted_box = getattr(req, "min_box_grade", None)
+    if not wanted_item and not wanted_box:
+        return stmt
+
+    def acceptable(minimum: str | None) -> list[str]:
+        """Every grade at least as good as this one."""
+        return list(GRADE_ORDER[: GRADE_ORDER.index(minimum) + 1])
+
+    conditions = [Listing.item_id == Item.id, Listing.status == ListingStatus.live]
+    if wanted_item:
+        conditions.append(Listing.item_grade.in_(acceptable(wanted_item)))
+    if wanted_box:
+        conditions.append(Listing.box_grade.in_(acceptable(wanted_box)))
+
+    return stmt.where(select(Listing.id).where(*conditions).exists())
 
 
 def _apply_sort(stmt: Select, sort: str) -> Select:
     """Ordering. Newest first by default, meaning newest to this catalogue."""
+    if sort == "newest_copy":
+        # Newly on sale second-hand, which is not the same question as newly
+        # known here: a product we have had for months can take a copy in
+        # today. Products that have never had one sort last rather than
+        # pretending to be old.
+        return stmt.order_by(Item.last_listing_at.desc().nulls_last(), Item.id.desc())
     if sort == "oldest":
         return stmt.order_by(Item.first_seen_at.asc(), Item.id.asc())
     if sort == "price_asc":

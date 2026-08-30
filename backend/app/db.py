@@ -98,6 +98,9 @@ def init_db() -> None:
     resorted = adopt_intake_ordering()
     if resorted:
         log.info("Moved %s pre-owned slice(s) onto the ordering that tracks intake", resorted)
+    dated = backfill_last_listing()
+    if dated:
+        log.info("Dated the most recent used copy on %s product(s)", dated)
     log.info("Database ready at %s", settings.resolved_database_url.split("://", 1)[0])
 
 
@@ -616,5 +619,39 @@ def adopt_intake_ordering() -> int:
                 row.recheck_interval_minutes = wanted
                 changed += 1
 
+        db.commit()
+    return changed
+
+
+def backfill_last_listing() -> int:
+    """Fill in when each product last took a second-hand copy in.
+
+    The column is written going forward by the shelf tracker, so without this
+    it is empty on every row that existed before the upgrade and the "newly
+    listed used" ordering would have nothing to sort by for weeks. The answer
+    is already stored per copy, so it only needs carrying up to the product.
+    """
+    from sqlalchemy import func, select
+
+    from . import models
+
+    changed = 0
+    with session_scope() as db:
+        try:
+            rows = db.execute(
+                select(
+                    models.Listing.item_id,
+                    func.max(models.Listing.first_seen_at),
+                ).group_by(models.Listing.item_id)
+            ).all()
+        except Exception:  # pragma: no cover - table may not exist yet
+            return 0
+
+        for item_id, latest in rows:
+            item = db.get(models.Item, item_id)
+            if item is None or latest is None or item.last_listing_at is not None:
+                continue
+            item.last_listing_at = latest
+            changed += 1
         db.commit()
     return changed

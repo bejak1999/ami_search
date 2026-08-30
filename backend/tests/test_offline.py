@@ -3723,6 +3723,143 @@ def test_daily_recap_counts_copies_not_products() -> None:
     db.close()
 
 
+def test_condition_filter_asks_about_copies() -> None:
+    print("\n== The condition filter asks whether a copy can be bought ==")
+    from app.db import SessionLocal, init_db
+    from app.models import Condition, Item, Listing, ListingStatus
+    from app.schemas import LocalSearchRequest
+    from app.services import localsearch
+
+    init_db()
+    db = SessionLocal()
+    db.query(Listing).delete()
+    db.query(Item).delete()
+    db.commit()
+
+    now = datetime.now(timezone.utc)
+
+    # The real shape, from FIGURE-184067-R: nine copies, two B/B, six B+/B,
+    # one A/B. The product-level grade is only ever the cheapest copy's, so
+    # filtering on that would hide this product from anyone asking for an A.
+    nine = Item(provider="amiami", code="P-1", name="Nine copies",
+                condition=Condition.preowned, in_stock=True)
+    db.add(nine)
+    db.flush()
+    for n, (item_grade, box_grade) in enumerate(
+        [("B", "B"), ("B", "B")] + [("B+", "B")] * 6 + [("A", "B")]
+    ):
+        db.add(Listing(item_id=nine.id, code=f"P-1-R{n}", currency="JPY",
+                       status=ListingStatus.live, item_grade=item_grade,
+                       box_grade=box_grade, first_seen_at=now, last_seen_at=now))
+
+    # And a product whose only good copy has already sold.
+    sold = Item(provider="amiami", code="P-2", name="Sold the good one",
+                condition=Condition.preowned, in_stock=True)
+    db.add(sold)
+    db.flush()
+    db.add(Listing(item_id=sold.id, code="P-2-R1", currency="JPY",
+                   status=ListingStatus.gone, item_grade="S", box_grade="S",
+                   first_seen_at=now, last_seen_at=now))
+    db.add(Listing(item_id=sold.id, code="P-2-R2", currency="JPY",
+                   status=ListingStatus.live, item_grade="C", box_grade="D",
+                   first_seen_at=now, last_seen_at=now))
+    db.commit()
+
+    def codes(**kw):
+        return sorted(i.code for i in localsearch.search(db, LocalSearchRequest(**kw)).items)
+
+    check("without a filter both are shown", codes() == ["P-1", "P-2"], codes())
+    check(
+        "asking for an A finds the product whose dear copy is one",
+        codes(min_item_grade="A") == ["P-1"],
+        codes(min_item_grade="A"),
+    )
+    check(
+        "a minimum means that grade or better",
+        codes(min_item_grade="C") == ["P-1", "P-2"],
+        codes(min_item_grade="C"),
+    )
+    check(
+        "a copy that has already sold does not qualify its product",
+        codes(min_box_grade="S") == [],
+        codes(min_box_grade="S"),
+    )
+    check(
+        "both filters must hold for the same copy",
+        codes(min_item_grade="A", min_box_grade="B") == ["P-1"],
+        codes(min_item_grade="A", min_box_grade="B"),
+    )
+    # P-1's A copy has a B box; P-2's live copy is C/D. Asking for an A figure
+    # in an A box matches neither, and must not match P-1 by pairing its A
+    # figure with some other copy's box.
+    check(
+        "and never by pairing two different copies",
+        codes(min_item_grade="A", min_box_grade="A") == [],
+        codes(min_item_grade="A", min_box_grade="A"),
+    )
+
+    db.query(Listing).delete()
+    db.query(Item).delete()
+    db.commit()
+    db.close()
+
+
+def test_newly_listed_used_is_not_newly_known() -> None:
+    print("\n== Newly on sale used is a different question from newly known ==")
+    from app.db import SessionLocal, init_db
+    from app.models import Condition, Item, Listing
+    from app.schemas import LocalSearchRequest
+    from app.services import localsearch
+
+    init_db()
+    db = SessionLocal()
+    db.query(Listing).delete()
+    db.query(Item).delete()
+    db.commit()
+
+    now = datetime.now(timezone.utc)
+    # A figure known here for a year that took a copy in twenty minutes ago,
+    # and one first seen yesterday that has had none since. AmiAmi's own
+    # newest-first ordering answers neither question: it sorts by when the
+    # product record was registered.
+    old = Item(provider="amiami", code="OLD-PRODUCT", name="Known for a year",
+               condition=Condition.preowned, in_stock=True,
+               first_seen_at=now - timedelta(days=365),
+               last_listing_at=now - timedelta(minutes=20))
+    fresh = Item(provider="amiami", code="NEW-PRODUCT", name="Seen yesterday",
+                 condition=Condition.preowned, in_stock=True,
+                 first_seen_at=now - timedelta(days=1),
+                 last_listing_at=now - timedelta(days=1))
+    never = Item(provider="amiami", code="NO-COPIES", name="Never had one",
+                 condition=Condition.preowned, in_stock=True,
+                 first_seen_at=now - timedelta(days=2), last_listing_at=None)
+    db.add_all([old, fresh, never])
+    db.commit()
+
+    def codes(sort):
+        return [i.code for i in localsearch.search(db, LocalSearchRequest(sort=sort)).items]
+
+    check(
+        "newest here goes by when the product appeared",
+        codes("newest")[0] == "NEW-PRODUCT",
+        codes("newest"),
+    )
+    check(
+        "newly listed used goes by when a copy did",
+        codes("newest_copy")[0] == "OLD-PRODUCT",
+        codes("newest_copy"),
+    )
+    check(
+        "a product that never had a copy sorts last rather than looking fresh",
+        codes("newest_copy")[-1] == "NO-COPIES",
+        codes("newest_copy"),
+    )
+
+    db.query(Item).delete()
+    db.commit()
+    db.close()
+
+
 def main() -> int:
     test_url_parsing()
     test_release_dates()
@@ -3790,6 +3927,8 @@ def main() -> int:
     test_a_watch_waiting_is_not_a_watch_failing()
     test_linking_estimate_describes_the_job_that_runs()
     test_daily_recap_counts_copies_not_products()
+    test_condition_filter_asks_about_copies()
+    test_newly_listed_used_is_not_newly_known()
     test_settings()
 
     print(f"\n{'=' * 46}\n  {PASS} passed, {FAIL} failed\n{'=' * 46}")

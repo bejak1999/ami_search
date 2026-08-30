@@ -370,6 +370,16 @@ class LocalSearchRequest(BaseModel):
     #: Only items whose current price equals the lowest ever recorded here.
     at_lowest_ever: bool = False
 
+    #: The worst condition still worth showing, for either the figure or its
+    #: box. AmiAmi grades used stock S, A, B+, B, C, D, best first, and grades
+    #: each separately - a mint figure in a battered box is common and priced
+    #: accordingly. Matching is per copy: an item qualifies when at least one
+    #: of its copies currently on sale is this good or better, so the filter
+    #: answers "can I buy one in this condition" rather than "is this product
+    #: associated with that grade somewhere".
+    min_item_grade: Literal["S", "A", "B+", "B", "C", "D"] | None = None
+    min_box_grade: Literal["S", "A", "B+", "B", "C", "D"] | None = None
+
     # Lists, because a Discover rail is defined by every series or character
     # on your list rather than by one of them. Handing over only the first was
     # why "see all" showed a fraction of the rail it came from.
@@ -397,11 +407,17 @@ class LocalSearchRequest(BaseModel):
 
     sort: Literal[
         "newest",
+        # Newly on sale second-hand, which is a different question from newly
+        # known here: a product held for months can take a copy in today.
+        "newest_copy",
         "changed",
         "oldest",
         "price_asc",
         "price_desc",
         "discount",
+        # The same comparison as "discount" read as money rather than as a
+        # proportion, which ranks the two ends of the catalogue differently.
+        "saving",
         "lowest_ever",
         "release",
         "sells_fastest",
