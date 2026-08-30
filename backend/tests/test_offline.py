@@ -3100,6 +3100,95 @@ def test_prefetch_works_through_its_backlog() -> None:
     db.close()
 
 
+def test_tag_search_reaches_past_the_popular_ones() -> None:
+    print("\n== A tag filter search covers every tag, not the top of the list ==")
+    from app.db import SessionLocal, init_db
+    from app.models import Tag, TagKind
+    from app.services.localsearch import facet_tags
+
+    init_db()
+    db = SessionLocal()
+    db.query(Tag).delete()
+    db.commit()
+
+    # What MyFigureCollection linking builds up: a long tail of tags, each
+    # used once or twice, under a small head of very common ones.
+    for n in range(400):
+        db.add(
+            Tag(
+                kind=TagKind.tag,
+                slug=f"common-{n}",
+                name=f"Common {n}",
+                usage_count=1000 - n,
+            )
+        )
+    db.add(Tag(kind=TagKind.tag, slug="twintails", name="Twintails", usage_count=3))
+    db.add(Tag(kind=TagKind.tag, slug="scale-1-7", name="1/7 scale", usage_count=2))
+    db.add(Tag(kind=TagKind.character, slug="rem", name="Rem", usage_count=1))
+    db.commit()
+
+    # The bug: the term was applied to the page that came back rather than to
+    # the table, so anything outside the most-used few hundred could not be
+    # found however exactly it was typed.
+    top = facet_tags(db, limit=60)
+    check("the unaided list is the popular ones", len(top) == 60)
+    check(
+        "and the rare tag is nowhere in it",
+        not any(t["slug"] == "twintails" for t in top),
+    )
+
+    found = facet_tags(db, limit=60, q="twintails")
+    check("searching for it finds it", [t["slug"] for t in found] == ["twintails"], found)
+
+    check(
+        "matching is case-insensitive",
+        [t["slug"] for t in facet_tags(db, limit=60, q="TWINTAILS")] == ["twintails"],
+    )
+    check(
+        "and matches part of a name",
+        any(t["slug"] == "twintails" for t in facet_tags(db, limit=60, q="wintai")),
+    )
+    check(
+        "the slug works as well as the name",
+        any(t["slug"] == "scale-1-7" for t in facet_tags(db, limit=60, q="scale-1-7")),
+    )
+
+    # A slash or a percent sign is an ordinary thing to type into a tag box.
+    check(
+        "a scale reads as text, not as a pattern",
+        [t["slug"] for t in facet_tags(db, limit=60, q="1/7")] == ["scale-1-7"],
+    )
+    check(
+        "and a wildcard matches nothing rather than everything",
+        facet_tags(db, limit=60, q="%") == [],
+    )
+    check("an underscore likewise", facet_tags(db, limit=60, q="_") == [])
+
+    # Kind and term still narrow together.
+    check(
+        "a kind filter still applies",
+        [t["slug"] for t in facet_tags(db, limit=60, kinds=["character"], q="rem")] == ["rem"],
+    )
+    check(
+        "and excludes matches of the wrong kind",
+        facet_tags(db, limit=60, kinds=["character"], q="twintails") == [],
+    )
+
+    # Ranking is unchanged: the most used match comes first.
+    ordered = facet_tags(db, limit=5, q="common")
+    check(
+        "matches are still most-used first",
+        [t["usage_count"] for t in ordered] == sorted(
+            [t["usage_count"] for t in ordered], reverse=True
+        ),
+        ordered,
+    )
+
+    db.query(Tag).delete()
+    db.commit()
+    db.close()
+
+
 def main() -> int:
     test_url_parsing()
     test_release_dates()
@@ -3159,6 +3248,7 @@ def main() -> int:
     test_request_accounting()
     test_photo_counts_distinguish_known_from_held()
     test_prefetch_works_through_its_backlog()
+    test_tag_search_reaches_past_the_popular_ones()
     test_settings()
 
     print(f"\n{'=' * 46}\n  {PASS} passed, {FAIL} failed\n{'=' * 46}")

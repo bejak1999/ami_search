@@ -174,11 +174,7 @@ def local_tags(
     _user: User = Depends(current_user),
 ) -> list[dict]:
     """Tags available for filtering, most used first."""
-    tags = localsearch.facet_tags(db, limit=limit, kinds=[kind] if kind else None)
-    if q:
-        needle = q.strip().lower()
-        tags = [t for t in tags if needle in t["name"].lower() or needle in t["slug"].lower()]
-    return tags
+    return localsearch.facet_tags(db, limit=limit, kinds=[kind] if kind else None, q=q)
 
 
 @router.get("/local/summary", response_model=MessageResponse)

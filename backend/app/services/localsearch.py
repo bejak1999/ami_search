@@ -261,11 +261,34 @@ def search(db: Session, req) -> LocalResult:
     return LocalResult(items=items, total=total, page=req.page, per_page=req.per_page, pages=pages)
 
 
-def facet_tags(db: Session, limit: int = 60, kinds: list[str] | None = None) -> list[dict]:
-    """Tags worth offering, most used first."""
+def facet_tags(
+    db: Session,
+    limit: int = 60,
+    kinds: list[str] | None = None,
+    q: str | None = None,
+) -> list[dict]:
+    """Tags worth offering, most used first.
+
+    The search term has to be applied here rather than to the returned page.
+    Filtering afterwards searches only the most-used handful, which looked
+    right while there were a few hundred tags in total and quietly stopped
+    working as MyFigureCollection linking filled the table: a tag outside the
+    top of the usage list became unfindable, however exactly it was typed.
+    """
     stmt = select(Tag).where(Tag.usage_count > 0)
     if kinds:
         stmt = stmt.where(Tag.kind.in_(kinds))
+    if q and q.strip():
+        # Escaped, because a tag search for "1/7" or "50%" is an ordinary
+        # thing to type and LIKE would otherwise read those as wildcards.
+        needle = q.strip().replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        pattern = f"%{needle}%"
+        stmt = stmt.where(
+            or_(
+                Tag.name.ilike(pattern, escape="\\"),
+                Tag.slug.ilike(pattern, escape="\\"),
+            )
+        )
     rows = db.execute(stmt.order_by(Tag.usage_count.desc()).limit(limit)).scalars()
     return [
         {

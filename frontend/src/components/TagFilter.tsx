@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import clsx from 'clsx'
 import { api } from '@/api/client'
@@ -41,20 +41,32 @@ export function TagFilter({
   const [query, setQuery] = useState('')
   const [kind, setKind] = useState('')
 
+  // The typed term goes to the server rather than filtering what came back.
+  // Filtering here searched only the tags already fetched, which is the most
+  // used few hundred - fine while that was most of them, useless once
+  // MyFigureCollection linking had filled the table, and silent either way:
+  // an unmatched tag looks identical to a tag that does not exist.
+  const search = useDebounced(query.trim(), 200)
+
   const tags = useQuery({
-    queryKey: ['localTags', kind],
-    queryFn: () => api.search.localTags({ kind: kind || undefined, limit: 300 }),
+    queryKey: ['localTags', kind, search],
+    queryFn: () =>
+      api.search.localTags({
+        kind: kind || undefined,
+        q: search || undefined,
+        limit: 300,
+      }),
     staleTime: 120_000,
+    // Keep the previous list on screen while the next one loads, so typing
+    // does not flash the panel empty between keystrokes.
+    placeholderData: (previous) => previous,
   })
 
-  const visible = useMemo(() => {
-    const needle = query.trim().toLowerCase()
-    const all = tags.data ?? []
-    if (!needle) return all.slice(0, compact ? 30 : 60)
-    return all
-      .filter((t) => t.name.toLowerCase().includes(needle) || t.slug.toLowerCase().includes(needle))
-      .slice(0, 60)
-  }, [tags.data, query, compact])
+  const all = tags.data ?? []
+  const visible = useMemo(
+    () => (search ? all.slice(0, 60) : all.slice(0, compact ? 30 : 60)),
+    [all, search, compact],
+  )
 
   const state = (slug: string): 'include' | 'exclude' | null =>
     value.include.includes(slug) ? 'include' : value.exclude.includes(slug) ? 'exclude' : null
@@ -85,6 +97,16 @@ export function TagFilter({
           className="field pl-9 text-sm"
         />
       </div>
+
+      {search.length > 0 && (
+        <p className="text-[11px] text-faint">
+          {all.length === 0
+            ? `Nothing matching \u201c${search}\u201d`
+            : all.length > visible.length
+              ? `Showing ${visible.length} of ${all.length} matches, most used first`
+              : `${all.length} match${all.length === 1 ? '' : 'es'}`}
+        </p>
+      )}
 
       <div className="scroll-x flex gap-1.5 pb-1">
         {TAG_KINDS.map((entry) => (
@@ -203,4 +225,20 @@ export function TagFilter({
       </p>
     </div>
   )
+}
+
+/**
+ * Hold a value still until the typing stops.
+ *
+ * Without this every keystroke is its own request, and the answers can arrive
+ * out of order - so the list settles on whichever query the network happened
+ * to finish last rather than on what was typed.
+ */
+function useDebounced<T>(value: T, ms: number): T {
+  const [settled, setSettled] = useState(value)
+  useEffect(() => {
+    const timer = setTimeout(() => setSettled(value), ms)
+    return () => clearTimeout(timer)
+  }, [value, ms])
+  return settled
 }
