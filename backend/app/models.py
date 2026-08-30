@@ -984,6 +984,13 @@ class CachedImage(Base):
     __table_args__ = (Index("ix_image_lru", "last_used_at"),)
 
     id: Mapped[int] = mapped_column(primary_key=True)
+    #: The product this photo belongs to, so the queue can be asked for
+    #: directly instead of found by walking every item and checking. That
+    #: walk had a scan limit, and once the cached prefix grew past it the
+    #: prefetcher stopped reaching any outstanding photo at all.
+    item_id: Mapped[int | None] = mapped_column(
+        ForeignKey("items.id", ondelete="SET NULL"), index=True
+    )
     #: Hash of the source URL. Also the filename and the public route.
     key: Mapped[str] = mapped_column(String(40), unique=True, index=True)
     source_url: Mapped[str] = mapped_column(Text)

@@ -250,8 +250,14 @@ def catalog_progress(
     detail["mfc"] = enrich.tag_stats(db)
     detail["mfc"]["enabled"] = settings.mfc_enabled
     detail["mfc"]["requests_per_minute"] = settings.mfc_requests_per_minute
-    detail["mfc"]["eta_seconds"] = enrich.eta_seconds(db)
-    detail["mfc"]["items_per_minute"] = enrich.throughput_per_minute()
+    # Measured first, configured second. What the settings permit and what
+    # actually happens are different numbers, and the estimate is only worth
+    # reading if it comes from the second.
+    measured = enrich.eta_from_measurement(db)
+    detail["mfc"]["eta_seconds"] = measured if measured is not None else enrich.eta_seconds(db)
+    detail["mfc"]["eta_measured"] = measured is not None
+    detail["mfc"]["measured_per_hour"] = enrich.measured_per_hour(db)
+    detail["mfc"]["allowed_per_hour"] = round(enrich.throughput_per_minute() * 60)
     detail["mfc"]["batch_size"] = settings.mfc_effective_batch_size
     return MessageResponse(message="ok", detail=detail)
 

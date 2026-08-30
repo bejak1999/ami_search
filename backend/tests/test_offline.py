@@ -4681,6 +4681,147 @@ def test_missing_exchange_rates_are_reported() -> None:
     db.close()
 
 
+def test_the_photo_queue_is_reached_however_full_the_cache_is() -> None:
+    print("\n== The photo queue is asked for, not searched for ==")
+    from app.db import SessionLocal, init_db
+    from app.models import CachedImage, Condition, Item
+    from app.services import images
+
+    init_db()
+    db = SessionLocal()
+    db.query(CachedImage).delete()
+    db.query(Item).delete()
+    db.commit()
+
+    now = datetime.now(timezone.utc)
+    COUNT = 600
+    items = [
+        Item(provider="amiami", code=f"P-{n}", name=f"Figure {n}",
+             condition=Condition.preowned, in_stock=True, currency="JPY",
+             first_seen_at=now - timedelta(minutes=n),
+             image_url=f"https://img.amiami.com/p{n}.jpg")
+        for n in range(COUNT)
+    ]
+    db.add_all(items)
+    db.flush()
+    for item in items:
+        images.register(db, images.urls_for_item(item), item_id=item.id)
+    db.commit()
+
+    check("every photo is linked to its product",
+          db.query(CachedImage).filter(CachedImage.item_id.is_(None)).count() == 0)
+
+    downloaded: list[str] = []
+    original = images._download
+    images._download = lambda url: (downloaded.append(url), (b"x" * 512, "image/jpeg"))[1]
+
+    try:
+        # Mark all but the last twenty as done - the shape a real cache takes,
+        # since the newest are fetched first. The version before this walked
+        # items to find the outstanding ones and gave up after a fixed number
+        # of them, so once the finished prefix grew past that limit it reached
+        # nothing at all: measured on forty thousand items it fetched fifty at
+        # forty per cent coverage and zero from fifty per cent on.
+        rows = db.query(CachedImage).order_by(CachedImage.id).all()
+        for row in rows[:-20]:
+            row.fetched_at = now - timedelta(hours=1)
+            row.bytes = 512
+        db.commit()
+
+        check("only a tail is outstanding", images.pending_count(db) == 20)
+        result = images.prefetch(db, limit=10)
+        check("the prefetcher still reaches it", result["fetched"] == 10, result)
+        check("and says what is left", result["queued"] == 10, result)
+
+        # Order: what cannot be replaced comes first.
+        db.query(CachedImage).update({"fetched_at": None, "bytes": 0})
+        db.commit()
+        db.expire_all()
+        queue = images._pending_queue(db, 5)
+        oldest_first = [q.item_id for q in queue]
+        newest = [i.id for i in items[:5]]
+        check(
+            "used copies come newest first",
+            oldest_first == newest,
+            (oldest_first, newest),
+        )
+    finally:
+        images._download = original
+
+    db.query(CachedImage).delete()
+    db.query(Item).delete()
+    db.commit()
+    db.close()
+
+
+def test_waits_are_quoted_from_what_was_measured() -> None:
+    print("\n== The waits come from what happened, not from the settings ==")
+    from app.db import SessionLocal, init_db
+    from app.models import CachedImage, Condition, Item
+    from app.services import enrich, images
+
+    init_db()
+    db = SessionLocal()
+    db.query(CachedImage).delete()
+    db.query(Item).delete()
+    db.commit()
+
+    now = datetime.now(timezone.utc)
+
+    # Photos: 48 landed over the last day, 100 still owed.
+    for n in range(48):
+        db.add(CachedImage(key=f"done-{n}", source_url=f"https://img/{n}.jpg",
+                           kind="thumb", bytes=1000,
+                           fetched_at=now - timedelta(hours=n % 24)))
+    for n in range(100):
+        db.add(CachedImage(key=f"owed-{n}", source_url=f"https://img/owed{n}.jpg",
+                           kind="thumb"))
+    db.commit()
+
+    rate = images.download_rate(db)
+    check("the measured rate counts what landed", rate == 2.0, rate)
+    stats = images.stats(db)
+    check("the queue is what is owed", stats["pending"] == 100, stats["pending"])
+    check("and the wait uses the measured rate", stats["queue_hours"] == 50.0,
+          stats["queue_hours"])
+    check("which is flagged as measured", stats["queue_measured"])
+
+    # With nothing landing, the settings must not be used to invent a figure:
+    # a queue nothing is draining is stalled, not slow.
+    db.query(CachedImage).filter(CachedImage.fetched_at.is_not(None)).delete()
+    db.commit()
+    stats = images.stats(db)
+    check("no downloads means no measured rate", stats["measured_per_hour"] == 0.0)
+    check("and the wait is not called measured", not stats["queue_measured"])
+
+    # The linker, the same way.
+    for n in range(24):
+        db.add(Item(provider="amiami", code=f"L-{n}", name=f"Linked {n}",
+                    condition=Condition.preowned, currency="JPY",
+                    mfc_id=1000 + n, mfc_fetched_at=now - timedelta(hours=n)))
+    for n in range(240):
+        db.add(Item(provider="amiami", code=f"U-{n}", name=f"Unlinked {n}",
+                    condition=Condition.preowned, currency="JPY"))
+    db.commit()
+
+    check("the linker's rate is measured too", enrich.measured_per_hour(db) == 1.0,
+          enrich.measured_per_hour(db))
+    seconds = enrich.eta_from_measurement(db)
+    check("and 240 left at one an hour is ten days",
+          seconds and abs(seconds / 86400 - 10) < 0.2, seconds)
+
+    # Nothing looked up means no honest estimate rather than an invented one.
+    db.query(Item).filter(Item.mfc_fetched_at.is_not(None)).delete()
+    db.commit()
+    check("no lookups means no measured estimate",
+          enrich.eta_from_measurement(db) is None)
+
+    db.query(CachedImage).delete()
+    db.query(Item).delete()
+    db.commit()
+    db.close()
+
+
 def main() -> int:
     test_url_parsing()
     test_release_dates()
@@ -4740,6 +4881,8 @@ def main() -> int:
     test_request_accounting()
     test_photo_counts_distinguish_known_from_held()
     test_prefetch_works_through_its_backlog()
+    test_the_photo_queue_is_reached_however_full_the_cache_is()
+    test_waits_are_quoted_from_what_was_measured()
     test_tag_search_reaches_past_the_popular_ones()
     test_price_history_follows_the_cheapest_copy()
     test_head_slice_reads_only_its_front()

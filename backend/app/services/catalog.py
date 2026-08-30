@@ -206,7 +206,11 @@ def upsert_item(db: Session, normalized: NormalizedItem, commit: bool = True) ->
     # without this the image endpoint has no idea what to go and get.
     from . import images as image_cache
 
-    image_cache.register(db, image_cache.urls_for_item(item))
+    # Flushed first: a brand new item has no id yet, and a photo recorded
+    # without one cannot be found by the queue that fetches them.
+    if item.id is None:
+        db.flush()
+    image_cache.register(db, image_cache.urls_for_item(item), item_id=item.id)
 
     price_moved = normalized.price is not None and normalized.price != previous_price
     stock_moved = normalized.in_stock != previous_stock

@@ -303,6 +303,42 @@ def eta_seconds(db: Session) -> int | None:
     return int(pending / batch * seconds_per_batch)
 
 
+def measured_per_hour(db: Session, hours: int = 24) -> float:
+    """Items an hour the linker has actually got through, measured.
+
+    Counted from when each item was last looked up rather than derived from
+    the batch size and the interval. Those say what the job is permitted; the
+    gap between that and what happens is the whole reason anyone reads the
+    estimate. A lookup that resolves nothing still counts - it consumed a turn
+    and the item will not be tried again - so this is the rate the backlog
+    actually drains at.
+    """
+    since = utcnow() - timedelta(hours=hours)
+    done = int(
+        db.execute(
+            select(func.count(Item.id)).where(Item.mfc_fetched_at >= since)
+        ).scalar_one()
+    )
+    return round(done / hours, 1) if done else 0.0
+
+
+def eta_from_measurement(db: Session, hours: int = 24) -> int | None:
+    """How long the remaining backlog takes at the rate actually observed."""
+    rate = measured_per_hour(db, hours)
+    if rate <= 0:
+        return None
+    pending = int(
+        db.execute(
+            select(func.count(Item.id)).where(
+                Item.mfc_id.is_(None), Item.mfc_attempts < MAX_ATTEMPTS
+            )
+        ).scalar_one()
+    )
+    if pending <= 0:
+        return None
+    return int(pending / rate * 3600)
+
+
 def throughput_per_minute() -> float:
     """Items an hour the linker is actually getting through, as configured.
 

@@ -951,15 +951,20 @@ export function CatalogPanel() {
             {[
               ['Still queued', (mfc.pending_items ?? 0).toLocaleString('en-GB')],
               ['Known tags', (mfc.tags ?? 0).toLocaleString('en-GB')],
-              // Items an hour, not the request allowance. Those are different
-              // numbers and showing the allowance next to the estimate read as
-              // a contradiction: ten requests a minute permitted, against a
-              // backlog said to take half a year.
+              // Measured against permitted. The settings say what the job may
+              // do; only the count of items actually looked up in the last day
+              // says what it does, and the estimate is worth nothing unless it
+              // comes from the second.
               [
-                'Working through',
-                `${mfc.items_per_minute ?? '—'}/min · ${mfc.batch_size ?? '—'} per pass`,
+                'Getting through',
+                mfc.measured_per_hour
+                  ? `${mfc.measured_per_hour}/h measured · ${mfc.allowed_per_hour ?? '—'}/h allowed`
+                  : `nothing in 24h · ${mfc.allowed_per_hour ?? '—'}/h allowed`,
               ],
-              ['Finishes in', eta(mfc.eta_seconds)],
+              [
+                mfc.eta_measured ? 'Finishes in (measured)' : 'Finishes in (estimated)',
+                eta(mfc.eta_seconds),
+              ],
             ].map(([label, value]) => (
               <div key={label as string} className="flex justify-between gap-3">
                 <dt className="text-muted">{label}</dt>
@@ -1088,15 +1093,27 @@ function ImageCache() {
           </p>
           {d.pending > 0 && (
             <p className="mt-1.5 text-[11px] leading-relaxed text-warning">
-              {d.pending.toLocaleString('en-GB')} still to fetch, going out at about{' '}
-              {d.prefetch_per_hour.toLocaleString('en-GB')} an hour
-              {d.queue_hours >= 1 &&
-                ` \u2014 roughly ${
-                  d.queue_hours >= 48
-                    ? `${Math.round(d.queue_hours / 24)} days`
-                    : `${Math.round(d.queue_hours)} hours`
-                } to catch up`}
-              . Used listings are fetched first, newest first: when a used copy sells, its
+              {d.pending.toLocaleString('en-GB')} still to fetch.{' '}
+              {d.measured_per_hour ? (
+                <>
+                  {d.measured_per_hour.toLocaleString('en-GB')} an hour actually landed over
+                  the last day
+                  {d.queue_hours >= 1 &&
+                    ` — about ${
+                      d.queue_hours >= 48
+                        ? `${Math.round(d.queue_hours / 24)} days`
+                        : `${Math.round(d.queue_hours)} hours`
+                    } at that rate`}
+                  .
+                </>
+              ) : (
+                <>
+                  Nothing has landed in the last day, though the schedule allows{' '}
+                  {d.prefetch_per_hour.toLocaleString('en-GB')} an hour — so the queue is
+                  stalled rather than slow.
+                </>
+              )}{' '}
+              Used listings are fetched first, newest first: when a used copy sells, its
               photographs go with it, and they were the only pictures of that actual item.
             </p>
           )}

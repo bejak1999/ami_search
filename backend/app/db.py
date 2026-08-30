@@ -101,6 +101,9 @@ def init_db() -> None:
     dated = backfill_last_listing()
     if dated:
         log.info("Dated the most recent used copy on %s product(s)", dated)
+    linked = backfill_image_owners()
+    if linked:
+        log.info("Linked %s cached photo(s) to the product they belong to", linked)
     log.info("Database ready at %s", settings.resolved_database_url.split("://", 1)[0])
 
 
@@ -664,4 +667,71 @@ def backfill_last_listing() -> int:
             item.last_listing_at = latest
             changed += 1
         db.commit()
+    return changed
+
+
+def backfill_image_owners() -> int:
+    """Point each stored photo at the product it belongs to.
+
+    The column is written going forward when a photo is first recorded. Every
+    row that existed before the upgrade has none, and the queue that fetches
+    them orders by the product - so without this the whole existing backlog
+    would sort last and stay there.
+
+    Matched by recomputing each item's photo URLs and looking up their keys,
+    because the key is a hash of the URL and cannot be reversed. Done in
+    batches so a catalogue of seventy thousand does not build one enormous
+    statement.
+    """
+    from sqlalchemy import select, update
+
+    from . import models
+    from .services import images
+
+    changed = 0
+    with session_scope() as db:
+        try:
+            outstanding = db.execute(
+                select(models.CachedImage.id).where(models.CachedImage.item_id.is_(None)).limit(1)
+            ).scalar_one_or_none()
+        except Exception:  # pragma: no cover - table may not exist yet
+            return 0
+        if outstanding is None:
+            return 0
+
+        batch = 500
+        offset = 0
+        while True:
+            items = (
+                db.execute(select(models.Item).order_by(models.Item.id).offset(offset).limit(batch))
+                .scalars()
+                .all()
+            )
+            if not items:
+                break
+            offset += batch
+
+            by_key: dict[str, int] = {}
+            for item in items:
+                for url in images.urls_for_item(item):
+                    by_key[images.key_for(url)] = item.id
+            if not by_key:
+                continue
+
+            # Grouped by item so each statement carries one id and its keys,
+            # rather than a CASE over the whole batch.
+            per_item: dict[int, list[str]] = {}
+            for key, item_id in by_key.items():
+                per_item.setdefault(item_id, []).append(key)
+            for item_id, keys in per_item.items():
+                result = db.execute(
+                    update(models.CachedImage)
+                    .where(
+                        models.CachedImage.key.in_(keys),
+                        models.CachedImage.item_id.is_(None),
+                    )
+                    .values(item_id=item_id)
+                )
+                changed += int(result.rowcount or 0)
+            db.commit()
     return changed
