@@ -923,6 +923,12 @@ class CatalogCrawl(Base):
     #: The same thing in minutes, so both intervals use one control and one
     #: set of units. NULL falls back to the days column above.
     full_sweep_interval_minutes: Mapped[int | None] = mapped_column(Integer)
+    #: Whether the pass currently under way is reading the whole slice.
+    #: Decided once when the pass starts and held, because it cannot be
+    #: inferred afterwards: a cursor past the front means either a short
+    #: pass that has just finished or a sweep in progress, and guessing
+    #: turned every short pass into a sweep at its own boundary.
+    sweeping_all: Mapped[bool] = mapped_column(Boolean, default=False)
     last_full_sweep_at: Mapped[datetime | None] = mapped_column(UTCDateTime)
     cycles_completed: Mapped[int] = mapped_column(Integer, default=0)
 

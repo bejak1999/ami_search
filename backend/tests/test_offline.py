@@ -2406,9 +2406,11 @@ def test_crawler_cycles() -> None:
         _page_limit(no_head),
     )
 
-    # A short pass must not be truncated by a sweep that has already started.
-    # The interval elapsing halfway through would otherwise cut the sweep off
-    # at page 30 and mark it complete.
+    # A sweep already under way must not be truncated when the short-pass
+    # interval elapses half way through it. Which kind of pass is running is
+    # recorded when it starts rather than inferred from the cursor, because a
+    # short pass at page 31 of a 30-page front and a sweep at page 31 look
+    # identical from the outside.
     mid_sweep = CatalogCrawl(
         provider="amiami",
         scope="s",
@@ -2416,6 +2418,7 @@ def test_crawler_cycles() -> None:
         cycles_completed=1,
         head_pages=20,
         cursor_page=90,
+        sweeping_all=True,
         full_sweep_interval_minutes=1440,
         last_full_sweep_at=datetime.now(timezone.utc),
     )
@@ -4366,6 +4369,148 @@ def test_a_refresh_notices_a_copy_has_gone() -> None:
     db.close()
 
 
+def test_a_short_pass_stops_at_its_own_edge() -> None:
+    print("\n== A short pass ends after its pages; a sweep runs to the end ==")
+    from app.models import CatalogCrawl
+    from app.services.crawler import _complete_cycle, _page_limit, full_sweep_due
+
+    now = datetime.now(timezone.utc)
+
+    def slice_at(cursor: int, sweeping: bool) -> CatalogCrawl:
+        return CatalogCrawl(
+            provider="amiami", scope="s", pages_total=213, head_pages=30,
+            cursor_page=cursor, sweeping_all=sweeping,
+            full_sweep_interval_minutes=1440, last_full_sweep_at=now,
+        )
+
+    # The bug this covers: the kind of pass used to be inferred from the
+    # cursor, on the reasoning that a cursor past the front meant a sweep was
+    # already under way. A short pass reaching page 31 of a 30-page front
+    # looks exactly the same, so at its own boundary the limit jumped from 30
+    # to 213 and every short pass quietly read the whole slice - undoing the
+    # saving it exists for.
+    check("a short pass reads its front", _page_limit(slice_at(1, False)) == 30)
+    check("and still at the last of them", _page_limit(slice_at(30, False)) == 30)
+    check(
+        "then stops rather than becoming a sweep",
+        _page_limit(slice_at(31, False)) == 30,
+        _page_limit(slice_at(31, False)),
+    )
+    check("a sweep reads past the front", _page_limit(slice_at(31, True)) == 213)
+    check("all the way to the end", _page_limit(slice_at(213, True)) == 213)
+
+    # A slice with no front reads everything, whatever the flag says.
+    plain = CatalogCrawl(provider="amiami", scope="s", pages_total=59, head_pages=0,
+                         cursor_page=40, sweeping_all=False)
+    check("a slice with no front is always sweeping", _page_limit(plain) == 59)
+
+    # Due-ness is now about the schedule alone, not about where the cursor is.
+    stale = CatalogCrawl(
+        provider="amiami", scope="s", pages_total=213, head_pages=30, cursor_page=1,
+        full_sweep_interval_minutes=1440,
+        last_full_sweep_at=now - timedelta(days=2),
+    )
+    check("an overdue slice owes a sweep", full_sweep_due(stale))
+    fresh = CatalogCrawl(
+        provider="amiami", scope="s", pages_total=213, head_pages=30, cursor_page=99,
+        full_sweep_interval_minutes=1440, last_full_sweep_at=now,
+    )
+    check(
+        "and a recent one does not, wherever its cursor sits",
+        not full_sweep_due(fresh),
+    )
+    check("a slice that has never swept owes one", full_sweep_due(
+        CatalogCrawl(provider="amiami", scope="s", head_pages=30, cursor_page=1)
+    ))
+
+    # Finishing a short pass must not count as having swept, or the sweep
+    # would be postponed for ever by the passes that replace it.
+    from app.db import SessionLocal, init_db
+    from app.models import CatalogCrawl as Row
+
+    init_db()
+    db = SessionLocal()
+    db.query(Row).delete()
+    db.commit()
+    row = Row(provider="amiami", scope="s", pages_total=213, head_pages=30,
+              cursor_page=31, sweeping_all=False, full_sweep_interval_minutes=1440,
+              last_full_sweep_at=now - timedelta(hours=2))
+    db.add(row)
+    db.commit()
+    _complete_cycle(db, row)
+    check(
+        "a finished short pass does not count as a sweep",
+        row.last_full_sweep_at < now - timedelta(hours=1),
+        row.last_full_sweep_at,
+    )
+    check("and leaves the flag clear for the next one", row.sweeping_all is False)
+
+    row.cursor_page = 214
+    row.sweeping_all = True
+    _complete_cycle(db, row)
+    check("a finished sweep does count", row.last_full_sweep_at > now - timedelta(minutes=1))
+
+    db.query(Row).delete()
+    db.commit()
+    db.close()
+
+
+def test_pruning_survives_a_large_catalogue() -> None:
+    print("\n== History pruning holds up at catalogue scale ==")
+    from app.db import SessionLocal, init_db
+    from app.models import Condition, Item, PricePoint
+    from app.services import catalog
+
+    init_db()
+    db = SessionLocal()
+    db.query(PricePoint).delete()
+    db.query(Item).delete()
+    db.commit()
+
+    # The protected set is two to four ids per item. It used to be read into
+    # Python and handed back as a bind parameter each, which SQLite refuses
+    # past about thirty-two thousand: "too many SQL variables". Housekeeping
+    # then failed on every run, silently - the scheduler logs and moves on -
+    # so nothing was pruned, and the alert pruning behind it never ran either.
+    ITEMS = 9_000
+    old = datetime.now(timezone.utc) - timedelta(days=2000)
+    items = [
+        Item(provider="amiami", code=f"P-{n}", name=f"Figure {n}",
+             condition=Condition.preowned, currency="JPY", current_price=1000 + n)
+        for n in range(ITEMS)
+    ]
+    db.add_all(items)
+    db.flush()
+    points = []
+    for item in items:
+        for offset, price in ((10, 900), (20, 1000), (30, 1100)):
+            points.append(PricePoint(item_id=item.id, recorded_at=old - timedelta(days=offset),
+                                     price=price, currency="JPY", in_stock=True))
+    db.add_all(points)
+    db.commit()
+
+    before = db.query(PricePoint).count()
+    check("a catalogue is in place", before == ITEMS * 3, before)
+
+    deleted = catalog.prune_history(db, retention_days=365)
+    check("pruning runs rather than raising", deleted > 0, deleted)
+
+    # And it still protects what it promised: the cheapest, the dearest, the
+    # first and the last of each item's series.
+    remaining = db.query(PricePoint).count()
+    check("the middle of each series went", remaining == before - deleted)
+    check(
+        "and every item keeps its extremes",
+        remaining >= ITEMS * 2,
+        remaining,
+    )
+
+    db.query(PricePoint).delete()
+    db.query(Item).delete()
+    db.commit()
+    db.close()
+
+
 def main() -> int:
     test_url_parsing()
     test_release_dates()
@@ -4440,6 +4585,8 @@ def main() -> int:
     test_a_note_belongs_to_one_copy()
     test_each_copy_carries_its_own_price_trail()
     test_a_refresh_notices_a_copy_has_gone()
+    test_a_short_pass_stops_at_its_own_edge()
+    test_pruning_survives_a_large_catalogue()
     test_newly_listed_used_is_not_newly_known()
     test_settings()
 

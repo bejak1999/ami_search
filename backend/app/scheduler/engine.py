@@ -344,12 +344,25 @@ class PollingEngine:
             log.exception("Digest dispatch failed")
 
     def housekeeping(self) -> None:
-        try:
-            with session_scope() as db:
-                catalog.prune_history(db, settings.price_history_retention_days)
-                digest.prune_alerts(db, settings.alert_retention_days)
-        except Exception:  # noqa: BLE001
-            log.exception("Housekeeping failed")
+        """Trim what has aged out. Each chore stands on its own.
+
+        They used to share one try block, so when history pruning started
+        failing on a large catalogue - it built a bind parameter per protected
+        row and SQLite refused - the alert pruning behind it stopped running
+        too, and neither said anything: the handler logs and moves on. One
+        failure should cost one chore.
+        """
+        chores = (
+            ("price history", lambda db: catalog.prune_history(
+                db, settings.price_history_retention_days)),
+            ("alerts", lambda db: digest.prune_alerts(db, settings.alert_retention_days)),
+        )
+        for what, run in chores:
+            try:
+                with session_scope() as db:
+                    run(db)
+            except Exception:  # noqa: BLE001
+                log.exception("Housekeeping failed while pruning %s", what)
 
     @contextmanager
     def paused(self):

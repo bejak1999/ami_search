@@ -332,10 +332,15 @@ def _page_limit(crawl: CatalogCrawl) -> int:
     row that has not been flushed yet still carries None.
     """
     total = crawl.pages_total or 10_000  # unknown until the first response
-    if full_sweep_due(crawl):
-        return total
     head = crawl.head_pages or 0
-    return min(total, head) if head > 0 else total
+    if head <= 0:
+        return total
+    # Between passes there is nothing in progress to confuse a sweep with, so
+    # the schedule answers and the view can say how long the next pass will
+    # be. Once a pass is under way the flag answers, because the cursor alone
+    # cannot tell a finished short pass from a sweep at the same page.
+    sweeping = crawl.sweeping_all if (crawl.cursor_page or 1) > 1 else full_sweep_due(crawl)
+    return total if sweeping else min(total, head)
 
 
 def full_sweep_interval_minutes(crawl: CatalogCrawl) -> int:
@@ -351,13 +356,18 @@ def full_sweep_interval_minutes(crawl: CatalogCrawl) -> int:
 
 
 def full_sweep_due(crawl: CatalogCrawl) -> bool:
-    """Should this pass read everything rather than just the front?
+    """Is a pass over the whole slice owed?
 
-    A slice with no head pass configured is always sweeping in full, so the
-    question does not arise. Otherwise it is due when the last full sweep has
-    aged out - and once a sweep has started, it finishes as a sweep: the check
-    is against when the last one *completed*, so a pass that spans the moment
-    the head interval elapses does not silently truncate itself half way.
+    Asked once, when a pass begins. A slice with no short pass configured is
+    always sweeping in full, so the question does not arise for it.
+
+    This deliberately says nothing about the pass currently running - see
+    ``sweeping_all`` for that. An earlier version tried to infer it from the
+    cursor, on the reasoning that a cursor past the front meant a sweep
+    already under way. It does not distinguish the two cases: a short pass
+    reaching page 31 of a 30-page front looks identical to a sweep at page 31,
+    so every short pass flipped into a full one at its own boundary and read
+    all 213 pages. The saving the short pass exists for was silently undone.
     """
     if not (crawl.head_pages or 0):
         return True
@@ -366,11 +376,9 @@ def full_sweep_due(crawl: CatalogCrawl) -> bool:
         return True  # never swept: the first pass reads everything
     if last.tzinfo is None:
         last = last.replace(tzinfo=timezone.utc)
-    due_at = last + timedelta(minutes=full_sweep_interval_minutes(crawl))
-    if datetime.now(timezone.utc) >= due_at:
-        return True
-    # Already part way past the head, so this pass was started as a sweep.
-    return (crawl.cursor_page or 1) > (crawl.head_pages or 0)
+    return datetime.now(timezone.utc) >= last + timedelta(
+        minutes=full_sweep_interval_minutes(crawl)
+    )
 
 
 def _cooldown_remaining(crawl: CatalogCrawl) -> int:
@@ -470,6 +478,12 @@ def run_once(db: Session, provider_id: str = "amiami", budget_seconds: int | Non
 
     if crawl.started_at is None:
         crawl.started_at = utcnow()
+    if (crawl.cursor_page or 1) <= 1:
+        # A pass begins here, and what kind it is has to be settled now: the
+        # cursor cannot tell them apart later, and a pass that changed its
+        # mind half way would either stop a sweep short or turn a short pass
+        # into a sweep.
+        crawl.sweeping_all = full_sweep_due(crawl)
     crawl.state = CrawlState.running
     # Kept before it is overwritten: the gap since this slice last ran is what
     # turns pages-per-run into pages-per-hour of real time, and the idle part
@@ -638,14 +652,13 @@ def _store_page(db: Session, items) -> tuple[int, int]:
 
 def _complete_cycle(db: Session, crawl: CatalogCrawl) -> None:
     """Wrap a finished pass and arm the next one."""
-    # Whether this pass covered the whole slice or only its front. Read
-    # before the cursor is reset, since that is what says how far it got.
-    head = crawl.head_pages or 0
-    was_full = head <= 0 or (crawl.cursor_page or 1) > head
+    # What kind of pass this was, as decided when it started.
+    was_full = bool(crawl.sweeping_all) or not (crawl.head_pages or 0)
     crawl.cycles_completed = (crawl.cycles_completed or 0) + 1
     crawl.cursor_page = 1
     crawl.finished_at = utcnow()
     crawl.state = CrawlState.completed
+    crawl.sweeping_all = False
     if was_full:
         crawl.last_full_sweep_at = utcnow()
     db.commit()
@@ -887,7 +900,7 @@ def progress(db: Session, provider_id: str = "amiami") -> dict:
                 # Which kind of pass this slice is on right now, so the view
                 # can say "reading the newest 30" rather than showing a bar
                 # that means two different things on alternate runs.
-                "sweeping_all": full_sweep_due(crawl),
+                "sweeping_all": bool(crawl.sweeping_all) or not (crawl.head_pages or 0),
                 "pages_this_pass": _page_limit(crawl),
                 "full_sweep_interval_days": crawl.full_sweep_interval_days,
             }

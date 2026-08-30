@@ -4,7 +4,7 @@ from __future__ import annotations
 import logging
 from datetime import datetime, timedelta, timezone
 
-from sqlalchemy import func, select
+from sqlalchemy import func, select, union
 from sqlalchemy.orm import Session, aliased
 
 from ..models import Condition, Item, PricePoint, utcnow
@@ -426,36 +426,34 @@ def prune_history(db: Session, retention_days: int) -> int:
     cutoff = datetime.now(timezone.utc) - timedelta(days=retention_days)
     other = aliased(PricePoint)
 
-    def edge_ids(aggregate) -> set[int]:
+    def extreme_ids(aggregate):
         """One row per item: the earliest point holding its extreme price."""
-        return set(
-            db.execute(
-                select(func.min(PricePoint.id))
-                .where(
-                    PricePoint.price.is_not(None),
-                    PricePoint.price
-                    == select(aggregate(other.price))
-                    .where(other.item_id == PricePoint.item_id)
-                    .scalar_subquery(),
-                )
-                .group_by(PricePoint.item_id)
+        return (
+            select(func.min(PricePoint.id))
+            .where(
+                PricePoint.price.is_not(None),
+                PricePoint.price
+                == select(aggregate(other.price))
+                .where(other.item_id == PricePoint.item_id)
+                .scalar_subquery(),
             )
-            .scalars()
-            .all()
+            .group_by(PricePoint.item_id)
         )
 
-    protected: set[int] = set()
-    for aggregate in (func.min, func.max):
-        protected |= edge_ids(aggregate)
-    # First and last observation per item, whatever the price was.
-    for aggregate in (func.min, func.max):
-        protected |= set(
-            db.execute(
-                select(aggregate(PricePoint.id)).group_by(PricePoint.item_id)
-            )
-            .scalars()
-            .all()
-        )
+    # Left as subqueries for the database to run rather than read into Python
+    # and handed back as a list of ids. Two to four ids per item is nothing at
+    # a hundred items and a quarter of a million bind parameters at seventy
+    # thousand, which SQLite refuses outright: "too many SQL variables". The
+    # whole of housekeeping then failed on every run - silently, since the
+    # scheduler logs and swallows it - so nothing was ever pruned, and the
+    # alert pruning that follows this never ran either.
+    protected = union(
+        extreme_ids(func.min),
+        extreme_ids(func.max),
+        # First and last observation per item, whatever the price was.
+        select(func.min(PricePoint.id)).group_by(PricePoint.item_id),
+        select(func.max(PricePoint.id)).group_by(PricePoint.item_id),
+    )
 
     query = db.query(PricePoint).filter(
         PricePoint.recorded_at < cutoff,
@@ -463,9 +461,8 @@ def prune_history(db: Session, retention_days: int) -> int:
         PricePoint.listing_id.is_(None),
         # Gone from the shop means we are the last copy of this information.
         PricePoint.item_id.not_in(select(Item.id).where(Item.order_closed.is_(True))),
+        PricePoint.id.not_in(protected),
     )
-    if protected:
-        query = query.filter(PricePoint.id.not_in(protected))
 
     deleted = query.delete(synchronize_session=False)
     db.commit()
