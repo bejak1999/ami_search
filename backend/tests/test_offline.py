@@ -3862,60 +3862,89 @@ def test_newly_listed_used_is_not_newly_known() -> None:
 
 def test_condition_notes_are_told_from_shipping_notices() -> None:
     print("\n== The red text that explains a low price, and the red text that does not ==")
+    import json
+    import pathlib as _pathlib
+
     from app.providers.amiami import condition_note
 
-    # Both of these are real, both are red, and both live in "remarks". The
-    # first is the entire reason the figure costs 3,920 instead of 19,580; the
-    # second is about the parcel and has nothing to do with condition.
-    defect = (
-        "<font color=red><b>[Discoloration] Upper body skin area has become white\n"
-        "Both legs are sticky and have stains</b></font>"
-    )
-    shipping = (
-        "<font color=red><b>*Shipping costs for this item may be very high due to "
-        "package size or/and weight.</b></font>\n*This item must be delivered alone "
-        "and it cannot be combined with other items."
-    )
+    def red(text: str) -> str:
+        return f"<font color=red><b>{text}</b></font>"
 
-    note = condition_note(defect)
-    check("the defect note survives", note is not None)
-    check("with its category kept", note.startswith("[Discoloration]"), note)
-    check("and both sentences", "sticky" in note and "white" in note, note)
-    check("the markup is gone", "<" not in note and ">" not in note, note)
-    check("and the line break with it", "\n" not in note, repr(note))
+    # Every one of these was found in AmiAmi's own data while sampling the
+    # pre-owned catalogue (.probe/remarks_survey.py). Nineteen red passages
+    # turned up across a hundred-odd listings, in three kinds.
+    kept = {
+        "[Discoloration] Upper body skin area has become white\n"
+        "Both legs are sticky and have stains":
+            "[Discoloration] Upper body skin area has become white · "
+            "Both legs are sticky and have stains",
+        "The pencil board is missing.": "The pencil board is missing.",
+        "The decal is missing.": "The decal is missing.",
+        "White area on the skirt has become yellowish":
+            "White area on the skirt has become yellowish",
+        "Outfit is sticky and has droplets due to age":
+            "Outfit is sticky and has droplets due to age",
+        "Blister has become yellowish\nThere are stains on the inner cardboard":
+            "Blister has become yellowish · There are stains on the inner cardboard",
+        "[Missing] Shoes": "[Missing] Shoes",
+    }
+    for text, expected in kept.items():
+        got = condition_note(red(text))
+        check(f"kept: {text.splitlines()[0][:44]}", got == expected, got)
 
-    check("a shipping warning is not a defect", condition_note(shipping) is None)
-    check("nor is a plain description", condition_note("Sculptor: Makio") is None)
-    check("nor nothing at all", condition_note(None) is None)
-    check("nor an empty red tag", condition_note("<font color=red></font>") is None)
+    dropped = {
+        "*Shipping costs for this item may be very high due to package size "
+        "or/and weight.": "the parcel, not the figure",
+        "Poster is included.": "a bonus, and good news at that",
+        "Postcard is included\n*Shipping costs for this item may be very high "
+        "due to package size or/and weight.": "a bonus and the parcel together",
+    }
+    for text, why in dropped.items():
+        check(f"dropped ({why})", condition_note(red(text)) is None, condition_note(red(text)))
 
-    # Seen in the wild while sampling the catalogue, in a different shape from
-    # the one that prompted this.
+    # The one that decides the design. These arrive as one red block, and a
+    # verdict on the block either shows the postcard as a defect or loses the
+    # detached ear - so statements are judged one at a time.
+    mixed = condition_note(red("Postcard is included\nRight rabbit ear is detached"))
+    check("a bonus beside a defect keeps only the defect",
+          mixed == "Right rabbit ear is detached", mixed)
+
+    check("the markup does not survive", "<" not in (kept and mixed or ""), mixed)
+    check("nothing at all stays nothing", condition_note(None) is None)
+    check("an empty red tag too", condition_note("<font color=red></font>") is None)
+    check("and plain prose is not red text", condition_note("Sculptor: Makio") is None)
+
+    # Unfamiliar wording is kept rather than discarded. A defect that goes
+    # unshown is the failure that matters; a stray notice is only noise.
     check(
-        "a shorter note works the same",
-        condition_note("<font color=red><b>[Missing] Shoes</b></font>") == "[Missing] Shoes",
+        "unrecognised red text is kept",
+        condition_note(red("Left arm has a repair mark")) == "Left arm has a repair mark",
     )
 
-    # Unrecognised red text is kept rather than dropped. A defect that goes
-    # unshown is the failure that matters: it is the difference between a
-    # bargain and a figure with stains on its legs. A shipping notice shown by
-    # mistake is only noise.
+    # An earlier version keyed on a bracketed category like "[Discoloration]".
+    # Of the nineteen real passages, none outside the original example had one.
     check(
-        "unfamiliar wording is kept, not discarded",
-        condition_note("<font color=red>Left arm has a repair mark</font>")
-        == "Left arm has a repair mark",
+        "a note without a bracketed category still counts",
+        condition_note(red("Right hand is discoloured")) is not None,
     )
 
-    # Two red passages, one of each kind, on the same product.
-    both = (
-        "<font color=red><b>[Scratches] On the base</b></font> and "
-        "<font color=red><b>*Shipping costs for this item may be very high.</b></font>"
-    )
-    check(
-        "the useful half is kept when they are mixed",
-        condition_note(both) == "[Scratches] On the base",
-        condition_note(both),
-    )
+    # When the sampler has left raw captures behind, run the real bytes
+    # through as well - separators included, which is what a collapsed
+    # transcript cannot tell you.
+    captured = _pathlib.Path(__file__).resolve().parents[2] / ".probe" / "red-remarks.json"
+    if captured.exists():
+        rows = json.loads(captured.read_text(encoding="utf-8"))
+        notes = [(r["gcode"], condition_note(r["remarks"])) for r in rows]
+        leaked = [(code, note) for code, note in notes if note and "shipping cost" in note.lower()]
+        check(
+            f"no shipping notice leaks through {len(rows)} real captures",
+            not leaked,
+            leaked[:3],
+        )
+        check(
+            "and the markup never does either",
+            not [n for _, n in notes if n and ("<" in n or ">" in n)],
+        )
 
 
 def test_grades_match_exactly_unless_widened() -> None:

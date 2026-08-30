@@ -84,10 +84,16 @@ def _clean_condition(sname: str | None) -> str:
 _RED_TEXT = re.compile(r"<font[^>]*color[^>]*red[^>]*>(.*?)</font>", re.IGNORECASE | re.DOTALL)
 _HTML_TAG = re.compile(r"<[^>]+>")
 
-#: Red text that is about the parcel rather than the figure. AmiAmi uses one
-#: field for both, so the shipping warning would otherwise be presented as a
-#: reason a used copy is cheap - worse than saying nothing, because it reads
-#: as a defect that is not there.
+#: One red block holds several statements, one per line. Sampling the
+#: catalogue turned up blocks mixing a bonus with a shipping notice - "Postcard
+#: is included" and "*Shipping costs for this item may be very high" - so the
+#: block has to be split before anything is judged, or one statement decides
+#: the fate of the others.
+_STATEMENT_BREAK = re.compile(r"(?:<br\s*/?>|[\r\n]|(?<=[.!?])\s+(?=\*))", re.IGNORECASE)
+
+#: Statements about the parcel rather than the figure. AmiAmi uses one field
+#: for both, and a shipping warning presented as a reason a copy is cheap is
+#: worse than saying nothing: it reads as a defect that is not there.
 _LOGISTICS = re.compile(
     r"shipping cost|package size|delivered alone|cannot be combined|"
     r"combined with other items|separate shipment|single shipment|"
@@ -95,35 +101,50 @@ _LOGISTICS = re.compile(
     re.IGNORECASE,
 )
 
+#: Statements about what is in the box on top of the figure. Good news, and
+#: the whole point of this note is to explain a price that looks too good -
+#: so "Poster is included." under a warning triangle is actively misleading.
+#: Only when that is all the statement says: "Postcard is included" beside
+#: "Right rabbit ear is detached" leaves the detached ear behind.
+_BONUS = re.compile(r"^[^.]{0,60}\bis included\b\.?$", re.IGNORECASE)
+
 
 def condition_note(remarks: str | None) -> str | None:
     """The red warning explaining why a used copy is marked down.
 
     AmiAmi puts these in ``remarks``, wrapped in a red font tag, and puts
-    shipping warnings in exactly the same place - so the two have to be told
-    apart by what they say. A condition note describes the object:
+    shipping warnings and bonus-item notices in exactly the same place - so
+    the three have to be told apart by what they say. Sampled across the
+    catalogue, a hundred-odd listings yielded nineteen red passages:
 
-        [Discoloration] Upper body skin area has become white
-        Both legs are sticky and have stains
+        The pencil board is missing.                    a defect - kept
+        White area on the skirt has become yellowish    a defect - kept
+        Outfit is sticky and has droplets due to age    a defect - kept
+        *Shipping costs for this item may be very high  the parcel - dropped
+        Poster is included.                             a bonus - dropped
+        Postcard is included
+        Right rabbit ear is detached                    one of each - the ear
 
-    A logistics note describes the parcel, and is dropped:
+    Judged statement by statement rather than block by block, because those
+    last two arrive together and a block-level verdict would either show the
+    postcard as a defect or lose the detached ear.
 
-        *Shipping costs for this item may be very high due to package size
-        or/and weight.
-
-    Anything red that is not recognisably about postage is kept, because a
-    condition note that goes unshown is the failure that matters here: it is
-    the difference between a bargain and a figure with stains on its legs.
+    Anything red that is none of the three is kept. A condition note that goes
+    unshown is the failure that matters here - it is the difference between a
+    bargain and a figure with stains on its legs - while a stray notice shown
+    by mistake is only noise. An earlier version of this looked for a
+    bracketed category like "[Discoloration]"; of nineteen real passages, none
+    had one.
     """
     if not remarks:
         return None
     kept: list[str] = []
-    for chunk in _RED_TEXT.findall(remarks):
-        text = _HTML_TAG.sub("", chunk)
-        text = " ".join(text.split())
-        if not text or _LOGISTICS.search(text):
-            continue
-        kept.append(text)
+    for block in _RED_TEXT.findall(remarks):
+        for statement in _STATEMENT_BREAK.split(block):
+            text = " ".join(_HTML_TAG.sub("", statement).split())
+            if not text or _LOGISTICS.search(text) or _BONUS.match(text):
+                continue
+            kept.append(text)
     return " · ".join(kept) or None
 
 
