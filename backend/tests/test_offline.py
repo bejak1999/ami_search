@@ -4086,6 +4086,118 @@ def test_shop_notes_hold_up_on_wording_never_seen() -> None:
     )
 
 
+def test_a_note_belongs_to_one_copy() -> None:
+    print("\n== A condition note describes one copy, not the product ==")
+    from app.db import SessionLocal, init_db
+    from app.models import Condition, Item, Listing, ListingStatus
+    from app.providers.amiami import AmiAmiProvider
+    from app.services import shelflife
+
+    # The real shape, from FIGURE-045661-R. Asked about R514 the shop returns
+    # a C-grade at 3,920 with "[Discoloration] Upper body skin area has become
+    # white"; asked about R515 it returns an A-grade at 9,780 with an empty
+    # remarks field. Filing that note against the product would put the first
+    # copy's stains on the second copy's listing.
+    raw = {
+        "gcode": "FIGURE-045661-R",
+        "scode": "FIGURE-045661-R514",
+        "price": 3920,
+        "sname": "(Pre-owned ITEM:C/BOX:B)Azur Lane Atago Summer March Ver. 1/7",
+        "remarks": (
+            "<font color=red><b>[Discoloration] Upper body skin area has become white\n"
+            "Both legs are sticky and have stains</b></font>"
+        ),
+    }
+    embedded = {
+        "other_items": [
+            {"scode": "FIGURE-045661-R515", "price": 9780, "condition": "Condition Item:A　Box:B"},
+            {"scode": "FIGURE-045661-R513", "price": 5880, "condition": "Condition Item:B　Box:B"},
+        ]
+    }
+
+    variants = AmiAmiProvider._collect_variants(raw, embedded)
+    by_code = {v["code"]: v for v in variants}
+
+    check("every copy is collected", len(variants) == 3, sorted(by_code))
+    check(
+        "the note is on the copy the shop answered about",
+        by_code["FIGURE-045661-R514"]["note"] is not None,
+        by_code["FIGURE-045661-R514"]["note"],
+    )
+    check(
+        "and says what it says",
+        "Discoloration" in by_code["FIGURE-045661-R514"]["note"],
+    )
+    check(
+        "the A-grade copy carries nothing",
+        by_code["FIGURE-045661-R515"]["note"] is None,
+        by_code["FIGURE-045661-R515"]["note"],
+    )
+    check(
+        "nor does the B-grade one",
+        by_code["FIGURE-045661-R513"]["note"] is None,
+    )
+
+    # Which copy the shop answers with is its own choice and not always the
+    # cheapest - FIGURE-184067-R answers with a 38,680 copy while the cheapest
+    # is 34,380 - so the note follows the scode rather than a position.
+    provider = AmiAmiProvider()
+    normalized = provider._normalize_detail(raw, embedded)
+    check(
+        "the product records which copy its note came from",
+        normalized.condition_note_code == "FIGURE-045661-R514",
+        normalized.condition_note_code,
+    )
+    check(
+        "and the cheapest copy is still the headline price",
+        normalized.price == 3920,
+        normalized.price,
+    )
+
+    # And it reaches the stored copy, not the product row.
+    init_db()
+    db = SessionLocal()
+    db.query(Listing).delete()
+    db.query(Item).delete()
+    db.commit()
+
+    item = Item(provider="amiami", code="FIGURE-045661-R", name="Atago",
+                condition=Condition.preowned, in_stock=True, currency="JPY")
+    db.add(item)
+    db.flush()
+    shelflife.reconcile(db, item, variants, observed_at=datetime.now(timezone.utc))
+    db.commit()
+
+    stored = {row.code: row for row in db.query(Listing).all()}
+    check("a copy exists for each variant", len(stored) == 3, sorted(stored))
+    check(
+        "the marked-down copy carries the note",
+        stored["FIGURE-045661-R514"].condition_note is not None,
+    )
+    check(
+        "and the others carry none",
+        all(stored[c].condition_note is None
+            for c in ("FIGURE-045661-R515", "FIGURE-045661-R513")),
+        {c: stored[c].condition_note for c in stored},
+    )
+
+    # A later pass that says nothing about a copy must not erase what an
+    # earlier one recorded: the shop returns no remarks field for copies it
+    # was not asked about, and silence is not a retraction.
+    quiet = [dict(v, note=None) for v in variants]
+    shelflife.reconcile(db, item, quiet, observed_at=datetime.now(timezone.utc))
+    db.commit()
+    db.expire_all()
+    again = db.query(Listing).filter_by(code="FIGURE-045661-R514").one()
+    check("a silent pass does not clear it", again.condition_note is not None,
+          again.condition_note)
+
+    db.query(Listing).delete()
+    db.query(Item).delete()
+    db.commit()
+    db.close()
+
+
 def main() -> int:
     test_url_parsing()
     test_release_dates()
@@ -4157,6 +4269,7 @@ def main() -> int:
     test_grades_match_exactly_unless_widened()
     test_condition_notes_are_told_from_shipping_notices()
     test_shop_notes_hold_up_on_wording_never_seen()
+    test_a_note_belongs_to_one_copy()
     test_newly_listed_used_is_not_newly_known()
     test_settings()
 

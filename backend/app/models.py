@@ -499,6 +499,11 @@ class Listing(Base):
     condition: Mapped[str | None] = mapped_column(String(64))
     item_grade: Mapped[str | None] = mapped_column(String(8))
     box_grade: Mapped[str | None] = mapped_column(String(8))
+    #: What the shop says about this particular copy - a fault that
+    #: explains its price, or a bonus in its box. Per copy, because that
+    #: is what it describes: one copy of a figure can be marked down for
+    #: discolouration while the next is untouched.
+    condition_note: Mapped[str | None] = mapped_column(Text)
 
     appeared_after: Mapped[datetime | None] = mapped_column(UTCDateTime)
     first_seen_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utcnow)

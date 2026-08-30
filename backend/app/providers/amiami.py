@@ -606,7 +606,7 @@ class AmiAmiProvider(ShopProvider):
         """
         seen: dict[str, dict[str, Any]] = {}
 
-        def record(code: str, price: Any, condition: str) -> None:
+        def record(code: str, price: Any, condition: str, note: str | None = None) -> None:
             if not code or not price or code in seen:
                 return
             item_grade, box_grade = parse_grades(condition)
@@ -616,18 +616,32 @@ class AmiAmiProvider(ShopProvider):
                 "condition": " ".join((condition or "").split()),
                 "item_grade": item_grade,
                 "box_grade": box_grade,
+                "note": note,
             }
 
+        # The note belongs to this one copy and to no other. FIGURE-045661-R514
+        # is an ITEM:C at 3,920 with "[Discoloration] Upper body skin area has
+        # become white"; R515 is an ITEM:A at 9,780 with nothing said about it
+        # at all. Attaching the note to the product would put the first copy's
+        # stains on the second one's listing.
+        #
+        # Which copy the shop hands back under a product code is its own
+        # choice and not always the cheapest - FIGURE-184067-R answers with a
+        # 38,680 copy while the cheapest is 34,380 - so the note is filed
+        # against the scode in the response rather than against a position.
         record(
             raw.get("scode") or raw.get("gcode") or "",
             raw.get("price") or raw.get("price1"),
             _clean_condition(raw.get("sname")),
+            condition_note(raw.get("remarks")),
         )
         for entry in embedded.get("other_items") or []:
             record(entry.get("scode") or "", entry.get("price"), entry.get("condition") or "")
 
         # Cheapest first, then best condition, which is the order someone
-        # actually shops in.
+        # actually shops in. Copies from other_items carry no note because the
+        # shop does not return one there - only silence, which is not the same
+        # as knowing there is nothing to say.
         return sorted(
             seen.values(),
             key=lambda v: (v["price"], grade_rank(v["item_grade"]), grade_rank(v["box_grade"])),
@@ -697,7 +711,11 @@ class AmiAmiProvider(ShopProvider):
             release_date_parsed=self._parse_release(raw.get("releasedate")),
             spec=raw.get("spec"),
             remarks=raw.get("remarks") or raw.get("memo"),
+            # The product-level note is the one on the copy the shop
+            # answered with, kept for the header and for search. Which copy
+            # that is lives in the variant it came from.
             condition_note=condition_note(raw.get("remarks")),
+            condition_note_code=raw.get("scode") or None,
             shop_notes=shop_notes(raw.get("remarks")),
             detail_loaded=True,
             raw=raw,

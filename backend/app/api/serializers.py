@@ -105,6 +105,7 @@ def item_from_normalized(
         spec=normalized.spec,
         remarks=normalized.remarks,
         condition_note=normalized.condition_note,
+        condition_note_code=normalized.condition_note_code,
         shop_notes=normalized.shop_notes,
         condition=normalized.condition,
         condition_grade=normalized.condition_grade,

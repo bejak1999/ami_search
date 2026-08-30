@@ -54,6 +54,12 @@ export interface ItemVariant {
   condition: string
   item_grade: Grade | null
   box_grade: Grade | null
+  /**
+   * What the shop says about this copy in particular. Absent for copies it
+   * has not been asked about directly — it returns no note for those, and
+   * that silence is not a statement that they are unblemished.
+   */
+  note?: string | null
 }
 
 export interface Item {
@@ -78,6 +84,7 @@ export interface Item {
   spec?: string | null
   remarks?: string | null
   condition_note?: string | null
+  condition_note_code?: string | null
   shop_notes?: { text: string; kind?: 'fault' | 'bonus' }[]
   condition: string
   condition_grade: string | null
@@ -392,6 +399,8 @@ export interface ListingRow {
   condition: string | null
   item_grade: string | null
   box_grade: string | null
+  /** What the shop said about this copy, if it was ever asked about it. */
+  condition_note: string | null
   status: ListingStatus
   outcome: 'sold' | 'delisted' | 'withdrawn' | 'unknown' | null
   first_seen_at: string

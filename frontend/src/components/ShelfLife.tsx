@@ -6,7 +6,7 @@ import { Icon } from '@/components/Icon'
 import { Card, Spinner, Tooltip } from '@/components/ui'
 import { money, shortDate } from '@/lib/format'
 import { shopUrl } from '@/lib/shop'
-import { ConditionNote } from '@/components/ConditionNote'
+import { ConditionNote, noteParts } from '@/components/ConditionNote'
 import clsx from 'clsx'
 
 /**
@@ -110,12 +110,9 @@ function Bar({ row, span }: { row: ListingRow; span: { start: number; end: numbe
 export function ShelfLifePanel({
   itemId,
   preowned,
-  shopNotes,
 }: {
   itemId: number
   preowned: boolean
-  /** What the shop says about these copies, if anything. */
-  shopNotes?: { text: string; kind?: 'fault' | 'bonus' }[]
 }) {
   const query = useQuery({
     queryKey: ['shelfLife', itemId],
@@ -202,18 +199,12 @@ export function ShelfLifePanel({
         </p>
       )}
 
-      {/* Beside the shelf-life figures rather than only at the top of the
-          page. A copy that sold in three days looks like a bargain everyone
-          wanted; it reads differently once you know it had stains on its
-          legs, and this is where someone is doing that reasoning. */}
-      <ConditionNote notes={shopNotes} className="mb-3" />
-
       {span && data.listings.length > 0 ? (
         <>
           <div className="space-y-1.5">
             {data.listings.map((row) => (
+              <div key={row.code}>
               <a
-                key={row.code}
                 href={shopUrl(row.code)}
                 target="_blank"
                 rel="noreferrer"
@@ -243,6 +234,13 @@ export function ShelfLifePanel({
                   {lifetimeLabel(row)}
                 </span>
               </a>
+              {/* Against the copy it describes. A copy that sold in three days
+                  looks like a bargain everyone wanted; it reads differently
+                  once you know that one had stains on its legs — and the copy
+                  beside it, at twice the price, had nothing wrong with it at
+                  all. */}
+              <ConditionNote compact className="ml-14 mt-0.5" notes={noteParts(row.condition_note)} />
+              </div>
             ))}
           </div>
           <div className="mt-2 grid grid-cols-[3.5rem_1fr_5.5rem] gap-2 border-t border-line pt-1.5 text-2xs text-faint sm:grid-cols-[3.5rem_6.5rem_4.5rem_1fr_5.5rem]">

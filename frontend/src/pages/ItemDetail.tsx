@@ -9,7 +9,7 @@ import { PriceChart } from '@/components/PriceChart'
 import { Lightbox } from '@/components/Lightbox'
 import { ShelfLifePanel } from '@/components/ShelfLife'
 import { shopUrl } from '@/lib/shop'
-import { ConditionNote } from '@/components/ConditionNote'
+import { ConditionNote, noteParts } from '@/components/ConditionNote'
 import { WatchEditor } from '@/components/WatchEditor'
 import { LandedTooltip } from '@/components/ItemCard'
 import { Badge, Card, SegmentedControl, Skeleton, Spinner, Tooltip } from '@/components/ui'
@@ -24,6 +24,19 @@ const RANGES = [
   { value: '1095', label: '3Y' },
   { value: '3650', label: 'All' },
 ]
+
+/**
+ * Describe one copy the way someone reading would: by its grade, not its
+ * code. "Condition note on the Figure C / Box B copy" says which of the
+ * listed copies is meant; "on FIGURE-045661-R514" makes them look it up.
+ */
+function gradeOf(item: { variants: { code: string; item_grade?: string | null; box_grade?: string | null }[] }, code: string): string | undefined {
+  const variant = item.variants.find((v) => v.code === code)
+  if (!variant?.item_grade) return undefined
+  return variant.box_grade
+    ? `Figure ${variant.item_grade} / Box ${variant.box_grade} copy`
+    : `Figure ${variant.item_grade} copy`
+}
 
 export function ItemDetailPage() {
   const { itemId } = useParams()
@@ -380,7 +393,18 @@ export function ItemDetailPage() {
             )}
           </Card>
 
-          <ConditionNote notes={item.shop_notes} />
+          {/* A product has no condition of its own. This is what the shop
+              said about one particular copy, so it says which — the note on
+              a C-grade copy has nothing to do with the A-grade one listed
+              beside it at twice the price. */}
+          <ConditionNote
+            notes={item.shop_notes}
+            about={
+              item.condition_note_code
+                ? gradeOf(item, item.condition_note_code)
+                : undefined
+            }
+          />
 
           {item.variants.length > 1 && (
             <Card className="p-4">
@@ -393,7 +417,10 @@ export function ItemDetailPage() {
               </h2>
               <p className="mb-3 text-xs leading-relaxed text-muted">
                 AmiAmi sells this product code as separate graded copies. The headline price is
-                the cheapest of them; a watch can be told which grade it will accept.
+                the cheapest of them; a watch can be told which grade it will accept. Notes
+                belong to one copy, and the shop only returns them for the copy it is asked
+                about — so a copy with nothing below it has not been asked, which is different
+                from being known to be unblemished.
               </p>
               <ul className="divide-y divide-line">
                 {item.variants.map((variant) => (
@@ -421,6 +448,16 @@ export function ItemDetailPage() {
                         <Icon name="external" className="h-3 w-3" />
                       </span>
                     </a>
+                    {/* Under the copy it belongs to. FIGURE-045661-R514 is a
+                        C-grade at 3,920 with discolouration; R515 is an
+                        A-grade at 9,780 with nothing said about it. Putting
+                        the first one's note on the product would attach its
+                        stains to the second one's listing. */}
+                    <ConditionNote
+                      compact
+                      className="mb-1.5 ml-2"
+                      notes={noteParts(variant.note)}
+                    />
                   </li>
                 ))}
               </ul>
@@ -496,11 +533,7 @@ export function ItemDetailPage() {
             )}
           </Card>
 
-          <ShelfLifePanel
-            itemId={id}
-            preowned={item.condition === 'preowned'}
-            shopNotes={item.shop_notes}
-          />
+          <ShelfLifePanel itemId={id} preowned={item.condition === 'preowned'} />
 
           <Card className="p-4">
             <div className="mb-3 flex items-center justify-between gap-3">

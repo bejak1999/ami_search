@@ -21,12 +21,32 @@ import clsx from 'clsx'
  */
 export type ShopNote = { text: string; kind?: 'fault' | 'bonus' }
 
+/**
+ * Turn one copy's joined note back into its statements.
+ *
+ * The per-copy note travels as text because that is how it is stored; the
+ * split and the fault/bonus reading are the same ones the server applies.
+ */
+export function noteParts(note?: string | null): ShopNote[] {
+  if (!note) return []
+  return note.split(' · ').map((text) => ({
+    text,
+    kind: /\b(?:is|are)\s+included\b|^\s*(?:includes|comes with|bonus)\b/i.test(text) &&
+      !/\bnot\b|\bmissing\b|\bwithout\b/i.test(text)
+      ? 'bonus'
+      : 'fault',
+  }))
+}
+
 export function ConditionNote({
   notes,
+  about,
   compact,
   className,
 }: {
   notes?: ShopNote[] | null
+  /** Which copy this is about, when it is not obvious from where it sits. */
+  about?: string | null
   compact?: boolean
   className?: string
 }) {
@@ -43,6 +63,7 @@ export function ConditionNote({
           icon="alertTriangle"
           label="Condition note"
           lines={faults.map((n) => n.text)}
+          about={about}
           compact={compact}
         />
       )}
@@ -52,6 +73,7 @@ export function ConditionNote({
           icon="plus"
           label="Comes with"
           lines={bonuses.map((n) => n.text)}
+          about={about}
           compact={compact}
         />
       )}
@@ -64,12 +86,14 @@ function Note({
   icon,
   label,
   lines,
+  about,
   compact,
 }: {
   tone: 'fault' | 'bonus'
   icon: 'alertTriangle' | 'plus'
   label: string
   lines: string[]
+  about?: string | null
   compact?: boolean
 }) {
   return (
@@ -87,7 +111,12 @@ function Note({
         className={clsx('mt-0.5 shrink-0', compact ? 'h-3 w-3' : 'h-3.5 w-3.5')}
       />
       <span>
-        {!compact && <span className="font-medium">{label}: </span>}
+        {!compact && (
+          <span className="font-medium">
+            {label}
+            {about ? ` on the ${about}` : ''}:{' '}
+          </span>
+        )}
         {lines.join(' · ')}
       </span>
     </p>

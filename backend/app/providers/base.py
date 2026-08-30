@@ -59,6 +59,9 @@ class NormalizedItem:
     condition_note: str | None = None
     #: The same statements, each tagged fault or bonus, for display.
     shop_notes: list[dict] = field(default_factory=list)
+    #: The copy the note above belongs to. A product has no condition of its
+    #: own; each second-hand copy has its own, and its own faults.
+    condition_note_code: str | None = None
     detail_loaded: bool = False
     raw: dict[str, Any] = field(default_factory=dict)
 

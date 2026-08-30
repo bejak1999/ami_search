@@ -211,6 +211,11 @@ class ItemVariant(BaseModel):
     condition: str = ""
     item_grade: str | None = None
     box_grade: str | None = None
+    #: What the shop says about this copy in particular. Absent for copies
+    #: the shop has not been asked about directly - it returns no remarks
+    #: field for them, and that silence is not a statement that they are
+    #: unblemished.
+    note: str | None = None
 
 
 class ItemBase(BaseModel):
@@ -248,8 +253,10 @@ class ItemOut(ItemBase):
     jan_code: str | None = None
     spec: str | None = None
     remarks: str | None = None
-    #: What the shop says about this copy beyond its grade, in its own words.
+    #: What the shop says about the copy it answered with, in its own words.
     condition_note: str | None = None
+    #: Which copy that was. A product has no condition of its own.
+    condition_note_code: str | None = None
     #: The same, split into statements and tagged fault or bonus.
     shop_notes: list[ShopNote] = []
     lowest_price: float | None = None

@@ -383,6 +383,7 @@ def reconcile(
                 condition=variant.get("condition"),
                 item_grade=variant.get("item_grade"),
                 box_grade=variant.get("box_grade"),
+                condition_note=variant.get("note"),
                 appeared_after=item.prev_detail_fetch_at,
                 first_seen_at=observed_at,
                 last_seen_at=observed_at,
@@ -422,6 +423,12 @@ def reconcile(
             listing.item_grade = variant.get("item_grade")
             listing.box_grade = variant.get("box_grade")
             listing.condition = variant.get("condition")
+        # Only copies the shop actually answered about carry one; the rest
+        # come back from other_items with no remarks field at all, and silence
+        # there is not the same as knowing there is nothing to say. So a note
+        # is written when there is one and never cleared by its absence.
+        if variant.get("note"):
+            listing.condition_note = variant["note"]
         if price is not None and price != listing.last_price:
             listing.last_price = price
             db.add(
@@ -656,6 +663,7 @@ def summary(db: Session, item: Item, now: datetime | None = None) -> dict:
                 "last_price": listing.last_price,
                 "currency": listing.currency,
                 "condition": listing.condition,
+                "condition_note": listing.condition_note,
                 "item_grade": listing.item_grade,
                 "box_grade": listing.box_grade,
                 "status": listing.status.value,
