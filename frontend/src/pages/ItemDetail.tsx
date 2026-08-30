@@ -380,7 +380,7 @@ export function ItemDetailPage() {
             )}
           </Card>
 
-          <ConditionNote note={item.condition_note} />
+          <ConditionNote notes={item.shop_notes} />
 
           {item.variants.length > 1 && (
             <Card className="p-4">
@@ -499,7 +499,7 @@ export function ItemDetailPage() {
           <ShelfLifePanel
             itemId={id}
             preowned={item.condition === 'preowned'}
-            conditionNote={item.condition_note}
+            shopNotes={item.shop_notes}
           />
 
           <Card className="p-4">

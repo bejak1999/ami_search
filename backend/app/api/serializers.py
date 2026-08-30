@@ -105,6 +105,7 @@ def item_from_normalized(
         spec=normalized.spec,
         remarks=normalized.remarks,
         condition_note=normalized.condition_note,
+        shop_notes=normalized.shop_notes,
         condition=normalized.condition,
         condition_grade=normalized.condition_grade,
         in_stock=normalized.in_stock,
@@ -127,6 +128,24 @@ def item_from_normalized(
 # One definition, in the service layer, because the wishlist and the item
 # serializer both depend on the two codes meaning the same figure.
 from ..services.catalog import counterpart_code  # noqa: E402
+
+
+def _shop_notes_of(item) -> list[dict]:
+    """Split a stored note back into its tagged statements.
+
+    The joined text is what is stored; the parts are what the interface
+    needs. Splitting here rather than storing both keeps one rule for what
+    counts as a bonus, so the two cannot drift apart.
+    """
+    from ..providers.amiami import is_bonus_note
+
+    note = item.condition_note
+    if not note:
+        return []
+    return [
+        {"text": part, "kind": "bonus" if is_bonus_note(part) else "fault"}
+        for part in note.split(" · ")
+    ]
 
 
 def item_out(
@@ -175,7 +194,10 @@ def item_out(
         jan_code=item.jan_code,
         spec=item.spec,
         remarks=item.remarks,
+        # Re-derived rather than stored twice: the split is cheap and one
+        # copy of the rule cannot drift from the other.
         condition_note=item.condition_note,
+        shop_notes=_shop_notes_of(item),
         condition=item.condition.value,
         condition_grade=item.condition_grade,
         in_stock=item.in_stock,

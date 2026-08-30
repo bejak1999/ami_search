@@ -78,6 +78,7 @@ export interface Item {
   spec?: string | null
   remarks?: string | null
   condition_note?: string | null
+  shop_notes?: { text: string; kind?: 'fault' | 'bonus' }[]
   condition: string
   condition_grade: string | null
   in_stock: boolean

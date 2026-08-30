@@ -53,9 +53,12 @@ class NormalizedItem:
     release_date_parsed: datetime | None = None
     spec: str | None = None
     remarks: str | None = None
-    #: The red warning saying why a used copy is marked down, if any. Kept
-    #: apart from remarks because AmiAmi puts shipping notices there too.
+    #: What the shop says about this copy beyond its grade - a fault that
+    #: explains the price, or a bonus in the box. Kept apart from remarks
+    #: because AmiAmi puts shipping boilerplate there too.
     condition_note: str | None = None
+    #: The same statements, each tagged fault or bonus, for display.
+    shop_notes: list[dict] = field(default_factory=list)
     detail_loaded: bool = False
     raw: dict[str, Any] = field(default_factory=dict)
 

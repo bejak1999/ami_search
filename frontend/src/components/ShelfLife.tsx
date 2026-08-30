@@ -110,12 +110,12 @@ function Bar({ row, span }: { row: ListingRow; span: { start: number; end: numbe
 export function ShelfLifePanel({
   itemId,
   preowned,
-  conditionNote,
+  shopNotes,
 }: {
   itemId: number
   preowned: boolean
-  /** Why this product is marked down, if the shop said. */
-  conditionNote?: string | null
+  /** What the shop says about these copies, if anything. */
+  shopNotes?: { text: string; kind?: 'fault' | 'bonus' }[]
 }) {
   const query = useQuery({
     queryKey: ['shelfLife', itemId],
@@ -206,7 +206,7 @@ export function ShelfLifePanel({
           page. A copy that sold in three days looks like a bargain everyone
           wanted; it reads differently once you know it had stains on its
           legs, and this is where someone is doing that reasoning. */}
-      <ConditionNote note={conditionNote} className="mb-3" />
+      <ConditionNote notes={shopNotes} className="mb-3" />
 
       {span && data.listings.length > 0 ? (
         <>

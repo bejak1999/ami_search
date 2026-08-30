@@ -101,40 +101,66 @@ _LOGISTICS = re.compile(
     re.IGNORECASE,
 )
 
-#: Statements about what is in the box on top of the figure. Good news, and
-#: the whole point of this note is to explain a price that looks too good -
-#: so "Poster is included." under a warning triangle is actively misleading.
-#: Only when that is all the statement says: "Postcard is included" beside
-#: "Right rabbit ear is detached" leaves the detached ear behind.
+#: A statement about what else is in the box. Kept, not dropped - it is the
+#: same kind of thing as a defect note, something the shop says about this
+#: particular copy that you would otherwise only find by opening its page -
+#: but it is good news rather than bad, so the interface can say which it is.
 _BONUS = re.compile(r"^[^.]{0,60}\bis included\b\.?$", re.IGNORECASE)
 
 
+def is_bonus_note(statement: str) -> bool:
+    """Is this line about something extra in the box rather than a fault?"""
+    return bool(_BONUS.match(statement.strip()))
+
+
+def shop_notes(remarks: str | None) -> list[dict]:
+    """The red statements, each tagged as a fault or a bonus.
+
+    Same rule as :func:`condition_note`, which returns the joined text; this
+    returns the parts so the interface can show a missing pencil board and an
+    included poster differently instead of putting both under one heading.
+    """
+    note = condition_note(remarks)
+    if not note:
+        return []
+    return [
+        {"text": part, "kind": "bonus" if is_bonus_note(part) else "fault"}
+        for part in note.split(" \u00b7 ")
+    ]
+
+
 def condition_note(remarks: str | None) -> str | None:
-    """The red warning explaining why a used copy is marked down.
+    """What the shop says about this copy, beyond its grade.
 
-    AmiAmi puts these in ``remarks``, wrapped in a red font tag, and puts
-    shipping warnings and bonus-item notices in exactly the same place - so
-    the three have to be told apart by what they say. Sampled across the
-    catalogue, a hundred-odd listings yielded nineteen red passages:
+    AmiAmi prints these in red on the product page and they are the only place
+    some of it appears - a fault that explains an otherwise startling price, or
+    a bonus that comes with the copy:
 
-        The pencil board is missing.                    a defect - kept
-        White area on the skirt has become yellowish    a defect - kept
-        Outfit is sticky and has droplets due to age    a defect - kept
-        *Shipping costs for this item may be very high  the parcel - dropped
-        Poster is included.                             a bonus - dropped
+        The pencil board is missing.                    a fault
+        White area on the skirt has become yellowish    a fault
+        Outfit is sticky and has droplets due to age    a fault
+        Poster is included.                             a bonus
         Postcard is included
-        Right rabbit ear is detached                    one of each - the ear
+        Right rabbit ear is detached                    one of each
 
-    Judged statement by statement rather than block by block, because those
-    last two arrive together and a block-level verdict would either show the
-    postcard as a defect or lose the detached ear.
+    Both kinds are kept. The point is not only to explain a low price; it is
+    that this is information which otherwise lives on AmiAmi's page and
+    nowhere else.
 
-    Anything red that is none of the three is kept. A condition note that goes
-    unshown is the failure that matters here - it is the difference between a
-    bargain and a figure with stains on its legs - while a stray notice shown
-    by mistake is only noise. An earlier version of this looked for a
-    bracketed category like "[Discoloration]"; of nineteen real passages, none
-    had one.
+    Shipping notices are dropped, and they are the reason any filtering
+    happens at all:
+
+        *Shipping costs for this item may be very high due to package size
+
+    Eleven of the nineteen red passages sampled were that one sentence, which
+    every oversized item carries. Repeating it on all of them buries the
+    handful of notes that say something particular about a copy.
+
+    Judged statement by statement rather than block by block, because a block
+    can hold one of each - "Postcard is included" arrives above both a
+    detached rabbit ear and a shipping warning - and a verdict on the block
+    would take the wrong ones with it. They are separated by a newline;
+    fifteen raw captures confirm that and none used a <br>.
     """
     if not remarks:
         return None
@@ -142,7 +168,7 @@ def condition_note(remarks: str | None) -> str | None:
     for block in _RED_TEXT.findall(remarks):
         for statement in _STATEMENT_BREAK.split(block):
             text = " ".join(_HTML_TAG.sub("", statement).split())
-            if not text or _LOGISTICS.search(text) or _BONUS.match(text):
+            if not text or _LOGISTICS.search(text):
                 continue
             kept.append(text)
     return " · ".join(kept) or None
@@ -633,6 +659,7 @@ class AmiAmiProvider(ShopProvider):
             spec=raw.get("spec"),
             remarks=raw.get("remarks") or raw.get("memo"),
             condition_note=condition_note(raw.get("remarks")),
+            shop_notes=shop_notes(raw.get("remarks")),
             detail_loaded=True,
             raw=raw,
         )

@@ -3865,7 +3865,7 @@ def test_condition_notes_are_told_from_shipping_notices() -> None:
     import json
     import pathlib as _pathlib
 
-    from app.providers.amiami import condition_note
+    from app.providers.amiami import condition_note, shop_notes
 
     def red(text: str) -> str:
         return f"<font color=red><b>{text}</b></font>"
@@ -3892,22 +3892,48 @@ def test_condition_notes_are_told_from_shipping_notices() -> None:
         got = condition_note(red(text))
         check(f"kept: {text.splitlines()[0][:44]}", got == expected, got)
 
-    dropped = {
-        "*Shipping costs for this item may be very high due to package size "
-        "or/and weight.": "the parcel, not the figure",
-        "Poster is included.": "a bonus, and good news at that",
-        "Postcard is included\n*Shipping costs for this item may be very high "
-        "due to package size or/and weight.": "a bonus and the parcel together",
-    }
-    for text, why in dropped.items():
-        check(f"dropped ({why})", condition_note(red(text)) is None, condition_note(red(text)))
+    # A bonus is kept too. It is the same kind of thing as a fault - something
+    # the shop says about this copy that exists on its page and nowhere else -
+    # and only the reading differs, which is what the tag is for.
+    check(
+        "a bonus is kept",
+        condition_note(red("Poster is included.")) == "Poster is included.",
+    )
+    check(
+        "and marked as one rather than as a fault",
+        shop_notes(red("Poster is included.")) == [
+            {"text": "Poster is included.", "kind": "bonus"}
+        ],
+        shop_notes(red("Poster is included.")),
+    )
+    check(
+        "while a fault is marked as a fault",
+        shop_notes(red("The decal is missing."))[0]["kind"] == "fault",
+    )
 
-    # The one that decides the design. These arrive as one red block, and a
-    # verdict on the block either shows the postcard as a defect or loses the
-    # detached ear - so statements are judged one at a time.
-    mixed = condition_note(red("Postcard is included\nRight rabbit ear is detached"))
-    check("a bonus beside a defect keeps only the defect",
-          mixed == "Right rabbit ear is detached", mixed)
+    # Only the shipping sentence goes, and it is the reason any filtering
+    # happens: eleven of nineteen sampled red passages were this one line,
+    # which every oversized item carries.
+    shipping = (
+        "*Shipping costs for this item may be very high due to package size or/and weight."
+    )
+    check("a shipping notice is dropped", condition_note(red(shipping)) is None)
+
+    # The case that decides the design. These arrive in one red block, so a
+    # verdict on the block would either drop the postcard with the shipping
+    # line or keep the shipping line with the postcard.
+    mixed = condition_note(red(f"Postcard is included\n{shipping}"))
+    check("a bonus survives a shipping line beside it", mixed == "Postcard is included", mixed)
+
+    both = shop_notes(red("Postcard is included\nRight rabbit ear is detached"))
+    check(
+        "a bonus and a fault together are kept apart",
+        [n["kind"] for n in both] == ["bonus", "fault"],
+        both,
+    )
+    check("with both texts intact", [n["text"] for n in both] == [
+        "Postcard is included", "Right rabbit ear is detached"
+    ], both)
 
     check("the markup does not survive", "<" not in (kept and mixed or ""), mixed)
     check("nothing at all stays nothing", condition_note(None) is None)
@@ -3940,6 +3966,12 @@ def test_condition_notes_are_told_from_shipping_notices() -> None:
             f"no shipping notice leaks through {len(rows)} real captures",
             not leaked,
             leaked[:3],
+        )
+        tagged = [n for r in rows for n in shop_notes(r["remarks"])]
+        check(
+            "and every real statement is tagged one way or the other",
+            all(n["kind"] in ("fault", "bonus") for n in tagged),
+            {n["kind"] for n in tagged},
         )
         check(
             "and the markup never does either",

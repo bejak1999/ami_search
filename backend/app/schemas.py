@@ -190,6 +190,19 @@ class CostBreakdownOut(BaseModel):
 # ---------------------------------------------------------------------------
 
 
+class ShopNote(BaseModel):
+    """One thing the shop says about a copy, beyond its condition grade.
+
+    A fault explains a price that looks too good; a bonus is something extra
+    in the box. Both only appear on AmiAmi's own page, which is why they are
+    worth carrying, and they read completely differently - so they are tagged
+    rather than run together.
+    """
+
+    text: str
+    kind: Literal["fault", "bonus"] = "fault"
+
+
 class ItemVariant(BaseModel):
     """One graded sub-listing under a product code."""
 
@@ -235,8 +248,10 @@ class ItemOut(ItemBase):
     jan_code: str | None = None
     spec: str | None = None
     remarks: str | None = None
-    #: Why a used copy is marked down, in AmiAmi's own words.
+    #: What the shop says about this copy beyond its grade, in its own words.
     condition_note: str | None = None
+    #: The same, split into statements and tagged fault or bonus.
+    shop_notes: list[ShopNote] = []
     lowest_price: float | None = None
     highest_price: float | None = None
     average_price: float | None = None
