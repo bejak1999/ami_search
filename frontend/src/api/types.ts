@@ -401,6 +401,8 @@ export interface ListingRow {
   box_grade: string | null
   /** What the shop said about this copy, if it was ever asked about it. */
   condition_note: string | null
+  /** This copy's asking price over time; one entry per actual change. */
+  price_trail?: { at: string; price: number; in_stock?: boolean }[]
   status: ListingStatus
   outcome: 'sold' | 'delisted' | 'withdrawn' | 'unknown' | null
   first_seen_at: string

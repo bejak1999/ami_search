@@ -4198,6 +4198,88 @@ def test_a_note_belongs_to_one_copy() -> None:
     db.close()
 
 
+def test_each_copy_carries_its_own_price_trail() -> None:
+    print("\n== A copy's price over time, for the copy and no other ==")
+    from app.db import SessionLocal, init_db
+    from app.models import Condition, Item, Listing, ListingStatus, PricePoint
+    from app.services import shelflife
+
+    init_db()
+    db = SessionLocal()
+    db.query(PricePoint).delete()
+    db.query(Listing).delete()
+    db.query(Item).delete()
+    db.commit()
+
+    now = datetime.now(timezone.utc)
+    item = Item(provider="amiami", code="T-1", name="Trail",
+                condition=Condition.preowned, currency="JPY")
+    db.add(item)
+    db.flush()
+
+    # AmiAmi marks a used copy down while it sits, a couple of hundred yen at
+    # a time. This one has come down twice.
+    moved = Listing(item_id=item.id, code="T-1-R161", currency="JPY",
+                    status=ListingStatus.live, price=9980, last_price=9580,
+                    first_seen_at=now - timedelta(days=20), last_seen_at=now)
+    # And this one has not moved at all, which is the common case.
+    still = Listing(item_id=item.id, code="T-1-R162", currency="JPY",
+                    status=ListingStatus.live, price=7480, last_price=7480,
+                    first_seen_at=now - timedelta(days=6), last_seen_at=now)
+    db.add_all([moved, still])
+    db.flush()
+    for days, price in ((12, 9780), (4, 9580)):
+        db.add(PricePoint(item=item, listing=moved, recorded_at=now - timedelta(days=days),
+                          price=price, currency="JPY", in_stock=True))
+    # A product-level point, which belongs to the product's own history and
+    # must not turn up in any copy's trail.
+    db.add(PricePoint(item=item, recorded_at=now - timedelta(days=15), price=7480,
+                      currency="JPY", in_stock=True))
+    db.commit()
+
+    rows = {row["code"]: row for row in shelflife.summary(db, item)["listings"]}
+
+    trail = rows["T-1-R161"]["price_trail"]
+    check("the repriced copy has a trail", len(trail) == 3, len(trail))
+    check(
+        "opening at what it was listed for",
+        trail[0]["price"] == 9980,
+        trail[0]["price"],
+    )
+    check(
+        "then each change in order",
+        [p["price"] for p in trail] == [9980, 9780, 9580],
+        [p["price"] for p in trail],
+    )
+    check("oldest first", trail[0]["at"] < trail[-1]["at"])
+
+    # A point is only written when the figure moved, so the opening price is
+    # not among them. Without putting it back a copy marked down once would
+    # look as though it had only ever had the lower price.
+    check(
+        "the opening price is not lost",
+        trail[0]["price"] != rows["T-1-R161"]["last_price"],
+    )
+
+    quiet = rows["T-1-R162"]["price_trail"]
+    check("a copy that never moved has one entry", len(quiet) == 1, quiet)
+    check("and that is its price", quiet[0]["price"] == 7480)
+
+    # The product-level point sits at 7,480 too; if trails were keyed loosely
+    # it would appear in the untouched copy's trail and invent a change.
+    check(
+        "a product-level point is not in any copy's trail",
+        all(len(r["price_trail"]) <= 3 for r in rows.values()),
+        {c: len(r["price_trail"]) for c, r in rows.items()},
+    )
+
+    db.query(PricePoint).delete()
+    db.query(Listing).delete()
+    db.query(Item).delete()
+    db.commit()
+    db.close()
+
+
 def main() -> int:
     test_url_parsing()
     test_release_dates()
@@ -4270,6 +4352,7 @@ def main() -> int:
     test_condition_notes_are_told_from_shipping_notices()
     test_shop_notes_hold_up_on_wording_never_seen()
     test_a_note_belongs_to_one_copy()
+    test_each_copy_carries_its_own_price_trail()
     test_newly_listed_used_is_not_newly_known()
     test_settings()
 

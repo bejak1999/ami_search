@@ -652,9 +652,43 @@ def summary(db: Session, item: Item, now: datetime | None = None) -> dict:
         reverse=True,
     )
 
+    # One query for every copy rather than one per row. A price point with a
+    # listing attached is that copy being repriced - AmiAmi marks a used copy
+    # down while it sits, sometimes by a couple of hundred yen at a time - and
+    # those are written only when the figure actually moved, so there are a
+    # handful per copy at most.
+    trails: dict[int, list[dict]] = {}
+    if listings:
+        points = db.execute(
+            select(PricePoint)
+            .where(PricePoint.listing_id.in_([row.id for row in listings]))
+            .order_by(PricePoint.recorded_at)
+        ).scalars()
+        for point in points:
+            if point.price is None:
+                continue
+            trails.setdefault(point.listing_id, []).append(
+                {
+                    "at": point.recorded_at,
+                    "price": point.price,
+                    "in_stock": point.in_stock,
+                }
+            )
+
     rows = []
     for listing in listings:
         life = lifetime_of(listing, now)
+        # The copy's own asking price over time, first seen first. The opening
+        # price is not always among the points - one is only written when
+        # something changed - so it is put at the front when it is missing,
+        # otherwise a copy that was marked down once appears to have had only
+        # the lower price all along.
+        trail = trails.get(listing.id, [])
+        opening = listing.price
+        if opening is not None and (not trail or trail[0]["price"] != opening):
+            trail = [
+                {"at": listing.first_seen_at, "price": opening, "in_stock": True}
+            ] + trail
         rows.append(
             {
                 "code": listing.code,
@@ -672,6 +706,7 @@ def summary(db: Session, item: Item, now: datetime | None = None) -> dict:
                 "last_seen_at": listing.last_seen_at,
                 "vanished_before": listing.vanished_before,
                 "lifetime": life.as_dict(),
+                "price_trail": trail,
             }
         )
 

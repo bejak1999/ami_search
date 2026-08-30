@@ -7,6 +7,7 @@ import { Card, Spinner, Tooltip } from '@/components/ui'
 import { money, shortDate } from '@/lib/format'
 import { shopUrl } from '@/lib/shop'
 import { ConditionNote, noteParts } from '@/components/ConditionNote'
+import { PriceTrail } from '@/components/PriceTrail'
 import clsx from 'clsx'
 
 /**
@@ -222,7 +223,9 @@ export function ShelfLifePanel({
                   {row.item_grade ? `Item ${row.item_grade} / Box ${row.box_grade ?? '?'}` : '—'}
                 </span>
                 <span className="hidden text-right font-mono text-2xs tabular-nums text-muted sm:block">
-                  {money(row.last_price ?? row.price, row.currency)}
+                  <PriceTrail trail={row.price_trail} currency={row.currency}>
+                    {money(row.last_price ?? row.price, row.currency)}
+                  </PriceTrail>
                 </span>
                 <Bar row={row} span={span} />
                 <span

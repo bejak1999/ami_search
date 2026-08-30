@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { useNavigate, useParams } from 'react-router-dom'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { api } from '@/api/client'
@@ -10,6 +10,7 @@ import { Lightbox } from '@/components/Lightbox'
 import { ShelfLifePanel } from '@/components/ShelfLife'
 import { shopUrl } from '@/lib/shop'
 import { ConditionNote, noteParts } from '@/components/ConditionNote'
+import { PriceTrail } from '@/components/PriceTrail'
 import { WatchEditor } from '@/components/WatchEditor'
 import { LandedTooltip } from '@/components/ItemCard'
 import { Badge, Card, SegmentedControl, Skeleton, Spinner, Tooltip } from '@/components/ui'
@@ -70,6 +71,13 @@ export function ItemDetailPage() {
   })
   const sales = (shelf.data?.listings ?? []).filter(
     (row) => row.vanished_before && row.outcome === 'sold',
+  )
+  // Buying choices and the shelf-life table describe the same copies, so the
+  // price history for a row is looked up by its code rather than fetched a
+  // second time.
+  const trailFor = useMemo(
+    () => new Map((shelf.data?.listings ?? []).map((row) => [row.code, row.price_trail])),
+    [shelf.data],
   )
 
   const tags = useQuery({
@@ -434,7 +442,17 @@ export function ItemDetailPage() {
                       className="-mx-2 flex flex-wrap items-center gap-x-3 gap-y-1 rounded-control px-2 py-2 text-sm hover:bg-raised focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent"
                     >
                       <span className="font-semibold tabular-nums">
-                        {money(variant.price, item.currency)}
+                        {/* The same per-copy history the shelf-life table
+                            shows, at the point where the price is being read.
+                            A copy that has come down twice in a fortnight is a
+                            different proposition from one that has not moved
+                            since it was listed. */}
+                        <PriceTrail
+                          trail={trailFor.get(variant.code)}
+                          currency={item.currency}
+                        >
+                          {money(variant.price, item.currency)}
+                        </PriceTrail>
                       </span>
                       {variant.item_grade && (
                         <Badge tone={variant.item_grade === 'S' || variant.item_grade === 'A' ? 'positive' : 'neutral'}>
