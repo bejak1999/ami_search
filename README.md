@@ -240,7 +240,7 @@ Everything is optional; the defaults are sensible.
 | `VAPID_SUBJECT` | `mailto:admin@example.com` | Contact address sent with push messages |
 | `SMTP_HOST` / `SMTP_PORT` / `SMTP_USER` / `SMTP_PASSWORD` / `SMTP_FROM` | — | Required for e-mail |
 | `IMAGE_CACHE_ENABLED` | `true` | Keep product photos on disk so they outlive the listing |
-| `IMAGE_CACHE_MAX_GB` | `12` | Soft budget. Least recently shown photos are dropped past this |
+| `IMAGE_CACHE_MAX_GB` | `25` | Soft budget. Least recently shown photos are dropped past this. Pre-owned photos are never dropped, so the cache may sit over budget rather than lose them |
 | `IMAGE_CACHE_FULL_IMAGES` | `true` | Cache the large detail photo too, not just the thumbnail |
 | `PRICE_HISTORY_RETENTION_DAYS` | `1095` | Three years of history |
 | `ALERT_RETENTION_DAYS` | `365` | Alerts older than this are pruned nightly |

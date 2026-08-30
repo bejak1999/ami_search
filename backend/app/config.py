@@ -127,8 +127,15 @@ class Settings(BaseSettings):
     with it, so without a local copy the record of a figure that sold shows a
     broken frame at exactly the point the history becomes interesting.
     """
-    image_cache_max_gb: float = 12.0
-    """Soft budget. The least recently shown images are dropped past this."""
+    image_cache_max_gb: float = 25.0
+    """Soft budget. The least recently shown images are dropped past this.
+
+    Only the replaceable ones, though: pre-owned photographs are kept even
+    when that leaves the cache over budget, because nothing can fetch them
+    back. So this is really a budget for product shots, and it needs enough
+    headroom that eviction has something to work with once the used copies
+    have taken their share.
+    """
     image_cache_full_images: bool = True
     """Cache the large detail photo as well as the grid thumbnail. Thumbnails
     are about 4 KB each; full images are around 80 KB."""
