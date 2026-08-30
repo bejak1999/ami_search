@@ -4031,6 +4031,61 @@ def test_grades_match_exactly_unless_widened() -> None:
     db.close()
 
 
+def test_shop_notes_hold_up_on_wording_never_seen() -> None:
+    print("\n== Wordings the sampler never turned up ==")
+    from app.providers.amiami import shop_notes
+
+    def red(text: str) -> str:
+        return f"<font color=red><b>{text}</b></font>"
+
+    def kind(text: str) -> str:
+        notes = shop_notes(red(text))
+        return notes[0]["kind"] if notes else "dropped"
+
+    # None of these appeared in the sample. The first version of the rules got
+    # six of the fifteen wrong: it knew only "X is included" as a bonus and a
+    # fixed list of shipping phrases, so a bonus worded any other way went
+    # under a warning triangle and a new shipping sentence went with it.
+    cases = [
+        # A bonus, said half a dozen ways.
+        ("Includes a bonus postcard.", "bonus"),
+        ("Comes with a tapestry.", "bonus"),
+        ("Bonus item included", "bonus"),
+        ("A postcard is included with this item.", "bonus"),
+        ("Tapestry is included", "bonus"),
+        # Negations are the opposite of a bonus: a part that should be there
+        # and is not. Reading "is not included" as a bonus would be the worst
+        # of the failures - a missing piece announced as an extra.
+        ("The stand is not included.", "fault"),
+        ("Bonus poster is not included.", "fault"),
+        ("The base is missing.", "fault"),
+        # Faults in wording nothing has taught it.
+        ("Left hand is broken", "fault"),
+        ("Slight paint chipping on the base", "fault"),
+        ("Hair parts have warped slightly", "fault"),
+        # Shop-wide notices. AmiAmi marks these with an asterisk - across the
+        # sampled listings every asterisked line was one and no line about a
+        # copy carried one - so the mark generalises past any phrase list.
+        ("*This item cannot be shipped by air.", "dropped"),
+        ("*Please note delivery may take longer.", "dropped"),
+        ("*Shipping costs for this item may be very high.", "dropped"),
+        ("\u203bThis item ships separately.", "dropped"),
+        # And the safety net: a fault does not stop being one because the shop
+        # happened to mark it. Losing a fault is the expensive mistake.
+        ("*The box has a large dent on one corner.", "fault"),
+        ("*Please note the figure has a scratch on its base.", "fault"),
+    ]
+
+    wrong = [(text, want, kind(text)) for text, want in cases if kind(text) != want]
+    for text, want, got in wrong:
+        check(f"{want} -> {got}: {text[:44]}", False, got)
+    check(
+        f"all {len(cases)} unseen wordings are read correctly",
+        not wrong,
+        f"{len(wrong)} wrong",
+    )
+
+
 def main() -> int:
     test_url_parsing()
     test_release_dates()
@@ -4101,6 +4156,7 @@ def main() -> int:
     test_condition_filter_asks_about_copies()
     test_grades_match_exactly_unless_widened()
     test_condition_notes_are_told_from_shipping_notices()
+    test_shop_notes_hold_up_on_wording_never_seen()
     test_newly_listed_used_is_not_newly_known()
     test_settings()
 

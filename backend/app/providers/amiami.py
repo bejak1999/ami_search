@@ -91,26 +91,65 @@ _HTML_TAG = re.compile(r"<[^>]+>")
 #: the fate of the others.
 _STATEMENT_BREAK = re.compile(r"(?:<br\s*/?>|[\r\n]|(?<=[.!?])\s+(?=\*))", re.IGNORECASE)
 
-#: Statements about the parcel rather than the figure. AmiAmi uses one field
-#: for both, and a shipping warning presented as a reason a copy is cheap is
-#: worse than saying nothing: it reads as a defect that is not there.
+#: Words that mean a statement is about the parcel, not the copy in it.
 _LOGISTICS = re.compile(
-    r"shipping cost|package size|delivered alone|cannot be combined|"
-    r"combined with other items|separate shipment|single shipment|"
-    r"postage|freight|oversized",
+    r"shipping|shipped|shipment|package size|packaging size|delivered alone|"
+    r"cannot be combined|combined with other items|delivery|dispatch|courier|"
+    r"postage|freight|oversized|by air|air mail|sea mail",
     re.IGNORECASE,
 )
 
-#: A statement about what else is in the box. Kept, not dropped - it is the
-#: same kind of thing as a defect note, something the shop says about this
-#: particular copy that you would otherwise only find by opening its page -
-#: but it is good news rather than bad, so the interface can say which it is.
-_BONUS = re.compile(r"^[^.]{0,60}\bis included\b\.?$", re.IGNORECASE)
+#: AmiAmi marks shop-wide notices with a leading asterisk. Across fifteen
+#: sampled listings every asterisked statement was shipping boilerplate and no
+#: statement about a copy carried one, which generalises further than a list
+#: of phrases: the shop can word a new notice however it likes and still mark
+#: it the same way.
+_SHOP_WIDE = re.compile(r"^\s*[*\u203b\u203b]")
+
+#: Words that mean a statement is about this copy's condition after all. The
+#: safety net on the two rules above: dropping a real fault is the failure
+#: that matters, and a notice shown by mistake is only noise, so anything that
+#: describes damage is kept whatever else it looks like.
+_DAMAGE = re.compile(
+    r"scratch|stain|discolo|yellow|sticky|broken|bent|crack|chip|peel|fade|"
+    r"missing|detach|damage|dent|repair|loose|warp|mould|mold|rust|dirty|"
+    r"deform|torn|tear|glue|paint transfer|droplet",
+    re.IGNORECASE,
+)
+
+#: Something extra in the box. Written loosely on purpose: the shop says this
+#: half a dozen ways, and mislabelling a bonus as a fault puts good news under
+#: a warning triangle. Negations are excluded - "the stand is not included" is
+#: a missing part, which is the opposite.
+_BONUS = re.compile(
+    r"^\s*(?:includes\b|comes with\b|bonus\b)|(?:is|are)\s+included\b",
+    re.IGNORECASE,
+)
+_NOT_BONUS = re.compile(r"\bnot\b|\bno longer\b|\bwithout\b|\bmissing\b", re.IGNORECASE)
+
+
+def is_shop_boilerplate(statement: str) -> bool:
+    """Is this the shop talking about postage rather than about this copy?
+
+    Eleven of nineteen sampled red passages were the one sentence every
+    oversized item carries, so leaving them in buries the notes that say
+    something particular. A statement is dropped when it is marked as a
+    shop-wide notice or reads like one - unless it also describes damage, in
+    which case it is kept regardless. Losing a fault is the expensive mistake;
+    showing a notice is a cheap one.
+    """
+    text = statement.strip()
+    if _DAMAGE.search(text):
+        return False
+    return bool(_SHOP_WIDE.match(text) or _LOGISTICS.search(text))
 
 
 def is_bonus_note(statement: str) -> bool:
     """Is this line about something extra in the box rather than a fault?"""
-    return bool(_BONUS.match(statement.strip()))
+    text = statement.strip()
+    if _NOT_BONUS.search(text) or _DAMAGE.search(text):
+        return False
+    return bool(_BONUS.search(text))
 
 
 def shop_notes(remarks: str | None) -> list[dict]:
@@ -168,7 +207,7 @@ def condition_note(remarks: str | None) -> str | None:
     for block in _RED_TEXT.findall(remarks):
         for statement in _STATEMENT_BREAK.split(block):
             text = " ".join(_HTML_TAG.sub("", statement).split())
-            if not text or _LOGISTICS.search(text):
+            if not text or is_shop_boilerplate(text):
                 continue
             kept.append(text)
     return " · ".join(kept) or None
