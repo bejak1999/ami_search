@@ -35,6 +35,13 @@ log = logging.getLogger(__name__)
 #: actually hunt, so it fills in before the much larger long tail.
 #: How each slice's membership is expressed as a local query, so coverage can
 #: be counted from the database instead of from a counter that only ever grows.
+#: Orderings whose first pages are worth re-reading between full sweeps.
+#: Measured, not assumed: against 594 known arrivals the first 20 pages of
+#: "updated" (AmiAmi's 中古) held 300 of them, "release" 1.30x chance, the
+#: unsorted default 0.59x, and "newest" (regtimed) 0.20x - worse than a
+#: shuffle. Anything not in here reads all of itself, every pass.
+HEAD_WORTH_READING = frozenset({"updated", "preowned"})
+
 SCOPE_FILTERS: dict[str, str] = {
     "figures_preowned": "preowned",
     # Left over from the version that split the head into its own slice. Kept
@@ -93,14 +100,12 @@ DEFAULT_SCOPES: list[dict] = [
         "label": "Pre-owned figures",
         "priority": 10,
         "query": {"category_id": 1, "condition": "preowned", "sort": "updated"},
-        # Two settings, because there are two jobs. The short pass re-reads the
-        # front of the "preowned" ordering, which is the one that actually
-        # tracks intake - 30 pages every half hour, 60 requests an hour against
-        # the 213 a full sweep costs. The full sweep behind it catches whatever
-        # the front never showed, once a day. See _page_limit for what was
-        # measured.
+        # The only slice where time matters. A used copy can be listed and
+        # sold inside a morning, so the front of the "preowned" ordering - the
+        # one that actually tracks intake - is re-read hourly, and the whole
+        # slice once a day behind it. See _page_limit for what was measured.
         "head_pages": 30,
-        "recheck_interval_minutes": 30,
+        "recheck_interval_minutes": 60,
         "full_sweep_interval_minutes": 1440,
     },
     {
@@ -108,10 +113,11 @@ DEFAULT_SCOPES: list[dict] = [
         "label": "Figures in stock",
         "priority": 20,
         "query": {"category_id": 1, "stock_filter": "in_stock", "sort": "newest"},
-        # 59 pages, about seven minutes. This is the only way a sold-out
-        # listing coming back into stock gets noticed, which is why it earns a
-        # frequent pass despite being small.
-        "recheck_interval_minutes": 60,
+        # 59 pages, about seven minutes, read end to end - nothing useful sits
+        # at the front of this ordering, so there is no short pass to make. A
+        # first-hand listing coming back into stock is not a race: the stock is
+        # replenished, not a single copy, so a day's latency costs nothing.
+        "recheck_interval_minutes": 1440,
     },
     {
         "scope": "figures_preorder",
@@ -119,8 +125,9 @@ DEFAULT_SCOPES: list[dict] = [
         "priority": 30,
         "query": {"category_id": 1, "stock_filter": "preorder", "sort": "newest"},
         # 45 pages. Announcements rather than restocks: a pre-order appears
-        # once and then sits there, so a few hours of latency costs nothing.
-        "recheck_interval_minutes": 180,
+        # once and then sits there for months, so a day of latency costs
+        # nothing at all.
+        "recheck_interval_minutes": 1440,
     },
     {
         "scope": "figures_all",
@@ -130,8 +137,8 @@ DEFAULT_SCOPES: list[dict] = [
         # The backstop, not the workhorse: 1,385 pages, some three hours of
         # requests. Its job is to record a listing that appeared and sold out
         # between two passes, and to correct anything nothing else revisited.
-        # Neither needs doing daily.
-        "recheck_interval_minutes": 10080,
+        # Neither needs doing often; a fortnight is plenty.
+        "recheck_interval_minutes": 20160,
     },
 ]
 
@@ -841,6 +848,11 @@ def progress(db: Session, provider_id: str = "amiami") -> dict:
                 "queue_position": queue.get(crawl.scope),
                 "resting": _cooldown_remaining(crawl) > 0,
                 "sort_key": (crawl.query or {}).get("sort") or "newest",
+                # Whether re-reading the front of this slice would find
+                # anything. It depends entirely on the ordering, and of the
+                # eight AmiAmi offers exactly one qualifies - so this is not a
+                # setting to expose everywhere and hope for the best.
+                "head_supported": (crawl.query or {}).get("sort") in HEAD_WORTH_READING,
                 "label": crawl.label or crawl.scope,
                 "state": crawl.state.value,
                 "enabled": crawl.enabled,

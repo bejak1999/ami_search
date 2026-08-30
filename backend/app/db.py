@@ -583,16 +583,37 @@ def adopt_intake_ordering() -> int:
             # and 60 were the hourly sweep, 1440 the daily one from the split.
             if not (crawl.head_pages or 0) and crawl.recheck_interval_minutes in (30, 60, 1440):
                 crawl.head_pages = 30
-                crawl.recheck_interval_minutes = 30
+                crawl.recheck_interval_minutes = 60
                 crawl.full_sweep_interval_minutes = 1440
+                changed += 1
+            elif crawl.head_pages == 30 and crawl.recheck_interval_minutes == 30:
+                # Shipped for one release at half-hourly. Hourly is enough:
+                # the measurement that justified the short pass ran on hourly
+                # snapshots, and doubling the rate only halves a latency
+                # nobody is waiting on.
+                crawl.recheck_interval_minutes = 60
                 changed += 1
 
         # The other slices have no front worth re-reading - no ordering tested
-        # puts anything useful there - so they read everything, every pass.
-        for scope in ("figures_in_stock", "figures_preorder", "figures_all"):
+        # puts anything useful there - so they read everything, every pass,
+        # and none of them is in a hurry. First-hand stock is replenished
+        # rather than sold one copy at a time, and a pre-order sits for months
+        # once announced, so a day of latency on either costs nothing. The
+        # catch-all is a backstop and gets a fortnight.
+        quiet = {
+            "figures_in_stock": (1440, {30, 60}),
+            "figures_preorder": (1440, {30, 180}),
+            "figures_all": (20160, {1440, 10080}),
+        }
+        for scope, (wanted, shipped) in quiet.items():
             row = by_scope.get(scope)
-            if row is not None and (row.head_pages or 0) and row.head_pages == 20:
-                row.head_pages = 0  # the old shipped default, never chosen
+            if row is None:
+                continue
+            if row.head_pages == 20:  # an old shipped default, never chosen
+                row.head_pages = 0
+                changed += 1
+            if row.recheck_interval_minutes in shipped:
+                row.recheck_interval_minutes = wanted
                 changed += 1
 
         db.commit()

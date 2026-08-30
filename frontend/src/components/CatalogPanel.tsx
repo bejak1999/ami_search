@@ -376,38 +376,48 @@ function Slice({
             />
           </Field>
 
-          <Field
-            label="Newest pages to read"
-            hint="0 reads the whole slice every time, which is right unless its ordering puts new listings at the front."
-          >
-            <div className="flex items-center gap-2">
-              <input
-                type="number"
-                min={0}
-                max={500}
-                defaultValue={slice.head_pages}
-                onBlur={(e) => save.mutate({ head_pages: Number(e.target.value) })}
-                className="field w-24 tabular-nums"
-              />
-              <span className="text-xs text-faint">
-                of {slice.pages_total ? slice.pages_total.toLocaleString('en-GB') : '?'}
-              </span>
-            </div>
-          </Field>
+          {/* Only where re-reading the front would find anything. Offering
+              the setting on a slice whose ordering does not put new listings
+              at the front is offering someone the exact mistake this spent
+              two measurements disproving. */}
+          {slice.head_supported && (
+            <>
+              <Field
+                label="Newest pages to read"
+                hint="0 reads the whole slice every time."
+              >
+                <div className="flex items-center gap-2">
+                  <input
+                    type="number"
+                    min={0}
+                    max={500}
+                    defaultValue={slice.head_pages}
+                    onBlur={(e) => save.mutate({ head_pages: Number(e.target.value) })}
+                    className="field w-24 tabular-nums"
+                  />
+                  <span className="text-xs text-faint">
+                    of {slice.pages_total ? slice.pages_total.toLocaleString('en-GB') : '?'}
+                  </span>
+                </div>
+              </Field>
 
-          {slice.head_pages > 0 && (
-            <Field
-              label="Read all of it every"
-              hint="The full sweep behind the short pass, catching whatever the front never showed."
-            >
-              <Interval
-                minutes={slice.full_sweep_interval_minutes}
-                onChange={(minutes) => save.mutate({ full_sweep_interval_minutes: minutes })}
-              />
-            </Field>
+              {slice.head_pages > 0 && (
+                <Field
+                  label="Read all of it every"
+                  hint="The full sweep behind the short pass, catching whatever the front never showed."
+                >
+                  <Interval
+                    minutes={slice.full_sweep_interval_minutes}
+                    onChange={(minutes) =>
+                      save.mutate({ full_sweep_interval_minutes: minutes })
+                    }
+                  />
+                </Field>
+              )}
+            </>
           )}
           <p className="text-[11px] leading-relaxed text-faint sm:col-span-3">
-            {slice.head_pages > 0 ? (
+            {slice.head_supported && slice.head_pages > 0 ? (
               <>
                 Whether re-reading the front pays depends entirely on the ordering, and only
                 one of AmiAmi&rsquo;s eight puts recent activity there. Measured against 594
@@ -417,9 +427,11 @@ function Slice({
               </>
             ) : (
               <>
-                This slice reads all of itself on every pass. No ordering tested puts anything
-                useful at the front of it, so re-reading the first few pages would return the
-                same products for ever — which is exactly what it used to do.
+                This slice reads all of itself on every pass, and there is no shortcut to
+                offer: nothing useful sits at the front of its ordering, so re-reading the
+                first few pages would return the same products for ever — which is exactly
+                what it used to do. Only the pre-owned slice has an ordering that tracks
+                intake, and only there does a copy appear and sell inside a morning.
               </>
             )}
           </p>

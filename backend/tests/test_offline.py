@@ -3460,7 +3460,7 @@ def test_head_slice_reads_only_its_front() -> None:
     row = db.query(CatalogCrawl).filter_by(scope="figures_preowned").one()
     check("onto the ordering that tracks intake", row.query["sort"] == "updated", row.query)
     check("with a short pass of its own", row.head_pages == 30, row.head_pages)
-    check("run every half hour", row.recheck_interval_minutes == 30)
+    check("run hourly", row.recheck_interval_minutes == 60, row.recheck_interval_minutes)
     check("and a full sweep daily", row.full_sweep_interval_minutes == 1440)
     check(
         "a pass ordered the old way restarts rather than resuming",
@@ -3469,7 +3469,41 @@ def test_head_slice_reads_only_its_front() -> None:
     )
     check("a second upgrade changes nothing", adopt_intake_ordering() == 0)
 
+    # The other three have no front worth re-reading and nothing that moves
+    # within the hour, so they are eased at the same time.
+    db.close()
+    db = SessionLocal()
+    for scope, shipped, wanted in (
+        ("figures_in_stock", 60, 1440),
+        ("figures_preorder", 180, 1440),
+        ("figures_all", 10080, 20160),
+    ):
+        db.add(
+            CatalogCrawl(
+                provider="amiami",
+                scope=scope,
+                query={"category_id": 1, "sort": "newest"},
+                recheck_interval_minutes=shipped,
+                head_pages=20,
+            )
+        )
+    db.commit()
+    db.close()
+    adopt_intake_ordering()
+    db = SessionLocal()
+    for scope, wanted in (
+        ("figures_in_stock", 1440),
+        ("figures_preorder", 1440),
+        ("figures_all", 20160),
+    ):
+        row = db.query(CatalogCrawl).filter_by(scope=scope).one()
+        check(f"{scope} is eased to {wanted} min", row.recheck_interval_minutes == wanted,
+              row.recheck_interval_minutes)
+        check(f"{scope} reads all of itself", row.head_pages == 0, row.head_pages)
+
     # An interval someone chose is theirs, and so is a sort they picked.
+    # Named explicitly: the loop above left "row" on the last quiet slice.
+    row = db.query(CatalogCrawl).filter_by(scope="figures_preowned").one()
     row.recheck_interval_minutes = 240
     row.query = {"category_id": 1, "condition": "preowned", "sort": "newest"}
     db.commit()
