@@ -1,0 +1,8 @@
+# Installed on first run by start.bat, and specific to one Python version and
+# platform - so it belongs on the memory stick, not in the repository.
+lib/
+
+# The measurement itself. Worth keeping on the stick, not worth committing.
+measurement.json
+measurement.part
+__pycache__/
