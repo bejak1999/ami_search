@@ -652,6 +652,32 @@ class CollectionUpdate(BaseModel):
     mfc_url: str | None = None
 
 
+class PriceChangeOut(BaseModel):
+    """What the last "check for price drops" found for one figure.
+
+    Carried on the entry rather than only in the button's own response, so
+    the answer survives a reload: it stays true until the next check, and a
+    fact that expires when you refresh the page is not much of a fact.
+    """
+
+    #: markdown | undercut | sold_out_cheapest | increase | cheaper | dearer |
+    #: unavailable
+    kind: str
+    direction: Literal["up", "down"]
+    was: float | None = None
+    now: float | None = None
+    difference: float | None = None
+    percent: float | None = None
+    currency: str = "JPY"
+    #: The copy that sets the price now, and its grade.
+    copy_code: str | None = None
+    copy_grade: str | None = None
+    #: The copy that set it before, which is what makes an undercut legible.
+    previous_code: str | None = None
+    checked_at: datetime | None = None
+    since: datetime | None = None
+
+
 class CollectionOut(ORMModel):
     id: int
     status: CollectionStatus
@@ -666,6 +692,7 @@ class CollectionOut(ORMModel):
     created_at: datetime
     updated_at: datetime
     item: ItemOut
+    price_change: PriceChangeOut | None = None
 
 
 # ---------------------------------------------------------------------------

@@ -1,9 +1,10 @@
 import clsx from 'clsx'
 import { useState } from 'react'
-import type { Item } from '@/api/types'
+import type { Item, PriceChange } from '@/api/types'
 import { money, percent, tidyName } from '@/lib/format'
 import { useTheme } from '@/lib/theme'
 import { Badge, Tooltip } from './ui'
+import { PriceChangeTag, priceChangeClass } from './PriceChange'
 import { Icon } from './Icon'
 
 /**
@@ -76,9 +77,18 @@ export interface ItemCardProps {
   onWatch?: (item: Item) => void
   onWishlist?: (item: Item) => void
   compact?: boolean
+  /** What the last price check found, when one has been run for this figure. */
+  priceChange?: PriceChange | null
 }
 
-export function ItemCard({ item, onOpen, onWatch, onWishlist, compact }: ItemCardProps) {
+export function ItemCard({
+  item,
+  onOpen,
+  onWatch,
+  onWishlist,
+  compact,
+  priceChange,
+}: ItemCardProps) {
   const [imageFailed, setImageFailed] = useState(false)
   const { cardShape } = useTheme()
   const discount = item.discount_pct
@@ -209,8 +219,16 @@ export function ItemCard({ item, onOpen, onWatch, onWishlist, compact }: ItemCar
         )}
 
         <div className="mt-auto">
-          <div className="relative z-20 flex w-fit items-baseline gap-2">
-            <span className="text-base font-semibold tabular-nums">
+          <div className="relative z-20 flex w-fit flex-wrap items-baseline gap-x-2 gap-y-1">
+            {/* Coloured in place rather than badged beside: the question is
+                "has this got cheaper", and the price is where the eye lands
+                first, in the grid as much as in the list. */}
+            <span
+              className={clsx(
+                'text-base font-semibold tabular-nums',
+                priceChangeClass(priceChange),
+              )}
+            >
               {money(item.price, item.currency)}
             </span>
             {item.list_price && discount !== null && discount > 0 && (
@@ -218,6 +236,7 @@ export function ItemCard({ item, onOpen, onWatch, onWishlist, compact }: ItemCar
                 {money(item.list_price, item.currency)}
               </span>
             )}
+            <PriceChangeTag change={priceChange} />
           </div>
 
           {/* Several graded copies at once: the headline price is the cheapest

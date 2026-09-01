@@ -5367,6 +5367,204 @@ def test_opening_an_item_records_its_whole_gallery() -> None:
     db.close()
 
 
+def test_a_price_change_says_which_kind_it_is() -> None:
+    print("\n== The price check tells four different movements apart ==")
+    from app.api import collection as collection_api
+    from app.db import SessionLocal, init_db
+    from app.models import (
+        CollectionEntry,
+        CollectionStatus,
+        Condition,
+        Item,
+        Listing,
+        PriceCheck,
+        PricePoint,
+        User,
+        UserRole,
+    )
+    from app.providers.base import NormalizedItem
+    from app.services import catalog, pricecheck
+
+    init_db()
+    db = SessionLocal()
+    for model in (PriceCheck, CollectionEntry, PricePoint, Listing, Item):
+        db.query(model).delete()
+    db.query(User).filter(User.username == "pricecheck").delete()
+    db.commit()
+
+    user = User(username="pricecheck", email="pc@example.com", password_hash="x",
+                role=UserRole.user)
+    db.add(user)
+    db.commit()
+
+    # ---------------------------------------------------------------- table
+    #
+    # The decision itself, without a shop in the way. A used product is
+    # several graded copies under one code and its price is the cheapest of
+    # them, so the same falling number means three different things.
+    cases = [
+        # cheaper, and the copy that set the price is the same one
+        (("A", 5000), ("A", 4000), True, pricecheck.MARKDOWN),
+        # cheaper, but a different copy is doing it now
+        (("A", 5000), ("B", 4000), True, pricecheck.UNDERCUT),
+        # dearer, and the copy that was cheapest has gone
+        (("A", 4000), ("B", 5000), False, pricecheck.SOLD_OUT_CHEAPEST),
+        # dearer, same copy: somebody actually put the price up
+        (("A", 4000), ("A", 5000), True, pricecheck.INCREASE),
+        # unchanged
+        (("A", 4000), ("A", 4000), True, None),
+    ]
+    for (was_code, was_price), (now_code, now_price), live, expected in cases:
+        got = pricecheck.classify(
+            reference_price=was_price,
+            reference_code=was_code,
+            now_price=now_price,
+            now_code=now_code,
+            reference_copy_still_live=live,
+        )
+        check(f"{was_price}({was_code}) -> {now_price}({now_code}) is {expected}",
+              got == expected, got)
+
+    check(
+        "a sold-out product is not silently a price drop",
+        pricecheck.classify(reference_price=4000, reference_code="A", now_price=None,
+                            now_code=None, reference_copy_still_live=False)
+        == pricecheck.UNAVAILABLE,
+    )
+    check(
+        "and the two upward cases are both painted red",
+        pricecheck.SOLD_OUT_CHEAPEST in pricecheck.UPWARD
+        and pricecheck.INCREASE in pricecheck.UPWARD,
+    )
+
+    # ------------------------------------------------------------- end to end
+    def detail(variants) -> NormalizedItem:
+        return NormalizedItem(
+            provider="amiami",
+            code="PC-1",
+            name="Watched figure",
+            url="https://www.amiami.com/eng/detail/?gcode=PC-1",
+            currency="JPY",
+            price=min(v["price"] for v in variants) if variants else None,
+            condition="preowned",
+            in_stock=bool(variants),
+            order_closed=not variants,
+            detail_loaded=True,
+            variants=variants,
+        )
+
+    def copy(code, price, grade="B"):
+        return {"code": code, "price": price, "condition": f"Item:{grade} Box:{grade}",
+                "item_grade": grade, "box_grade": grade, "note": None}
+
+    shop: dict[str, list] = {"variants": [copy("PC-1-R10", 5000), copy("PC-1-R11", 8000)]}
+
+    class FakeProvider:
+        def get_item(self, code):
+            return detail(shop["variants"])
+
+    original = collection_api.get_provider
+    collection_api.get_provider = lambda _pid: FakeProvider()
+    try:
+        item, _ = catalog.upsert_item(db, detail(shop["variants"]))
+        db.add(CollectionEntry(user_id=user.id, item_id=item.id,
+                               status=CollectionStatus.wishlist))
+        db.commit()
+
+        def press() -> dict:
+            return collection_api.recheck_prices(
+                collection_api.RecheckRequest(item_ids=[item.id]), db=db, user=user
+            ).detail
+
+        # First press: nothing has moved, but the fixed point is now set.
+        first = press()
+        check("the first check finds nothing to report", first["changes"] == [], first)
+        stored = pricecheck.baseline_for(db, user.id, item.id)
+        check("and remembers the price", stored.price == 5000, stored.price)
+        check("and which copy set it", stored.cheapest_code == "PC-1-R10",
+              stored.cheapest_code)
+
+        # The crawler catches a markdown days before the button is pressed.
+        # This is what the old seven-day window got wrong: prices are written
+        # only when they change, so the pre-drop price sits outside the window
+        # and the only point inside it is the new, lower one - which compares
+        # against itself and reports no change at all.
+        shop["variants"] = [copy("PC-1-R10", 4000), copy("PC-1-R11", 8000)]
+        catalog.upsert_item(db, detail(shop["variants"]))
+        db.commit()
+        check("the crawler has already recorded the lower price",
+              db.get(Item, item.id).current_price == 4000)
+
+        moved = press()["changes"]
+        check("the button still catches it", len(moved) == 1, moved)
+        check("as a markdown on the same copy",
+              moved and moved[0]["kind"] == pricecheck.MARKDOWN, moved)
+        check("with the difference in yen",
+              moved and moved[0]["difference"] == -1000, moved)
+        check("and pointing down", moved and moved[0]["direction"] == "down", moved)
+
+        # A rougher copy turns up underneath it. Same falling number, wholly
+        # different news - and the grade is the reason to say so.
+        shop["variants"] = [copy("PC-1-R10", 4000), copy("PC-1-R12", 2500, grade="C")]
+        moved = press()["changes"]
+        check("a cheaper copy arriving is not a markdown",
+              moved and moved[0]["kind"] == pricecheck.UNDERCUT, moved)
+        check("and its grade comes with it",
+              moved and moved[0]["copy_grade"] == "C", moved)
+
+        # That cheap copy sells. The price goes up, but nobody raised it.
+        shop["variants"] = [copy("PC-1-R10", 4000)]
+        moved = press()["changes"]
+        check("the cheapest selling is told from a price rise",
+              moved and moved[0]["kind"] == pricecheck.SOLD_OUT_CHEAPEST, moved)
+        check("though it is still shown as dearer",
+              moved and moved[0]["direction"] == "up", moved)
+
+        # Somebody actually puts the remaining copy up.
+        shop["variants"] = [copy("PC-1-R10", 4600)]
+        moved = press()["changes"]
+        check("a real increase is named as one",
+              moved and moved[0]["kind"] == pricecheck.INCREASE, moved)
+
+        # The finding has to survive a reload, so it lives on the entry.
+        from app.services import landed_cost
+
+        profile = landed_cost.default_profile(user.id)
+        db.add(profile)
+        db.commit()
+        entries = collection_api.list_entries(
+            status_filter=None, tag=None, db=db, user=user, profile=profile
+        )
+        carried = entries[0].price_change
+        check("the list carries the last finding", carried is not None)
+        check("with the same verdict",
+              carried is not None and carried.kind == pricecheck.INCREASE, carried)
+
+        # A shop failure must not move the fixed point: losing the comparison
+        # to a dropped connection would be the worse failure.
+        before = pricecheck.baseline_for(db, user.id, item.id).price
+
+        class BrokenProvider:
+            def get_item(self, code):
+                from app.providers import ProviderError
+
+                raise ProviderError("shop is down")
+
+        collection_api.get_provider = lambda _pid: BrokenProvider()
+        result = press()
+        check("a failed fetch is counted as failed", result["failed"] == 1, result)
+        check("and the comparison point is kept",
+              pricecheck.baseline_for(db, user.id, item.id).price == before)
+    finally:
+        collection_api.get_provider = original
+
+    for model in (PriceCheck, CollectionEntry, PricePoint, Listing, Item):
+        db.query(model).delete()
+    db.query(User).filter(User.username == "pricecheck").delete()
+    db.commit()
+    db.close()
+
+
 def test_the_sampler_can_actually_spend_its_budget() -> None:
     print("\n== The shelf sampler is not starved by its own arithmetic ==")
     from app.config import settings
@@ -5529,6 +5727,7 @@ def main() -> int:
     test_a_recovered_breaker_stops_reporting_itself_as_open()
     test_missing_exchange_rates_are_reported()
     test_newly_listed_used_is_not_newly_known()
+    test_a_price_change_says_which_kind_it_is()
     test_settings()
 
     print(f"\n{'=' * 46}\n  {PASS} passed, {FAIL} failed\n{'=' * 46}")

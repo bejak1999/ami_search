@@ -6,8 +6,6 @@ import io
 import json
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
-from datetime import timedelta
-
 from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -19,21 +17,15 @@ from ..models import (
     CollectionStatus,
     CostProfile,
     Item,
-    PricePoint,
     User,
     utcnow,
 )
 from ..providers import ItemNotFound, ProviderError, detect_provider_from_url, get_provider
 from ..schemas import CollectionCreate, CollectionOut, CollectionUpdate, MessageResponse
-from ..services import catalog, fx, landed_cost
+from ..services import catalog, fx, landed_cost, pricecheck
 from .serializers import item_out
 
 router = APIRouter(prefix="/collection", tags=["collection"])
-
-#: How far back a price drop still counts as news. A week: long enough to
-#: catch a markdown made over a weekend, short enough that a drop from a
-#: fortnight ago is not presented as something that just happened.
-RECHECK_WINDOW_DAYS = 7
 
 
 class RecheckRequest(BaseModel):
@@ -66,11 +58,16 @@ _ENTRY_FIELDS = (
 
 
 def _serialize(
-    db: Session, entry: CollectionEntry, user: User, profile: CostProfile
+    db: Session,
+    entry: CollectionEntry,
+    user: User,
+    profile: CostProfile,
+    change: dict | None = None,
 ) -> CollectionOut:
     return CollectionOut(
         **{name: getattr(entry, name) for name in _ENTRY_FIELDS},
         item=item_out(db, entry.item, user=user, profile=profile, with_context=True),
+        price_change=change,
     )
 
 
@@ -123,7 +120,17 @@ def list_entries(
     )
     if tag:
         rows = [r for r in rows if tag in (r.tags or [])]
-    return [_serialize(db, entry, user, profile) for entry in rows]
+
+    # One query for the whole page rather than one per entry: a collection is
+    # small, but this is the list view and a per-row lookup here is how a
+    # fast page quietly becomes a slow one.
+    checks = pricecheck.baselines_for(db, user.id, [r.item_id for r in rows])
+    return [
+        _serialize(
+            db, entry, user, profile, pricecheck.as_payload(checks.get(entry.item_id))
+        )
+        for entry in rows
+    ]
 
 
 @router.post("", response_model=CollectionOut, status_code=status.HTTP_201_CREATED)
@@ -259,15 +266,23 @@ def recheck_prices(
     db: Session = Depends(get_db),
     user: User = Depends(current_user),
 ) -> MessageResponse:
-    """Ask the shop about these wishlist entries again, and report the drops.
+    """Ask the shop about these entries again, and report what moved.
 
     The catalogue sweeps get round to a wishlisted figure eventually, but
     "eventually" is the wrong answer when the question is whether something
     has just been marked down. This asks now, for the handful on screen.
 
-    A drop means cheaper than it was within the last week - not cheaper than
-    the list price, which for used stock is nearly always true and says
-    nothing about whether anything just happened.
+    "Moved" means against the last time *this* figure was checked, not
+    against a rolling window. A window cannot answer it: prices are recorded
+    only when they change, so a markdown made four days ago leaves nothing
+    inside a seven-day window but the new, lower price, and the comparison
+    comes out as no change at all - which is exactly how this used to behave.
+
+    The first check of a figure has no fixed point to look back from, so it
+    falls back to the price we were already holding. That is worth having:
+    the reason for pressing the button is usually that the crawler has not
+    been past in a while, so what we hold and what the shop says are the two
+    numbers actually worth comparing.
     """
     entries = (
         db.execute(
@@ -281,30 +296,30 @@ def recheck_prices(
         .all()
     )
     if not entries:
-        return MessageResponse(message="Nothing to check", detail={"checked": 0, "drops": []})
+        return MessageResponse(
+            message="Nothing to check", detail={"checked": 0, "changes": []}
+        )
 
-    window_start = utcnow() - timedelta(days=RECHECK_WINDOW_DAYS)
-    drops: list[dict] = []
-    checked = failed = 0
+    changes: list[dict] = []
+    checked = failed = cheaper = dearer = 0
 
     for entry in entries:
         item = db.get(Item, entry.item_id)
         if item is None:
             continue
 
-        # What it was, before this look changes it.
-        was = item.current_price
-        earlier = db.execute(
-            select(PricePoint.price, PricePoint.recorded_at)
-            .where(
-                PricePoint.item_id == item.id,
-                PricePoint.listing_id.is_(None),
-                PricePoint.price.is_not(None),
-                PricePoint.recorded_at >= window_start,
-            )
-            .order_by(PricePoint.recorded_at.asc())
-            .limit(1)
-        ).first()
+        # Where we are looking back from, decided before the fetch changes it.
+        baseline = pricecheck.baseline_for(db, user.id, item.id)
+        first_check = baseline is None
+        if baseline is not None:
+            reference_price = baseline.price
+            reference_code = baseline.cheapest_code
+            since = baseline.checked_at
+        else:
+            reference_price = item.current_price
+            copy = pricecheck.cheapest_copy(db, item)
+            reference_code = copy.code if copy else None
+            since = pricecheck.standing_since(db, item)
 
         provider = get_provider(item.provider)
         try:
@@ -314,7 +329,9 @@ def recheck_prices(
             checked += 1
             continue
         except ProviderError:
-            # One shop hiccup must not abandon the rest of the list.
+            # One shop hiccup must not abandon the rest of the list, and must
+            # not move the fixed point either - losing someone's comparison
+            # point to a dropped connection would be the worse failure.
             failed += 1
             continue
 
@@ -322,42 +339,74 @@ def recheck_prices(
         checked += 1
 
         now_price = item.current_price
-        if now_price is None:
-            continue
+        now_copy = pricecheck.cheapest_copy(db, item)
+        now_code = now_copy.code if now_copy else None
+        now_grade = now_copy.item_grade if now_copy else None
 
-        # The highest it has been inside the window, so a figure that dipped
-        # and recovered does not read as a bargain.
-        reference = max(
-            [p for p in (was, earlier[0] if earlier else None) if p is not None],
-            default=None,
+        kind = pricecheck.classify(
+            reference_price=reference_price,
+            reference_code=reference_code,
+            now_price=now_price,
+            now_code=now_code,
+            reference_copy_still_live=pricecheck.copy_is_live(db, item, reference_code),
         )
-        if reference is None or now_price >= reference:
+
+        row = pricecheck.remember(
+            db,
+            user_id=user.id,
+            item=item,
+            kind=kind,
+            reference_price=reference_price,
+            reference_code=reference_code,
+            now_price=now_price,
+            now_code=now_code,
+            now_grade=now_grade,
+            since=since,
+        )
+        if kind is None:
             continue
 
-        drops.append(
+        if kind in pricecheck.UPWARD:
+            dearer += 1
+        else:
+            cheaper += 1
+
+        change = pricecheck.as_payload(row) or {}
+        changes.append(
             {
+                **change,
                 "item_id": item.id,
                 "code": item.code,
                 "name": item.name,
-                "was": round(reference, 2),
-                "now": round(now_price, 2),
-                "difference": round(now_price - reference, 2),
-                "percent": round((now_price - reference) / reference * 100, 1),
-                "currency": item.currency,
-                "since": (earlier[1] if earlier else None),
+                "first_check": first_check,
             }
         )
 
     db.commit()
-    drops.sort(key=lambda d: d["percent"])
+    # Cheapest first, so the best news is at the top of the list.
+    changes.sort(key=lambda c: (c.get("percent") is None, c.get("percent") or 0))
+
+    if not checked:
+        message = "Nothing could be checked"
+    elif not changes:
+        message = f"No change on any of {checked}"
+    else:
+        parts = []
+        if cheaper:
+            parts.append(f"{cheaper} cheaper")
+        if dearer:
+            parts.append(f"{dearer} dearer")
+        message = f"{', '.join(parts)} of {checked}"
+
     return MessageResponse(
-        message=(
-            f"{len(drops)} of {checked} got cheaper"
-            if checked
-            else "Nothing could be checked"
-        ),
-        detail={"checked": checked, "failed": failed, "drops": drops,
-                "window_days": RECHECK_WINDOW_DAYS},
+        message=message,
+        detail={
+            "checked": checked,
+            "failed": failed,
+            "cheaper": cheaper,
+            "dearer": dearer,
+            "changes": changes,
+        },
     )
 
 

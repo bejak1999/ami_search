@@ -737,6 +737,57 @@ class CollectionEntry(Base):
     item: Mapped[Item] = relationship()
 
 
+class PriceCheck(Base):
+    """Where the price stood the last time someone asked about this figure.
+
+    The "check for price drops" button answers "has anything moved since I
+    last looked", and that question needs a fixed point to look back from.
+    A rolling window cannot supply one: prices are recorded only when they
+    change, so a markdown made four days ago leaves nothing inside a
+    seven-day window except the new, lower price - and the comparison comes
+    out as no change at all.
+
+    One row per person per figure, so checking twenty figures today and five
+    others tomorrow still compares each against its own last look rather than
+    against a shared timestamp at which most of them were never examined.
+
+    ``cheapest_code`` is what makes the answer worth reading. A pre-owned
+    product is several graded copies under one code, and its price is the
+    cheapest of them - which falls both when a copy is marked down and when a
+    cheaper copy arrives beside it. Remembering which copy was cheapest tells
+    those two apart, and tells both of them apart from the cheap one selling.
+    """
+
+    __tablename__ = "price_checks"
+    __table_args__ = (UniqueConstraint("user_id", "item_id", name="uq_price_check_user_item"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    item_id: Mapped[int] = mapped_column(ForeignKey("items.id", ondelete="CASCADE"), index=True)
+
+    checked_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utcnow)
+    #: The product price as it stood then - the cheapest buyable copy.
+    price: Mapped[float | None] = mapped_column(Float)
+    currency: Mapped[str] = mapped_column(String(3), default="JPY")
+    #: Code of the copy that was cheapest, e.g. FIGURE-140238-R459.
+    cheapest_code: Mapped[str | None] = mapped_column(String(64))
+
+    # What the most recent check found. Kept here rather than handed back
+    # once in the response, because "it got cheaper since you last looked" is
+    # a durable fact until the next look - so it has to survive a reload
+    # instead of vanishing with the page that asked the question.
+    #: Where the price stood before that check, and which copy was cheapest.
+    previous_price: Mapped[float | None] = mapped_column(Float)
+    previous_code: Mapped[str | None] = mapped_column(String(64))
+    #: Which of the four movements it was, or NULL when nothing moved.
+    kind: Mapped[str | None] = mapped_column(String(32))
+    #: Grade of the copy that is cheapest now, so an undercut by a rougher
+    #: copy is not read as the same figure simply getting cheaper.
+    cheapest_grade: Mapped[str | None] = mapped_column(String(8))
+    #: Since when the previous price had been standing, where we know.
+    previous_since: Mapped[datetime | None] = mapped_column(UTCDateTime)
+
+
 # ---------------------------------------------------------------------------
 # Infrastructure
 # ---------------------------------------------------------------------------

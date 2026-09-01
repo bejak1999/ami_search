@@ -248,6 +248,42 @@ export interface ChannelTypeInfo {
   unavailable_reason: string
 }
 
+/**
+ * What the last "check for price drops" found for one figure.
+ *
+ * A pre-owned product is several graded copies under one code and its price
+ * is the cheapest of them, so a falling number has more than one meaning.
+ * `kind` says which:
+ *
+ *   markdown           the same copy is cheaper than it was
+ *   undercut           a different, cheaper copy has appeared
+ *   sold_out_cheapest  the cheap copy sold; the next one costs more
+ *   increase           the same copy is dearer than it was
+ *   cheaper / dearer   moved, but we have no copy to attribute it to
+ *   unavailable        nothing buyable under this code any more
+ */
+export interface PriceChange {
+  kind:
+    | 'markdown'
+    | 'undercut'
+    | 'sold_out_cheapest'
+    | 'increase'
+    | 'cheaper'
+    | 'dearer'
+    | 'unavailable'
+  direction: 'up' | 'down'
+  was: number | null
+  now: number | null
+  difference: number | null
+  percent: number | null
+  currency: string
+  copy_code: string | null
+  copy_grade: string | null
+  previous_code: string | null
+  checked_at: string | null
+  since: string | null
+}
+
 export interface CollectionEntry {
   id: number
   status: CollectionStatus
@@ -262,6 +298,7 @@ export interface CollectionEntry {
   created_at: string
   updated_at: string
   item: Item
+  price_change: PriceChange | null
 }
 
 export type ShippingZone = 'zone1' | 'zone2' | 'zone3' | 'zone4' | 'zone5'

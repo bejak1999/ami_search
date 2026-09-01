@@ -6,6 +6,7 @@ import type { CollectionStatus } from '@/api/types'
 import { Icon } from '@/components/Icon'
 import { Badge, Card, EmptyState, Field, Modal, SegmentedControl, Skeleton, Spinner, Stat, Toggle } from '@/components/ui'
 import { ItemCard } from '@/components/ItemCard'
+import { PriceChangeTag, priceChangeClass } from '@/components/PriceChange'
 import { money, relativeTime, tidyName } from '@/lib/format'
 import { useToast } from '@/lib/toast'
 import clsx from 'clsx'
@@ -39,19 +40,13 @@ export function CollectionPage() {
   const [inStockOnly, setInStockOnly] = useState(false)
 
   /**
-   * What the last re-check found, by item id.
-   *
-   * Held here rather than folded into the entries, because it is the answer
-   * to a question asked once rather than a property of the item: reloading
-   * the page should not keep claiming a figure "just" got cheaper.
+   * The last check is stored against each entry and comes back with it, so
+   * nothing needs to be held here. It stays true until the next check rather
+   * than until the next reload, which is what "since you last looked" means.
    */
-  const [drops, setDrops] = useState<Map<number, PriceDrop>>(new Map())
-
   const recheck = useMutation({
     mutationFn: (itemIds: number[]) => api.collection.recheck(itemIds),
     onSuccess: (result) => {
-      const found = (result.detail?.drops ?? []) as PriceDrop[]
-      setDrops(new Map(found.map((d) => [d.item_id, d])))
       toast.success(result.message)
       void queryClient.invalidateQueries({ queryKey: ['collection'] })
     },
@@ -84,6 +79,18 @@ export function CollectionPage() {
     if (!inStockOnly) return all
     return all.filter((entry) => entry.item.in_stock)
   }, [entries.data, inStockOnly])
+
+  // Counted from what is on screen, so the line agrees with what is under it.
+  const moved = useMemo(() => {
+    let cheaper = 0
+    let dearer = 0
+    for (const entry of shown) {
+      if (!entry.price_change) continue
+      if (entry.price_change.direction === 'up') dearer += 1
+      else cheaper += 1
+    }
+    return { cheaper, dearer, total: cheaper + dearer }
+  }, [shown])
 
   const update = useMutation({
     mutationFn: ({ id, body }: { id: number; body: Record<string, unknown> }) =>
@@ -151,10 +158,17 @@ export function CollectionPage() {
         </div>
       )}
 
-      {drops.size > 0 && (
-        <p className="rounded-control border border-positive/30 bg-positive/10 px-3 py-2 text-xs text-positive">
-          {drops.size} of these got cheaper in the last week. The drop is shown beside each
-          price.
+      {moved.total > 0 && (
+        <p className="rounded-control border border-line bg-raised px-3 py-2 text-xs text-muted">
+          Since you last checked:{' '}
+          {moved.cheaper > 0 && (
+            <span className="font-medium text-positive">{moved.cheaper} cheaper</span>
+          )}
+          {moved.cheaper > 0 && moved.dearer > 0 && ', '}
+          {moved.dearer > 0 && (
+            <span className="font-medium text-danger">{moved.dearer} dearer</span>
+          )}
+          . The difference is shown beside each price.
         </p>
       )}
 
@@ -174,14 +188,14 @@ export function CollectionPage() {
               onClick={() => recheck.mutate(shown.map((e) => e.item.id!).filter(Boolean))}
               disabled={recheck.isPending}
               className="btn-ghost text-xs"
-              title="Ask the shop about each of these again and show what got cheaper"
+              title="Ask the shop about each of these again and show what has moved since your last check"
             >
               {recheck.isPending ? (
                 <Spinner className="h-3 w-3" />
               ) : (
                 <Icon name="refresh" className="h-3 w-3" />
               )}
-              {recheck.isPending ? `Checking ${shown.length}…` : 'Check for price drops'}
+              {recheck.isPending ? `Checking ${shown.length}…` : 'Check for price changes'}
             </button>
           )}
           <SegmentedControl
@@ -215,6 +229,7 @@ export function CollectionPage() {
             <ItemCard
               key={entry.id}
               item={entry.item}
+              priceChange={entry.price_change}
               onOpen={() => entry.item.id && navigate(`/item/${entry.item.id}`)}
             />
           ))}
@@ -269,26 +284,17 @@ export function CollectionPage() {
                 </button>
 
                 <p className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-muted">
-                  <span className="font-medium tabular-nums text-ink">
+                  <span
+                    className={clsx(
+                      'font-medium tabular-nums',
+                      priceChangeClass(entry.price_change) ?? 'text-ink',
+                    )}
+                  >
                     {money(entry.item.price, entry.item.currency)}
                   </span>
                   {/* Beside the price, because that is where the eye already
                       is when the question is "has this got any cheaper". */}
-                  {entry.item.id && drops.has(entry.item.id) && (
-                    <span
-                      className="rounded-control bg-positive/15 px-1.5 py-0.5 font-medium tabular-nums text-positive"
-                      title={`Was ${money(
-                        drops.get(entry.item.id)!.was,
-                        drops.get(entry.item.id)!.currency,
-                      )}`}
-                    >
-                      {money(
-                        drops.get(entry.item.id)!.difference,
-                        drops.get(entry.item.id)!.currency,
-                      )}{' '}
-                      ({drops.get(entry.item.id)!.percent}%)
-                    </span>
-                  )}
+                  <PriceChangeTag change={entry.price_change} />
                   {entry.item.landed && (
                     <span className="tabular-nums">
                       {money(entry.item.landed.total, entry.item.landed.currency)} landed
@@ -407,16 +413,4 @@ export function CollectionPage() {
       </Modal>
     </div>
   )
-}
-
-/** One figure that has come down in price since we last looked. */
-type PriceDrop = {
-  item_id: number
-  code: string
-  was: number
-  now: number
-  difference: number
-  percent: number
-  currency: string
-  since: string | null
 }
