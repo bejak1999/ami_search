@@ -41,6 +41,16 @@ log = logging.getLogger(__name__)
 
 #: AmiAmi's own path segments tell us which size we are looking at.
 THUMB_MARKERS = ("/thumb300/", "/thumb/", "/rthumb/")
+
+#: And which pictures are the extra ones - review shots and bonus contents -
+#: rather than the photograph of the product itself.
+#:
+#: Named positively on purpose. The first version of this called anything not
+#: under "/main/" a gallery shot, which is true of AmiAmi's own paths and
+#: false of everything else: a product photo served from a path we have not
+#: seen before would have been refused from the cache altogether, and the
+#: item left with no picture at all. An unrecognised URL is kept.
+GALLERY_MARKERS = ("/review/", "/bonus/")
 MAX_BYTES = 12 * 1024 * 1024
 
 _bucket = TokenBucket(rate_per_minute=int(settings.image_cache_requests_per_minute), burst=15)
@@ -58,7 +68,25 @@ def key_for(url: str) -> str:
 
 
 def kind_for(url: str) -> str:
-    return "thumb" if any(marker in url for marker in THUMB_MARKERS) else "main"
+    """Which of the three a photo is: thumbnail, full image, or gallery shot.
+
+    AmiAmi serves the product photo from ``/main/`` and ``/thumb300/``, and
+    the extra pictures - review shots, bonus contents - from paths of their
+    own. Only the first two are worth keeping: they are one picture per item
+    and the one that cannot be recovered once a used listing is deleted. The
+    gallery can run to twenty-odd shots of a single figure, which is a
+    different order of disk entirely, and while the item exists the shop will
+    serve them itself.
+
+    Told apart before this only as "thumbnail or not", which quietly filed
+    every review shot as a full image - so the panel reported eighteen
+    thousand more full images than thumbnails and nobody could see why.
+    """
+    if any(marker in url for marker in THUMB_MARKERS):
+        return "thumb"
+    if any(marker in url for marker in GALLERY_MARKERS):
+        return "gallery"
+    return "main"
 
 
 def path_for(key: str, content_type: str = "image/jpeg") -> Path:
@@ -70,6 +98,25 @@ def path_for(key: str, content_type: str = "image/jpeg") -> Path:
         "image/gif": ".gif",
     }.get(content_type, ".jpg")
     return cache_root() / key[:2] / key[2:4] / f"{key}{extension}"
+
+
+def already_cached(db: Session, urls: list[str]) -> set[str]:
+    """Which of these we hold a downloaded copy of. One query, not one each."""
+    wanted = {key_for(u): u for u in urls if u}
+    if not wanted:
+        return set()
+    keys = (
+        db.execute(
+            select(CachedImage.key).where(
+                CachedImage.key.in_(wanted),
+                CachedImage.fetched_at.is_not(None),
+                CachedImage.gone.is_(False),
+            )
+        )
+        .scalars()
+        .all()
+    )
+    return {wanted[key] for key in keys}
 
 
 def public_url(url: str | None) -> str | None:
@@ -172,7 +219,16 @@ def register(
     if not settings.image_cache_enabled:
         return 0
 
-    wanted = {key_for(u): u for u in urls if u and u.startswith("http")}
+    # Gallery shots are not kept. A row here is a promise to fetch the photo
+    # eventually, so recording one is the same as deciding to spend the disk;
+    # the single choke point is the honest place to refuse, because every
+    # route into the cache runs through it. The item page shows those
+    # pictures straight from the shop instead.
+    wanted = {
+        key_for(u): u
+        for u in urls
+        if u and u.startswith("http") and kind_for(u) != "gallery"
+    }
     if not wanted:
         return 0
 
@@ -352,6 +408,12 @@ def _pending_queue(db: Session, limit: int):
                 CachedImage.fetched_at.is_(None),
                 CachedImage.gone.is_(False),
                 CachedImage.attempts < 3,
+                # Rows left over from when these were kept. Nothing registers
+                # one now, but the ones already recorded would still be
+                # fetched, and a single figure can carry twenty-odd of them -
+                # which is why a batch could run photo 13 through 26 of one
+                # product while other items had no picture at all.
+                CachedImage.kind != "gallery",
             )
             .order_by(priority, Item.first_seen_at.desc().nulls_last(), CachedImage.id)
             .limit(limit)
@@ -362,13 +424,18 @@ def _pending_queue(db: Session, limit: int):
 
 
 def pending_count(db: Session) -> int:
-    """Photos known of but not on disk, and still worth trying for."""
+    """Photos known of but not on disk, and still worth trying for.
+
+    Counted over exactly what the queue will take, so the wait quoted from it
+    is a wait for work that will actually happen.
+    """
     return int(
         db.execute(
             select(func.count(CachedImage.id)).where(
                 CachedImage.fetched_at.is_(None),
                 CachedImage.gone.is_(False),
                 CachedImage.attempts < 3,
+                CachedImage.kind != "gallery",
             )
         ).scalar_one()
     )
@@ -552,12 +619,16 @@ def stats(db: Session) -> dict:
     # how many photos we know of, and only the ones with a fetch time behind
     # them are actually on disk. Reporting the first as "cached" is how the
     # panel came to claim 131,716 photos in 200 MB, which is 1.5 kB each.
-    downloaded = int(
+    # Items that have a photograph at all. Counting every row overstated the
+    # target by the several thousand the shop never pictured, which made the
+    # coverage percentage permanently unreachable.
+    items = int(
         db.execute(
-            select(func.count(CachedImage.id)).where(CachedImage.fetched_at.is_not(None))
+            select(func.count(Item.id)).where(
+                or_(Item.image_url.is_not(None), Item.images != [])
+            )
         ).scalar_one()
     )
-    items = int(db.execute(select(func.count(Item.id))).scalar_one())
     budget = int(settings.image_cache_max_gb * 1024**3)
 
     # How many photos the current catalogue would need in total.
@@ -571,17 +642,42 @@ def stats(db: Session) -> dict:
     )
     per_item = 2 if settings.image_cache_full_images else 1
     expected = items * per_item
+
+    # Gallery shots are not kept, so they are no part of the target. Rows for
+    # them exist from before that was decided; they are reported on their own
+    # rather than counted as full images, which is what made the panel show
+    # eighteen thousand more full images than thumbnails and a bar reading
+    # 148,058 of 143,102 - more downloaded than there was to download.
+    gallery = by_kind.pop("gallery", {"count": 0, "bytes": 0})
+    kept_rows = int(total_rows) - gallery["count"]
+    # A row is created the moment a photo is *seen*, without downloading it,
+    # because the public route is a hash of the source URL and the server has
+    # to know the mapping before it can fetch anything. So the row count is
+    # how many photos we know of, and only the ones with a fetch time behind
+    # them are actually on disk. Reporting the first as "cached" is how the
+    # panel came to claim 131,716 photos in 200 MB, which is 1.5 kB each.
+    kept_downloaded = int(
+        db.execute(
+            select(func.count(CachedImage.id)).where(
+                CachedImage.fetched_at.is_not(None), CachedImage.kind != "gallery"
+            )
+        ).scalar_one()
+    )
     # Averaged over what was actually downloaded, not over every row, or the
     # figure collapses towards zero as more photos are merely known about.
-    average = (int(total_bytes) / downloaded) if downloaded else 0
+    # And over the kept photos only: a review shot is a full-size picture, so
+    # letting them into the average makes the projection for a cache that no
+    # longer holds any of them too large.
+    kept_bytes = int(total_bytes) - gallery["bytes"]
+    average = (kept_bytes / kept_downloaded) if kept_downloaded else 0
 
     return {
         "enabled": settings.image_cache_enabled,
         "full_images": settings.image_cache_full_images,
         # Known: a URL we have recorded. Downloaded: a file on disk. The gap
         # between them is the prefetch backlog.
-        "count": int(total_rows),
-        "downloaded": downloaded,
+        "count": kept_rows,
+        "downloaded": kept_downloaded,
         "pending": pending,
         "bytes": int(total_bytes),
         "budget_bytes": budget,
@@ -590,8 +686,17 @@ def stats(db: Session) -> dict:
         "gone_upstream": gone,
         "items_known": items,
         "expected_images": expected,
-        "coverage_percent": round(downloaded / expected * 100, 1) if expected else 0.0,
-        "known_percent": round(int(total_rows) / expected * 100, 1) if expected else 0.0,
+        # Extra pictures kept from before they stopped being cached. Held on
+        # to rather than deleted: some belong to listings the shop has since
+        # removed, and those cannot be fetched again from anywhere.
+        "gallery_kept": gallery["count"],
+        "gallery_bytes": gallery["bytes"],
+        "coverage_percent": (
+            round(min(kept_downloaded, expected) / expected * 100, 1) if expected else 0.0
+        ),
+        "known_percent": (
+            round(min(kept_rows, expected) / expected * 100, 1) if expected else 0.0
+        ),
         "average_bytes": int(average),
         "projected_bytes": int(average * expected) if average else 0,
         "requests_per_minute": settings.image_cache_requests_per_minute,

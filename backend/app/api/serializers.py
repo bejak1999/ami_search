@@ -34,9 +34,27 @@ def register_images(db: Session, items: list[Item]) -> None:
     urls: list[str] = []
     for item in items:
         urls.extend(cache.urls_for_item(item))
-        urls.extend(u for u in (item.images or []) if u)
     if urls:
         cache.register(db, urls, commit=True)
+
+
+def _gallery(db: Session, item: Item) -> list[str]:
+    """Where the browser should get each of an item's pictures.
+
+    Our own copy when there is one - the product photo always, and a gallery
+    shot if it was cached before those stopped being kept - and the shop
+    otherwise. Those older copies are worth serving: some belong to listings
+    that have since been deleted, and nothing else has them any more.
+    """
+    urls = [u for u in (item.images or []) if u]
+    if not urls:
+        return []
+    extra = [u for u in urls if image_cache.kind_for(u) == "gallery"]
+    held = image_cache.already_cached(db, extra) if extra else set()
+    return [
+        u if (u in extra and u not in held) else image_cache.public_url(u)
+        for u in urls
+    ]
 
 
 def _card_image(url: str | None) -> str | None:
@@ -187,7 +205,12 @@ def item_out(
         listing_count=item.listing_count or 0,
         list_price=item.list_price,
         image_url=image_cache.public_url(_card_image(item.image_url)),
-        images=[image_cache.public_url(u) for u in (item.images or []) if u],
+        # The product photo is served from our copy, because it is the one
+        # that disappears with the listing. The gallery - review shots, bonus
+        # contents - is linked straight to the shop: a single figure can carry
+        # twenty-odd of them, which is a different order of disk entirely, and
+        # while the item is listed AmiAmi serves them perfectly well itself.
+        images=_gallery(db, item),
         maker=item.maker,
         series=item.series,
         character=item.character,

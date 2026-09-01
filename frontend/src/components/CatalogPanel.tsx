@@ -1145,7 +1145,9 @@ function ImageCache() {
           )}
           <p className="mt-1.5 text-[11px] text-faint">
             {d.full_images ? 'Thumbnail and full image' : 'Thumbnails only'} per item; all of
-            them would need about {bytes(d.projected_bytes)}
+            them would need about {bytes(d.projected_bytes)}. The extra pictures — review
+            shots, bonus contents — are shown straight from the shop rather than kept: one
+            figure can carry twenty-odd of them.
           </p>
         </div>
       </div>
@@ -1163,6 +1165,19 @@ function ImageCache() {
           <div className="flex justify-between gap-3">
             <dt className="text-muted">Gone from the shop</dt>
             <dd className="tabular-nums text-warning">{d.gone_upstream.toLocaleString('en-GB')}</dd>
+          </div>
+        )}
+        {/* Kept from before these stopped being cached, and not deleted:
+            some belong to listings the shop has since removed, and a copy
+            here is then the only one left anywhere. */}
+        {d.gallery_kept > 0 && (
+          <div className="flex justify-between gap-3">
+            <dt className="text-muted" title="Extra pictures held from before these stopped being cached. Nothing new is added, and none of them is fetched.">
+              Gallery, no longer collected
+            </dt>
+            <dd className="tabular-nums text-faint">
+              {d.gallery_kept.toLocaleString('en-GB')} · {bytes(d.gallery_bytes)}
+            </dd>
           </div>
         )}
         <div className="flex justify-between gap-3">

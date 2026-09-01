@@ -5551,20 +5551,24 @@ def test_opening_an_item_records_its_whole_gallery() -> None:
 
     # The public route is a hash of the source URL and cannot be reversed, so
     # a photo nobody wrote down renders as a blank frame however well the file
-    # would download. Opening or reloading an item is where the gallery
-    # arrives, so that is where it has to be recorded - it was recorded
-    # nowhere, and the extra pictures stopped appearing after a reload.
+    # would download. That is why the product photo has to be recorded when
+    # the page is opened - it was recorded nowhere, and the picture stopped
+    # appearing after a reload.
+    #
+    # The review shots are a separate question and the answer is no: one
+    # figure can carry twenty-odd of them, and the shop serves them itself
+    # while the listing exists. They are linked, not kept - see
+    # test_the_gallery_is_shown_but_not_kept.
     register_images(db, [item])
-    with_gallery = db.query(CachedImage).count()
-    check("opening the page records the rest", with_gallery == 4, with_gallery)
+    check("opening the page adds no gallery shots",
+          db.query(CachedImage).count() == 2, db.query(CachedImage).count())
     check(
-        "including the review shots",
-        db.query(CachedImage).filter(CachedImage.source_url.like("%review%")).count() == 2,
+        "the review shots stay out of the cache",
+        not db.query(CachedImage).filter(CachedImage.source_url.like("%review%")).count(),
     )
 
-    # And every one of them can be turned into a servable route.
-    for url in item.images:
-        check(f"servable: {url.rsplit('/', 1)[-1]}", images.public_url(url) is not None)
+    # The product photo is servable from here either way.
+    check("the main photo is servable", images.public_url(item.image_url) is not None)
 
     db.query(CachedImage).delete()
     db.query(Item).delete()
@@ -5884,6 +5888,163 @@ def test_the_panel_says_which_ordering_a_slice_reads() -> None:
     db.close()
 
 
+def test_the_gallery_is_shown_but_not_kept() -> None:
+    print("\n== Only the thumbnail and the full image are kept ==")
+    from app.api.serializers import item_out, register_images
+    from app.db import SessionLocal, init_db, reclassify_gallery_photos
+    from app.models import CachedImage, Condition, Item, User, UserRole, utcnow
+    from app.services import images
+
+    init_db()
+    db = SessionLocal()
+    db.query(CachedImage).delete()
+    db.query(Item).delete()
+    db.query(User).filter(User.username == "gallery").delete()
+    db.commit()
+
+    MAIN = "https://img.amiami.com/images/product/main/254/FIGURE-1.jpg"
+    THUMB = "https://img.amiami.com/images/product/thumb300/254/FIGURE-1.jpg"
+    REVIEW = [
+        f"https://img.amiami.com/images/product/review/254/FIGURE-1_{n}.jpg"
+        for n in range(1, 27)
+    ]
+
+    check("a product photo is a full image", images.kind_for(MAIN) == "main")
+    check("its small version is a thumbnail", images.kind_for(THUMB) == "thumb")
+    check("a review shot is neither", images.kind_for(REVIEW[0]) == "gallery")
+
+    item = Item(provider="amiami", code="G-1", name="With a long gallery",
+                condition=Condition.preowned, currency="JPY",
+                image_url=MAIN, images=[MAIN, *REVIEW])
+    db.add(item)
+    db.commit()
+
+    # Twenty-six review shots of one figure is a different order of disk from
+    # one picture of it, and the shop serves them itself while it is listed.
+    register_images(db, [item])
+    db.commit()
+    rows = db.query(CachedImage).all()
+    check("only two photos are recorded", len(rows) == 2, len(rows))
+    check(
+        "and neither of them is a gallery shot",
+        {r.kind for r in rows} == {"main", "thumb"},
+        {r.kind for r in rows},
+    )
+
+    # Refusing at the single choke point, so no route can reintroduce them.
+    images.register(db, REVIEW, item_id=item.id, commit=True)
+    check("registering them directly does nothing either",
+          db.query(CachedImage).count() == 2, db.query(CachedImage).count())
+
+    # They are still shown - straight from the shop.
+    user = User(username="gallery", email="g@example.com", password_hash="x",
+                role=UserRole.user)
+    db.add(user)
+    db.commit()
+    out = item_out(db, item)
+    check("every picture is still offered", len(out.images) == 27, len(out.images))
+    check("the product photo comes from our copy", out.images[0].startswith("/api/images/"))
+    check("the review shots come from the shop",
+          all(u.startswith("https://img.amiami.com/") for u in out.images[1:]))
+
+    # Except one we happen to already hold: those are worth serving, because
+    # the listing they belong to may be gone and nothing else has them.
+    held = CachedImage(key=images.key_for(REVIEW[0]), source_url=REVIEW[0],
+                       kind="gallery", fetched_at=utcnow(), bytes=60_000)
+    db.add(held)
+    db.commit()
+    out = item_out(db, item)
+    check("a copy we already have is served from here",
+          out.images[1].startswith("/api/images/"), out.images[1])
+    check("and the rest still are not",
+          out.images[2].startswith("https://img.amiami.com/"))
+
+    # Nor will the prefetcher go and get the ones recorded before this.
+    db.add(CachedImage(key="deadbeef" * 4, source_url=REVIEW[1], kind="gallery"))
+    db.commit()
+    queued = [row.source_url for row in images._pending_queue(db, 50)]
+    check("an un-fetched gallery shot is not queued", REVIEW[1] not in queued, queued)
+    check("and is not counted as owed", images.pending_count(db) == 2,
+          images.pending_count(db))
+
+    db.query(CachedImage).delete()
+    db.query(Item).delete()
+    db.query(User).filter(User.username == "gallery").delete()
+    db.commit()
+    db.close()
+
+
+def test_the_photo_panel_cannot_report_more_than_all_of_them() -> None:
+    print("\n== The cache cannot be more than complete ==")
+    from app.db import SessionLocal, init_db, reclassify_gallery_photos
+    from app.models import CachedImage, Condition, Item, utcnow
+    from app.services import images
+
+    init_db()
+    db = SessionLocal()
+    db.query(CachedImage).delete()
+    db.query(Item).delete()
+    db.commit()
+
+    # The shape the panel was reporting: two photos per item as the target,
+    # and rows for far more than two, so "downloaded" overtook "expected" and
+    # the bar read 148,058 of 143,102.
+    for n in range(100):
+        item = Item(provider="amiami", code=f"P-{n}", name=f"Figure {n}",
+                    condition=Condition.preowned, currency="JPY",
+                    image_url=f"https://img.amiami.com/images/product/main/1/F-{n}.jpg")
+        db.add(item)
+        db.flush()
+        for kind, url in (
+            ("thumb", f"https://img.amiami.com/images/product/thumb300/1/F-{n}.jpg"),
+            ("main", f"https://img.amiami.com/images/product/main/1/F-{n}.jpg"),
+        ):
+            db.add(CachedImage(key=images.key_for(url), source_url=url, kind=kind,
+                               item_id=item.id, fetched_at=utcnow(), bytes=40_000))
+        # Recorded as full images, the way they used to be classified.
+        for shot in range(6):
+            url = f"https://img.amiami.com/images/product/review/1/F-{n}_{shot}.jpg"
+            db.add(CachedImage(key=images.key_for(url), source_url=url, kind="main",
+                               item_id=item.id, fetched_at=utcnow(), bytes=60_000))
+    # And a handful the shop never pictured at all, which were counted in the
+    # target and so made full coverage unreachable.
+    for n in range(20):
+        db.add(Item(provider="amiami", code=f"NOPIC-{n}", name=f"No photo {n}",
+                    condition=Condition.preowned, currency="JPY"))
+    db.commit()
+
+    refiled = reclassify_gallery_photos()
+    check("the review shots are re-filed", refiled == 600, refiled)
+
+    stats = images.stats(db)
+    check("the target counts only items that have a photo",
+          stats["expected_images"] == 200, stats["expected_images"])
+    check("downloaded no longer exceeds it",
+          stats["downloaded"] <= stats["expected_images"],
+          (stats["downloaded"], stats["expected_images"]))
+    check("coverage reads as complete", stats["coverage_percent"] == 100.0,
+          stats["coverage_percent"])
+    check("the gallery is reported on its own", stats["gallery_kept"] == 600,
+          stats["gallery_kept"])
+    check(
+        "and is left out of the full-image count",
+        stats["by_kind"]["main"]["count"] == 100,
+        stats["by_kind"].get("main"),
+    )
+    # A review shot is a full-size picture, so letting them into the average
+    # would size the projection for a cache that holds none of them.
+    check("the projection is sized on what is kept",
+          stats["average_bytes"] == 40_000, stats["average_bytes"])
+    check("nothing was deleted", db.query(CachedImage).count() == 800,
+          db.query(CachedImage).count())
+    check("and a second run re-files nothing", reclassify_gallery_photos() == 0)
+
+    db.query(CachedImage).delete()
+    db.query(Item).delete()
+    db.commit()
+    db.close()
+
+
 def test_the_sampler_can_actually_spend_its_budget() -> None:
     print("\n== The shelf sampler is not starved by its own arithmetic ==")
     from app.config import settings
@@ -6051,6 +6212,8 @@ def main() -> int:
     test_a_price_change_says_which_kind_it_is()
     test_a_slice_that_named_no_ordering_is_moved_over_too()
     test_the_panel_says_which_ordering_a_slice_reads()
+    test_the_gallery_is_shown_but_not_kept()
+    test_the_photo_panel_cannot_report_more_than_all_of_them()
     test_settings()
 
     print(f"\n{'=' * 46}\n  {PASS} passed, {FAIL} failed\n{'=' * 46}")

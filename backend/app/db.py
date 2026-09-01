@@ -92,6 +92,9 @@ def init_db() -> None:
     eased = ease_quiet_slices()
     if eased:
         log.info("Eased the re-read interval on %s slow-moving slice(s)", eased)
+    refiled = reclassify_gallery_photos()
+    if refiled:
+        log.info("Re-filed %s cached photo(s) as gallery shots", refiled)
     stranded = close_stranded_listings()
     if stranded:
         log.info(
@@ -232,6 +235,49 @@ def close_stranded_listings() -> int:
                 closed += 1
             item.listing_count = 0
     return closed
+
+
+def reclassify_gallery_photos() -> int:
+    """Re-file review and bonus shots as what they are.
+
+    Photos were told apart only as "thumbnail or not", so every extra picture
+    of a figure counted as its full image. That is how the panel came to show
+    eighteen thousand more full images than thumbnails, and a downloaded
+    count larger than the number of photos there were to download - the
+    target being two per item, while the rows held far more than two.
+
+    Nothing is deleted. Some of these belong to listings the shop has since
+    removed, and a copy we hold is then the only one left anywhere; they are
+    simply no longer counted towards a target they are not part of, and the
+    prefetcher leaves the un-downloaded ones alone.
+
+    Done in the database rather than by loading a hundred and fifty thousand
+    rows to look at each URL. The patterns come from the same constants the
+    classifier uses, so the two cannot drift apart into disagreeing about
+    which photo is which.
+    """
+    from sqlalchemy import or_
+
+    from . import models
+    from .services.images import GALLERY_MARKERS
+
+    with session_scope() as db:
+        try:
+            return int(
+                db.query(models.CachedImage)
+                .filter(
+                    models.CachedImage.kind != "gallery",
+                    or_(
+                        *[
+                            models.CachedImage.source_url.contains(marker)
+                            for marker in GALLERY_MARKERS
+                        ]
+                    ),
+                )
+                .update({"kind": "gallery"}, synchronize_session=False)
+            )
+        except Exception:  # pragma: no cover - table may not exist yet
+            return 0
 
 
 def ease_quiet_slices() -> int:
