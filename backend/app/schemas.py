@@ -332,7 +332,10 @@ class ShelfLifeOut(BaseModel):
 class SearchRequest(BaseModel):
     q: str = ""
     provider: str = "amiami"
-    page: int = Field(default=1, ge=1, le=200)
+    # The shop's own search, which is for finding rather than enumerating -
+    # but the same trap: a limit low enough to refuse a page the interface
+    # had already offered.
+    page: int = Field(default=1, ge=1, le=2_000)
     per_page: int = Field(default=30, ge=1, le=50)
     condition: Literal["any", "new", "preowned"] = "any"
     stock: Literal["any", "in_stock", "preorder", "backorder"] = "any"
@@ -384,7 +387,13 @@ class LocalSearchRequest(BaseModel):
 
     q: str = ""
     provider: str | None = None
-    page: int = Field(default=1, ge=1, le=1000)
+    # A thousand pages is 48,000 items, and this catalogue holds more than
+    # that - so the last third of it could not be reached by paging at all,
+    # while the interface went on offering the pages. The cap was protecting
+    # nothing either: measured on 71,160 items, page 1,483 comes back in 0.02
+    # seconds, the same as page one. It is still bounded, because an
+    # unbounded offset is a way to ask the database to count to infinity.
+    page: int = Field(default=1, ge=1, le=100_000)
     per_page: int = Field(default=48, ge=1, le=120)
 
     condition: Literal["any", "new", "preowned"] = "any"

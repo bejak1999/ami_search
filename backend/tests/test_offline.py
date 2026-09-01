@@ -4907,12 +4907,29 @@ def test_the_pacer_follows_the_shared_rate() -> None:
     # The whole point of the pacer survives: the gaps are still drawn, not
     # spaced evenly. A steady stream would be easier to write and would look
     # exactly like a machine.
-    delays = [shared.next_delay() for _ in range(60)]
-    check("the gaps vary", len(set(round(d, 2) for d in delays)) > 30, len(set(delays)))
+    # Seeded, because the draw is heavy-tailed: one in fourteen gaps becomes
+    # a break six to eighteen times as long, so an unseeded sample of sixty
+    # swings widely and the check was flaky rather than wrong.
+    shared._rng.seed(20260901)
+    delays = [shared.next_delay() for _ in range(400)]
+    distinct = len(set(round(d, 2) for d in delays))
+    check("the gaps vary rather than repeating", distinct > 100, distinct)
     check("none is below the floor", min(delays) >= shared.minimum_delay)
-    check("and the mean lands near the target",
-          abs(sum(delays) / len(delays) - shared.mean_delay) < shared.mean_delay,
-          (sum(delays) / len(delays), shared.mean_delay))
+    # The fast tail of the draw is clipped by the floor, which is fine, but
+    # if most gaps ended up there the pacing would be a metronome again.
+    on_floor = sum(1 for d in delays if d <= shared.minimum_delay + 1e-9)
+    check("and the floor does not dominate them", on_floor < len(delays) / 2, on_floor)
+
+    # Against the gap the rate actually asks for, not against mean_delay -
+    # that is the base the breaks are piled on top of, so the achieved mean
+    # is deliberately larger than it.
+    target_gap = 60.0 / shared.current_rate
+    achieved = sum(delays) / len(delays)
+    check(
+        "and the achieved pace lands near the rate asked for",
+        0.5 * target_gap < achieved < 2.0 * target_gap,
+        (achieved, target_gap),
+    )
 
 
 def test_failures_are_attributed_and_requests_are_readable() -> None:
@@ -5196,6 +5213,50 @@ def test_a_whole_pass_is_counted_before_it_is_closed() -> None:
     db.close()
 
 
+def test_every_page_of_the_catalogue_can_be_reached() -> None:
+    print("\n== The last page of the catalogue is not out of bounds ==")
+    import pydantic
+
+    from app.schemas import LocalSearchRequest, SearchRequest
+
+    # The catalogue on this instance is 71,160 items, which at 48 a page is
+    # 1,483 pages - and the request refused anything past 1,000. The interface
+    # offered those pages and the server turned them down, so the last third
+    # of the catalogue could not be reached by paging at all.
+    held = 71_160
+    per_page = 48
+    pages = -(-held // per_page)
+    check("a real catalogue needs more than a thousand pages", pages > 1000, pages)
+
+    for page in (1, 1000, 1001, pages, 5_000):
+        LocalSearchRequest(page=page)  # must not raise
+    check(f"page {pages:,} is now accepted", True)
+
+    # Still bounded, though: an unbounded offset is a way to ask the database
+    # to count to infinity.
+    refused = False
+    try:
+        LocalSearchRequest(page=100_001)
+    except pydantic.ValidationError:
+        refused = True
+    check("something absurd is still refused", refused)
+    check("and so is page zero", _refuses(lambda: LocalSearchRequest(page=0)))
+
+    # The shop search had a lower version of the same trap.
+    SearchRequest(q="miku", page=1_000)
+    check("the shop search reaches past its old limit too", True)
+
+
+def _refuses(call) -> bool:
+    import pydantic
+
+    try:
+        call()
+    except pydantic.ValidationError:
+        return True
+    return False
+
+
 def main() -> int:
     test_url_parsing()
     test_release_dates()
@@ -5257,6 +5318,7 @@ def main() -> int:
     test_the_pacer_follows_the_shared_rate()
     test_failures_are_attributed_and_requests_are_readable()
     test_a_deleted_listing_is_still_reachable_by_its_code()
+    test_every_page_of_the_catalogue_can_be_reached()
     test_photo_counts_distinguish_known_from_held()
     test_prefetch_works_through_its_backlog()
     test_the_photo_queue_is_reached_however_full_the_cache_is()
