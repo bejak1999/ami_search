@@ -1458,14 +1458,24 @@ def test_sweep_estimate_uses_observed_speed() -> None:
     # each interval spent crawling, which assumed one slice had the crawler to
     # itself and that nothing ever paused. It quoted half an hour for work
     # that took an afternoon.
-    naive = 208 / 0.8 * 7.5
-    check("the old arithmetic said about half an hour", 1700 < naive < 2100, f"{naive:.0f}s")
+    # The mistake this guards against is assuming a slice has the crawler to
+    # itself and never pauses. Measured against the pure fetching time rather
+    # than against a fixed old number: the rate is the shared pool's now, so a
+    # faster pool makes the estimate shorter, and that is correct rather than
+    # optimistic. What must stay true is that waiting is still allowed for.
+    from app.services import budget
 
+    fetching = 208 * (60.0 / budget.rate_for("catalogue"))
     without = _eta_seconds(208)
     check(
-        "the fallback now allows for the slices sharing",
-        without > naive * 2,
-        f"{without}s against {naive:.0f}s",
+        "the fallback allows for waiting, not just fetching",
+        without > fetching * 2,
+        f"{without}s against {fetching:.0f}s of fetching",
+    )
+    check(
+        "and is not so pessimistic as to be useless",
+        without < fetching * 20,
+        f"{without}s against {fetching:.0f}s",
     )
 
     for rate, expected_hours in ((60, 3.5), (25, 8.3)):

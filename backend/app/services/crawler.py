@@ -1109,7 +1109,11 @@ def progress(db: Session, provider_id: str = "amiami") -> dict:
     )
     return {
         "enabled": settings.crawler_enabled,
-        "requests_per_minute": settings.crawler_requests_per_minute,
+        # What the crawler may use right now, not the per-job setting it no
+        # longer reads. Same trap the shelf panel was in: the number on
+        # screen described an arrangement that had been replaced.
+        "requests_per_minute": round(budget.rate_for("catalogue"), 1),
+        "budget_per_minute": budget.total_per_minute(),
         "run_interval_minutes": settings.crawler_run_interval_minutes,
         "seconds_per_run": settings.crawler_max_seconds_per_run,
         "slices": slices,
@@ -1138,7 +1142,12 @@ def _eta_seconds(pages_remaining: int, pages_per_hour: float | None = None) -> i
     if pages_per_hour and pages_per_hour > 0:
         return int(pages_remaining / pages_per_hour * 3600)
 
-    seconds_per_page = 60.0 / max(0.1, settings.crawler_requests_per_minute)
+    # From the shared pool, because that is what paces a sweep now. Reading
+    # the old per-job setting made this quote a sweep at eight pages a minute
+    # when it can have three times that with the shop to itself - an estimate
+    # wrong in the direction that matters, since it promised longer than the
+    # truth and so was never questioned.
+    seconds_per_page = 60.0 / max(0.1, budget.rate_for("catalogue"))
     working = seconds_per_page * pages_remaining
     duty = max(
         0.05,
