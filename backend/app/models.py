@@ -960,6 +960,12 @@ class CatalogCrawl(Base):
     finished_at: Mapped[datetime | None] = mapped_column(UTCDateTime)
     last_error: Mapped[str | None] = mapped_column(Text)
     consecutive_errors: Mapped[int] = mapped_column(Integer, default=0)
+    #: When the run of failures last landed. A slice that has failed several
+    #: times in a row is rested rather than struck off, and this says when it
+    #: may be tried again. Without it the exclusion was permanent: a slice
+    #: that is never selected can never succeed, and only a success cleared
+    #: the counter.
+    last_error_at: Mapped[datetime | None] = mapped_column(UTCDateTime)
     created_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utcnow)
 
 

@@ -5036,6 +5036,166 @@ def test_a_deleted_listing_is_still_reachable_by_its_code() -> None:
     db.close()
 
 
+def test_a_failing_slice_rests_rather_than_stopping_for_good() -> None:
+    print("\n== A slice that failed a few times comes back on its own ==")
+    from app.db import SessionLocal, init_db
+    from app.models import CatalogCrawl
+    from app.services import crawler
+    from app.services.crawler import ERROR_PATIENCE, error_rest_seconds, resting_after_errors
+
+    now = datetime.now(timezone.utc)
+
+    def slice_with(failures: int, minutes_ago: float) -> CatalogCrawl:
+        return CatalogCrawl(
+            provider="amiami", scope="figures_preowned", pages_total=211,
+            consecutive_errors=failures,
+            last_error_at=now - timedelta(minutes=minutes_ago),
+        )
+
+    # The trap this replaces: five consecutive failures struck the slice off
+    # the candidate list outright. A slice that is never selected can never
+    # succeed, and only a success cleared the counter - so one bad patch of
+    # network stopped it for good, silently, with the panel still reading
+    # "running" from whenever it last did.
+    check("under the limit it keeps going",
+          not resting_after_errors(slice_with(ERROR_PATIENCE - 1, 1)))
+    check("at the limit it rests", resting_after_errors(slice_with(ERROR_PATIENCE, 1)))
+    check("but not for ever", not resting_after_errors(slice_with(ERROR_PATIENCE, 60)))
+
+    # Each further run of failures rests longer, so a shop that is genuinely
+    # unhappy is not hammered - but it is always tried again eventually.
+    short = error_rest_seconds(slice_with(ERROR_PATIENCE, 0))
+    longer = error_rest_seconds(slice_with(ERROR_PATIENCE + 3, 0))
+    check("a worse run rests longer", longer > short, (short, longer))
+    check("with a ceiling on it",
+          error_rest_seconds(slice_with(40, 0)) <= 6 * 3600 + 1,
+          error_rest_seconds(slice_with(40, 0)))
+    check("and a slice that has never failed rests not at all",
+          error_rest_seconds(CatalogCrawl(provider="a", scope="s")) == 0.0)
+
+    # And it is actually selectable again once rested.
+    init_db()
+    db = SessionLocal()
+    db.query(CatalogCrawl).delete()
+    db.commit()
+    row = CatalogCrawl(
+        provider="amiami", scope="figures_preowned", enabled=True, pages_total=211,
+        consecutive_errors=ERROR_PATIENCE, last_error_at=now - timedelta(minutes=1),
+        cursor_page=4, cycles_completed=1, finished_at=now - timedelta(days=2),
+        recheck_interval_minutes=60,
+    )
+    db.add(row)
+    db.commit()
+    check("while resting it is not picked", crawler._select_crawl(db, "amiami") is None)
+
+    row.last_error_at = now - timedelta(hours=2)
+    db.commit()
+    picked = crawler._select_crawl(db, "amiami")
+    check("once rested it is picked again", picked is not None and picked.scope == row.scope,
+          picked.scope if picked else None)
+
+    db.query(CatalogCrawl).delete()
+    db.commit()
+    db.close()
+
+
+def test_spare_budget_goes_to_the_longest_unseen() -> None:
+    print("\n== Spare capacity goes to whatever has waited longest ==")
+    from app.db import SessionLocal, init_db
+    from app.models import AppSetting, Condition, Item
+    from app.services import shelfwatch
+
+    init_db()
+    db = SessionLocal()
+    db.query(AppSetting).delete()
+    db.query(Item).delete()
+    db.commit()
+
+    now = datetime.now(timezone.utc)
+    # Nothing is due: the tiers have everything covered for the next few hours.
+    for n in range(20):
+        db.add(Item(provider="amiami", code=f"P-{n}", name=f"Figure {n}",
+                    condition=Condition.preowned, currency="JPY", order_closed=False,
+                    shelf_due_at=now + timedelta(hours=5),
+                    last_detail_fetch_at=now - timedelta(days=n + 2)))
+    db.commit()
+
+    check("nothing is due", due := len(shelfwatch.due_items(db, "amiami", 50)) == 0, due)
+
+    # The tiers would otherwise re-read whatever is hot for the twentieth time
+    # before a quiet product is looked at once. With budget going spare, it is
+    # worth more spent on the least recently examined.
+    picked = shelfwatch.sweep_candidates(db, "amiami", 5, now - timedelta(hours=24))
+    check("five candidates come back", len(picked) == 5, len(picked))
+    ages = [(now - p.last_detail_fetch_at.replace(tzinfo=timezone.utc)).days for p in picked]
+    check("the longest unseen come first", ages == sorted(ages, reverse=True), ages)
+    check("and they are genuinely old", min(ages) > 15, ages)
+
+    # A product looked at recently is not dragged forward.
+    fresh = db.query(Item).filter_by(code="P-0").one()
+    fresh.last_detail_fetch_at = now - timedelta(minutes=5)
+    db.commit()
+    check("something just examined is left alone",
+          "P-0" not in [p.code for p in
+                        shelfwatch.sweep_candidates(db, "amiami", 20,
+                                                    now - timedelta(hours=24))])
+
+    # Once a day, not a second polling loop.
+    check("no sweep is recorded to start with", shelfwatch._last_sweep_at(db) is None)
+    shelfwatch._note_sweep(db)
+    db.commit()
+    marked = shelfwatch._last_sweep_at(db)
+    check("one is recorded when it runs", marked is not None)
+    check("and it is recent", (now - marked).total_seconds() < 60)
+
+    db.query(AppSetting).delete()
+    db.query(Item).delete()
+    db.commit()
+    db.close()
+
+
+def test_a_whole_pass_is_counted_before_it_is_closed() -> None:
+    print("\n== A pass is counted whole, including the slot that finished it ==")
+    from app.db import SessionLocal, init_db
+    from app.models import CatalogCrawl
+    from app.services.crawler import CrawlRun, _accumulate, _complete_cycle
+
+    init_db()
+    db = SessionLocal()
+    db.query(CatalogCrawl).delete()
+    db.commit()
+
+    now = datetime.now(timezone.utc)
+    crawl = CatalogCrawl(provider="amiami", scope="figures_preowned", pages_total=211,
+                         head_pages=30, cursor_page=1, recent_runs=[], current_pass={},
+                         full_sweep_interval_minutes=1440, last_full_sweep_at=now)
+    db.add(crawl)
+    db.commit()
+    crawl.current_pass = {
+        "started_at": (now - timedelta(minutes=10)).isoformat(),
+        "pages": 0, "items": 0, "new": 0, "changed": 0, "errors": 0,
+        "slots": 0, "working_seconds": 0.0, "interruptions": 0,
+    }
+
+    # Closing the pass writes it down and clears the accumulator, so the slot
+    # that reached the end has to be counted first. The other way round - which
+    # is how this was written - put those pages into the *next* pass, and every
+    # logged pass came out short by however much it did last. A thirty-page
+    # short pass was recorded as 13, 22, 26: anything but thirty.
+    for pages in (12, 11, 7):
+        _accumulate(crawl, CrawlRun(pages=pages, items=pages * 50, seconds=90.0))
+    _complete_cycle(db, crawl)
+
+    entry = crawl.recent_runs[0]
+    check("all thirty pages are in the record", entry["pages"] == 30, entry["pages"])
+    check("across all three slots", entry["slots"] == 3, entry["slots"])
+    check("and the next pass starts empty", crawl.current_pass == {}, crawl.current_pass)
+
+    db.query(CatalogCrawl).delete()
+    db.commit()
+    db.close()
+
+
 def main() -> int:
     test_url_parsing()
     test_release_dates()
@@ -5117,6 +5277,9 @@ def main() -> int:
     test_each_copy_carries_its_own_price_trail()
     test_a_refresh_notices_a_copy_has_gone()
     test_a_short_pass_stops_at_its_own_edge()
+    test_a_whole_pass_is_counted_before_it_is_closed()
+    test_a_failing_slice_rests_rather_than_stopping_for_good()
+    test_spare_budget_goes_to_the_longest_unseen()
     test_pruning_survives_a_large_catalogue()
     test_a_recovered_breaker_stops_reporting_itself_as_open()
     test_missing_exchange_rates_are_reported()

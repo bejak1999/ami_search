@@ -439,6 +439,43 @@ def _overdue_seconds(crawl: CatalogCrawl) -> float:
     return (datetime.now(timezone.utc) - due).total_seconds()
 
 
+#: Consecutive failures before a slice is rested rather than retried.
+ERROR_PATIENCE = 5
+#: How long it rests, doubling with each further run of failures, capped.
+ERROR_REST_MINUTES = 15
+ERROR_REST_MAX_MINUTES = 6 * 60
+
+
+def error_rest_seconds(crawl: CatalogCrawl) -> float:
+    """How much longer this slice is being rested, zero if it is not.
+
+    A slice used to be struck off the list outright once it had failed five
+    times in a row - and that is a trap it cannot get out of, because a slice
+    that is never selected can never succeed, and only a success clears the
+    counter. One bad patch of network and the slice stops for good, silently,
+    with the panel still saying "running" from whenever it last did.
+
+    So it rests instead. The rest doubles with each further run of failures,
+    up to a few hours, and then it is tried again.
+    """
+    failures = crawl.consecutive_errors or 0
+    if failures < ERROR_PATIENCE or crawl.last_error_at is None:
+        return 0.0
+    since = crawl.last_error_at
+    if since.tzinfo is None:
+        since = since.replace(tzinfo=timezone.utc)
+    minutes = min(
+        ERROR_REST_MAX_MINUTES,
+        ERROR_REST_MINUTES * (2 ** (failures - ERROR_PATIENCE)),
+    )
+    remaining = (since + timedelta(minutes=minutes)) - datetime.now(timezone.utc)
+    return max(0.0, remaining.total_seconds())
+
+
+def resting_after_errors(crawl: CatalogCrawl) -> bool:
+    return error_rest_seconds(crawl) > 0
+
+
 def _select_crawl(db: Session, provider: str) -> CatalogCrawl | None:
     """Which slice gets the next few minutes of crawling.
 
@@ -457,17 +494,18 @@ def _select_crawl(db: Session, provider: str) -> CatalogCrawl | None:
     only part way through and not yet due keeps going in the gaps, which is
     what the weekly full sweep does with the time the hourly ones leave.
     """
-    candidates = list(
-        db.execute(
+    candidates = [
+        crawl
+        for crawl in db.execute(
             select(CatalogCrawl).where(
                 CatalogCrawl.provider == provider,
                 CatalogCrawl.enabled.is_(True),
-                CatalogCrawl.consecutive_errors < 5,
             )
         )
         .scalars()
         .all()
-    )
+        if not resting_after_errors(crawl)
+    ]
 
     def rank(crawl: CatalogCrawl) -> tuple:
         overdue = _overdue_seconds(crawl)
@@ -517,6 +555,9 @@ def _crawl_slice(
     """One slice's turn, with its requests already attributed to it."""
     provider = get_provider(provider_id)
     pacer = _pacer()
+    #: Whether this slot took the pass to its end. Decided in the loop, acted
+    #: on after the accounting, so the pass is complete before it is written.
+    finished = False
     deadline = time.monotonic() + (budget_seconds or settings.crawler_max_seconds_per_run)
     started = time.monotonic()
 
@@ -593,7 +634,7 @@ def _crawl_slice(
             pass_number=(crawl.cycles_completed or 0) + 1,
         )
         if crawl.cursor_page > limit:
-            _complete_cycle(db, crawl)
+            finished = True
             run.stopped_because = "cycle complete"
             break
 
@@ -608,6 +649,7 @@ def _crawl_slice(
         except ProviderError as exc:
             crawl.consecutive_errors += 1
             crawl.last_error = str(exc)[:500]
+            crawl.last_error_at = utcnow()
             run.errors.append(str(exc))
             db.commit()
             run.stopped_because = "upstream error"
@@ -615,13 +657,14 @@ def _crawl_slice(
 
         crawl.consecutive_errors = 0
         crawl.last_error = None
+        crawl.last_error_at = None
         if result.total:
             crawl.total_results = result.total
             crawl.pages_total = max(1, math.ceil(result.total / max(1, crawl.per_page)))
 
         if not result.items:
             # Ran off the end sooner than the reported total suggested.
-            _complete_cycle(db, crawl)
+            finished = True
             run.stopped_because = "no more results"
             break
 
@@ -646,7 +689,15 @@ def _crawl_slice(
     run.seconds = time.monotonic() - started
 
     _record_throughput(crawl, run.pages, previous_run_at)
+    # This slot is folded in first, and only then is the pass closed. The
+    # other way round - which is how this was written - closed the pass,
+    # cleared the accumulator, and then added the final slot's pages to the
+    # *next* pass. Every logged pass came out short by however much it did
+    # last, which is why a thirty-page short pass was recorded as 13, 22, 26,
+    # anything but thirty.
     _accumulate(crawl, run)
+    if finished:
+        _complete_cycle(db, crawl)
     db.commit()
 
     if run.pages:
@@ -968,7 +1019,7 @@ def progress(db: Session, provider_id: str = "amiami") -> dict:
     # view can say "waiting, third in line" instead of leaving someone to
     # wonder why a slice has not moved for an hour.
     waiting = sorted(
-        (c for c in crawls if c.enabled and (c.consecutive_errors or 0) < 5),
+        (c for c in crawls if c.enabled and not resting_after_errors(c)),
         key=lambda c: (
             _cooldown_remaining(c) > 0,
             c.last_run_at or datetime.min.replace(tzinfo=timezone.utc),
@@ -1042,6 +1093,8 @@ def progress(db: Session, provider_id: str = "amiami") -> dict:
                 # can say "reading the newest 30" rather than showing a bar
                 # that means two different things on alternate runs.
                 "sweeping_all": bool(crawl.sweeping_all) or not (crawl.head_pages or 0),
+                "resting_seconds": round(error_rest_seconds(crawl)),
+                "consecutive_errors": crawl.consecutive_errors or 0,
                 "pages_this_pass": _page_limit(crawl),
                 "full_sweep_interval_days": crawl.full_sweep_interval_days,
             }
