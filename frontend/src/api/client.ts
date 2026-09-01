@@ -236,6 +236,8 @@ export const api = {
     remove: (id: number) => del<MessageResponse>(`/collection/${id}`),
     summary: () => get<MessageResponse>('/collection/summary'),
     importRecords: (records: unknown[]) => post<MessageResponse>('/collection/import', { records }),
+    recheck: (itemIds: number[]) =>
+      post<MessageResponse>('/collection/recheck', { item_ids: itemIds }),
   },
 
   discover: {

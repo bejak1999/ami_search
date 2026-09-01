@@ -38,6 +38,27 @@ export function CollectionPage() {
   })
   const [inStockOnly, setInStockOnly] = useState(false)
 
+  /**
+   * What the last re-check found, by item id.
+   *
+   * Held here rather than folded into the entries, because it is the answer
+   * to a question asked once rather than a property of the item: reloading
+   * the page should not keep claiming a figure "just" got cheaper.
+   */
+  const [drops, setDrops] = useState<Map<number, PriceDrop>>(new Map())
+
+  const recheck = useMutation({
+    mutationFn: (itemIds: number[]) => api.collection.recheck(itemIds),
+    onSuccess: (result) => {
+      const found = (result.detail?.drops ?? []) as PriceDrop[]
+      setDrops(new Map(found.map((d) => [d.item_id, d])))
+      toast.success(result.message)
+      void queryClient.invalidateQueries({ queryKey: ['collection'] })
+    },
+    onError: (error) =>
+      toast.error('Could not check prices', (error as Error).message),
+  })
+
   function chooseView(next: 'list' | 'grid') {
     setView(next)
     try {
@@ -122,25 +143,19 @@ export function CollectionPage() {
             tone="accent"
           />
           <Stat
-            label="Spent"
-            value={money(detail.spent, detail.currency)}
-            sub={`${detail.counts?.owned ?? 0} owned items`}
-            icon="yen"
-          />
-          <Stat
             label="Market value"
             value={money(detail.market_value, detail.currency)}
-            sub="At today's shop prices"
+            sub={`${detail.counts?.owned ?? 0} owned items, at today's shop prices`}
             icon="chart"
           />
-          <Stat
-            label="Unrealised"
-            value={money(detail.unrealized, detail.currency)}
-            sub={detail.unrealized >= 0 ? 'Above what you paid' : 'Below what you paid'}
-            icon={detail.unrealized >= 0 ? 'up' : 'down'}
-            tone={detail.unrealized >= 0 ? 'positive' : 'danger'}
-          />
         </div>
+      )}
+
+      {drops.size > 0 && (
+        <p className="rounded-control border border-positive/30 bg-positive/10 px-3 py-2 text-xs text-positive">
+          {drops.size} of these got cheaper in the last week. The drop is shown beside each
+          price.
+        </p>
       )}
 
       <div className="flex flex-wrap items-center justify-between gap-3">
@@ -151,6 +166,24 @@ export function CollectionPage() {
             onChange={setInStockOnly}
             label="In stock only"
           />
+          {/* Only alongside the in-stock filter, because it is only worth
+              asking about something that can be bought — and it checks
+              exactly what is on screen, so the wait is predictable. */}
+          {inStockOnly && shown.length > 0 && (
+            <button
+              onClick={() => recheck.mutate(shown.map((e) => e.item.id!).filter(Boolean))}
+              disabled={recheck.isPending}
+              className="btn-ghost text-xs"
+              title="Ask the shop about each of these again and show what got cheaper"
+            >
+              {recheck.isPending ? (
+                <Spinner className="h-3 w-3" />
+              ) : (
+                <Icon name="refresh" className="h-3 w-3" />
+              )}
+              {recheck.isPending ? `Checking ${shown.length}…` : 'Check for price drops'}
+            </button>
+          )}
           <SegmentedControl
             value={view}
             onChange={(next) => chooseView(next as 'list' | 'grid')}
@@ -239,6 +272,23 @@ export function CollectionPage() {
                   <span className="font-medium tabular-nums text-ink">
                     {money(entry.item.price, entry.item.currency)}
                   </span>
+                  {/* Beside the price, because that is where the eye already
+                      is when the question is "has this got any cheaper". */}
+                  {entry.item.id && drops.has(entry.item.id) && (
+                    <span
+                      className="rounded-control bg-positive/15 px-1.5 py-0.5 font-medium tabular-nums text-positive"
+                      title={`Was ${money(
+                        drops.get(entry.item.id)!.was,
+                        drops.get(entry.item.id)!.currency,
+                      )}`}
+                    >
+                      {money(
+                        drops.get(entry.item.id)!.difference,
+                        drops.get(entry.item.id)!.currency,
+                      )}{' '}
+                      ({drops.get(entry.item.id)!.percent}%)
+                    </span>
+                  )}
                   {entry.item.landed && (
                     <span className="tabular-nums">
                       {money(entry.item.landed.total, entry.item.landed.currency)} landed
@@ -357,4 +407,16 @@ export function CollectionPage() {
       </Modal>
     </div>
   )
+}
+
+/** One figure that has come down in price since we last looked. */
+type PriceDrop = {
+  item_id: number
+  code: string
+  was: number
+  now: number
+  difference: number
+  percent: number
+  currency: string
+  since: string | null
 }

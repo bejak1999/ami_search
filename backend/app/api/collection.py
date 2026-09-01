@@ -6,18 +6,45 @@ import io
 import json
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
+from datetime import timedelta
+
+from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from ..db import get_db
 from ..deps import current_user, user_cost_profile
-from ..models import CollectionEntry, CollectionStatus, CostProfile, Item, User, utcnow
+from ..models import (
+    CollectionEntry,
+    CollectionStatus,
+    CostProfile,
+    Item,
+    PricePoint,
+    User,
+    utcnow,
+)
 from ..providers import ItemNotFound, ProviderError, detect_provider_from_url, get_provider
 from ..schemas import CollectionCreate, CollectionOut, CollectionUpdate, MessageResponse
 from ..services import catalog, fx, landed_cost
 from .serializers import item_out
 
 router = APIRouter(prefix="/collection", tags=["collection"])
+
+#: How far back a price drop still counts as news. A week: long enough to
+#: catch a markdown made over a weekend, short enough that a drop from a
+#: fortnight ago is not presented as something that just happened.
+RECHECK_WINDOW_DAYS = 7
+
+
+class RecheckRequest(BaseModel):
+    """Which entries to ask the shop about again.
+
+    The ids come from the page rather than being worked out here, so the
+    button checks exactly what is on screen - which is what someone looking
+    at a filtered list expects, and keeps the request count predictable.
+    """
+
+    item_ids: list[int] = Field(default_factory=list, max_length=200)
 
 
 #: Scalar columns copied straight across. The ``item`` relationship is built
@@ -223,6 +250,114 @@ def summary(
             "unrealized": round(market_value - spent, 2),
             "wishlist_landed_total": round(wishlist_landed, 2),
         },
+    )
+
+
+@router.post("/recheck", response_model=MessageResponse)
+def recheck_prices(
+    payload: RecheckRequest,
+    db: Session = Depends(get_db),
+    user: User = Depends(current_user),
+) -> MessageResponse:
+    """Ask the shop about these wishlist entries again, and report the drops.
+
+    The catalogue sweeps get round to a wishlisted figure eventually, but
+    "eventually" is the wrong answer when the question is whether something
+    has just been marked down. This asks now, for the handful on screen.
+
+    A drop means cheaper than it was within the last week - not cheaper than
+    the list price, which for used stock is nearly always true and says
+    nothing about whether anything just happened.
+    """
+    entries = (
+        db.execute(
+            select(CollectionEntry)
+            .where(
+                CollectionEntry.user_id == user.id,
+                CollectionEntry.item_id.in_(payload.item_ids),
+            )
+        )
+        .scalars()
+        .all()
+    )
+    if not entries:
+        return MessageResponse(message="Nothing to check", detail={"checked": 0, "drops": []})
+
+    window_start = utcnow() - timedelta(days=RECHECK_WINDOW_DAYS)
+    drops: list[dict] = []
+    checked = failed = 0
+
+    for entry in entries:
+        item = db.get(Item, entry.item_id)
+        if item is None:
+            continue
+
+        # What it was, before this look changes it.
+        was = item.current_price
+        earlier = db.execute(
+            select(PricePoint.price, PricePoint.recorded_at)
+            .where(
+                PricePoint.item_id == item.id,
+                PricePoint.listing_id.is_(None),
+                PricePoint.price.is_not(None),
+                PricePoint.recorded_at >= window_start,
+            )
+            .order_by(PricePoint.recorded_at.asc())
+            .limit(1)
+        ).first()
+
+        provider = get_provider(item.provider)
+        try:
+            normalized = provider.get_item(item.code)
+        except ItemNotFound:
+            catalog.mark_unavailable(db, item)
+            checked += 1
+            continue
+        except ProviderError:
+            # One shop hiccup must not abandon the rest of the list.
+            failed += 1
+            continue
+
+        item, _ = catalog.upsert_item(db, normalized)
+        checked += 1
+
+        now_price = item.current_price
+        if now_price is None:
+            continue
+
+        # The highest it has been inside the window, so a figure that dipped
+        # and recovered does not read as a bargain.
+        reference = max(
+            [p for p in (was, earlier[0] if earlier else None) if p is not None],
+            default=None,
+        )
+        if reference is None or now_price >= reference:
+            continue
+
+        drops.append(
+            {
+                "item_id": item.id,
+                "code": item.code,
+                "name": item.name,
+                "was": round(reference, 2),
+                "now": round(now_price, 2),
+                "difference": round(now_price - reference, 2),
+                "percent": round((now_price - reference) / reference * 100, 1),
+                "currency": item.currency,
+                "since": (earlier[1] if earlier else None),
+            }
+        )
+
+    db.commit()
+    drops.sort(key=lambda d: d["percent"])
+    return MessageResponse(
+        message=(
+            f"{len(drops)} of {checked} got cheaper"
+            if checked
+            else "Nothing could be checked"
+        ),
+        detail={"checked": checked, "failed": failed, "drops": drops,
+                "window_days": RECHECK_WINDOW_DAYS},
     )
 
 
