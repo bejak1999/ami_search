@@ -9,7 +9,9 @@ from sqlalchemy.orm import Session
 
 from ..db import get_db
 from ..deps import current_user, user_cost_profile
-from ..models import CostProfile, User
+from sqlalchemy import select
+
+from ..models import CostProfile, Item, User
 from ..providers import (
     ItemNotFound,
     ProviderError,
@@ -198,7 +200,17 @@ def resolve(
 
     This is what powers the 'paste an AmiAmi link' box, mirroring how people
     actually find something they want to track.
+
+    Asked of this catalogue first, and only then of the shop. It used to go
+    straight to AmiAmi, which meant that typing the code of a listing AmiAmi
+    had deleted answered "AmiAmi no longer lists this item" - while our own
+    copy of it sat right there, findable by the very same code through the
+    ordinary search box. Keeping what the shop throws away is the point of the
+    application; refusing to show it at the moment someone asks for it by name
+    was the one case where that promise broke.
     """
+    from .serializers import item_out
+
     detected = detect_provider_from_url(payload.input.strip())
     if detected is None:
         raise HTTPException(
@@ -207,6 +219,13 @@ def resolve(
         )
 
     provider_id, code = detected
+
+    held = db.execute(
+        select(Item).where(Item.provider == provider_id, Item.code == code)
+    ).scalar_one_or_none()
+    if held is not None:
+        return item_out(db, held, user=user, profile=profile, with_context=True)
+
     provider = get_provider(provider_id)
     try:
         normalized = provider.get_item(code)
@@ -216,8 +235,6 @@ def resolve(
         raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc
 
     stored, _ = catalog.upsert_item(db, normalized)
-    from .serializers import item_out
-
     return item_out(db, stored, user=user, profile=profile, with_context=True)
 
 

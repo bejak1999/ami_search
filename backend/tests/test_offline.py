@@ -4967,6 +4967,75 @@ def test_failures_are_attributed_and_requests_are_readable() -> None:
     reqlog._recent.clear()
 
 
+def test_a_deleted_listing_is_still_reachable_by_its_code() -> None:
+    print("\n== Typing the code of something the shop deleted opens our copy ==")
+    from app.api.search import resolve
+    from app.db import SessionLocal, init_db
+    from app.models import Condition, CostProfile, Item, Listing, PricePoint, User
+    from app.providers import ItemNotFound
+    from app.schemas import ResolveRequest
+    import app.providers.amiami as amiami_provider
+
+    init_db()
+    db = SessionLocal()
+    db.query(PricePoint).delete()
+    db.query(Listing).delete()
+    db.query(Item).delete()
+    db.commit()
+
+    kept = Item(provider="amiami", code="FIGURE-009234-R",
+                name="Deleted upstream, kept here", condition=Condition.preowned,
+                currency="JPY", in_stock=False, order_closed=True, current_price=4980)
+    db.add(kept)
+    db.commit()
+
+    user = db.query(User).first() or User(email="probe@example.invalid",
+                                          username="probe", password_hash="x")
+    profile = CostProfile(user_id=user.id or 1)
+
+    # The shop's answer for a sold-out pre-owned listing: it is simply gone.
+    original = amiami_provider.AmiAmiProvider.get_item
+
+    def deleted(self, code):  # noqa: ANN001
+        raise ItemNotFound("AmiAmi no longer lists this item")
+
+    amiami_provider.AmiAmiProvider.get_item = deleted
+    try:
+        # The search box treats anything shaped like a product code as a
+        # request to open that product. It used to ask the shop and stop
+        # there, so typing the code of a listing AmiAmi had deleted answered
+        # "AmiAmi no longer lists this item" - while our own copy sat right
+        # there, findable by the very same code through the ordinary search.
+        out = resolve(ResolveRequest(input="FIGURE-009234-R"), db=db, user=user,
+                      profile=profile)
+        check("the code opens our copy", out.code == "FIGURE-009234-R", out.code)
+        check("with what we recorded", out.name.startswith("Deleted upstream"))
+        check("and it knows the shop dropped it", out.order_closed)
+
+        # A full shop URL for the same product behaves the same way.
+        out = resolve(
+            ResolveRequest(input="https://www.amiami.com/eng/detail/?gcode=FIGURE-009234-R"),
+            db=db, user=user, profile=profile,
+        )
+        check("a pasted link works too", out.code == "FIGURE-009234-R")
+
+        # Something we have never seen still says so rather than inventing a
+        # row: the fallback is to our catalogue, not to silence.
+        raised = None
+        try:
+            resolve(ResolveRequest(input="FIGURE-999999-R"), db=db, user=user, profile=profile)
+        except Exception as exc:  # noqa: BLE001
+            raised = exc
+        check("an unknown code is still a miss", getattr(raised, "status_code", None) == 404,
+              raised)
+    finally:
+        amiami_provider.AmiAmiProvider.get_item = original
+
+    db.query(Item).delete()
+    db.commit()
+    db.close()
+
+
 def main() -> int:
     test_url_parsing()
     test_release_dates()
@@ -5027,6 +5096,7 @@ def main() -> int:
     test_the_amiami_budget_is_shared_out_and_used()
     test_the_pacer_follows_the_shared_rate()
     test_failures_are_attributed_and_requests_are_readable()
+    test_a_deleted_listing_is_still_reachable_by_its_code()
     test_photo_counts_distinguish_known_from_held()
     test_prefetch_works_through_its_backlog()
     test_the_photo_queue_is_reached_however_full_the_cache_is()

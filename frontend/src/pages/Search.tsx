@@ -271,8 +271,17 @@ export function SearchPage() {
   const resolve = useMutation({
     mutationFn: (input: string) => api.search.resolve(input),
     onSuccess: (item) => item.id && navigate(`/item/${item.id}`),
-    onError: (error) =>
-      toast.error('Could not open that link', error instanceof ApiError ? error.message : undefined),
+    // Falling back to an ordinary search rather than stopping at a toast.
+    // A code we have never seen is a reasonable thing to type - a partial
+    // one, a typo, a code from somewhere else - and the search box should
+    // answer it as a search rather than as a dead end.
+    onError: (error, input) => {
+      toast.error(
+        'No such product code',
+        error instanceof ApiError ? error.message : undefined,
+      )
+      navigateTo({ filters: { ...draft, q: input }, page: 1 }, true)
+    },
   })
 
   function submit(event?: React.FormEvent) {
