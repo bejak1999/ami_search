@@ -60,6 +60,8 @@ class ShelfRun:
     delisted: int = 0
     errors: int = 0
     took_ms: int = 0
+    #: How often it stood aside for a watch and picked up again.
+    interruptions: int = 0
     stopped_because: str = ""
 
     def as_dict(self) -> dict:
@@ -281,7 +283,7 @@ def run_once(
         run.stopped_because = "disabled"
         return run
 
-    from .crawler import watches_are_due
+    from .crawler import _wait_for_watches, watches_are_due
 
     provider = get_provider(provider_id)
     pacer = _pacer()
@@ -289,7 +291,13 @@ def run_once(
     started = time.monotonic()
 
     # Enough candidates to fill the budget even if every fetch is quick.
-    headroom = int(settings.shelf_requests_per_minute * 4) + 10
+    #
+    # Sized from the pool this job draws on, not from the old per-job setting.
+    # That setting still said ten a minute, so a run fetched fifty candidates
+    # and then sat there having used half its four minutes - the sampler was
+    # not slow, it had run out of things to look at.
+    seconds = budget_seconds or settings.shelf_max_seconds_per_run
+    headroom = int(budget.total_per_minute() * (seconds / 60.0)) + 10
     candidates = due_items(db, provider_id, headroom)
 
     # Nothing due, and the budget is going spare. Rather than idling, work
@@ -343,9 +351,16 @@ def run_once(
             run.stopped_because = "time budget reached"
             break
         if watches_are_due(db):
-            # Alerts are the point of the application; this is groundwork.
-            run.stopped_because = "yielded to a due watch"
-            break
+            # Alerts are the point of the application; this is groundwork, so
+            # the watch goes first. But ending the run here forfeited whatever
+            # was left of four minutes, and watches poll every minute or two -
+            # so nearly every run died in its first seconds. Stand aside and
+            # pick up again, exactly as the crawler does.
+            run.interruptions += 1
+            if not _wait_for_watches(db, deadline):
+                run.stopped_because = "time budget reached"
+                break
+            continue
 
         if not first:
             pacer.sleep()
@@ -474,5 +489,9 @@ def coverage(db: Session, provider: str = "amiami") -> dict:
         "listings_total": listings_total,
         "listings_live": listings_live,
         "listings_departed": listings_total - listings_live,
-        "requests_per_minute": settings.shelf_requests_per_minute,
+        # What it may actually use right now, not the per-job setting it no
+        # longer reads. The panel was reporting ten a minute while the job
+        # was drawing on a shared pool of twenty-four.
+        "requests_per_minute": round(budget.rate_for("shelf"), 1),
+        "budget_per_minute": budget.total_per_minute(),
     }

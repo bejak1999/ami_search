@@ -80,7 +80,13 @@ class Settings(BaseSettings):
     #: rides along on detail fetches that happen for other reasons anyway.
     shelf_tracking_enabled: bool = True
     shelf_run_interval_minutes: int = 10
-    shelf_max_seconds_per_run: int = 240
+    #: Nearly the whole interval, leaving a minute of margin so a slow run
+    #: cannot collide with the next. It was four minutes in every ten, which
+    #: capped the sampler at forty per cent of whatever rate it was given -
+    #: and with several thousand products never yet opened, the idle six
+    #: minutes were not protecting anything. The shared pool caps the rate,
+    #: so running for longer costs the shop nothing extra.
+    shelf_max_seconds_per_run: int = 540
     shelf_requests_per_minute: float = 10.0
     #: How often each tier gets looked at. Hot is the handful of products
     #: someone is actually waiting on, where the tight bound is worth paying

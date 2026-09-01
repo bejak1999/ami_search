@@ -5357,6 +5357,76 @@ def test_opening_an_item_records_its_whole_gallery() -> None:
     db.close()
 
 
+def test_the_sampler_can_actually_spend_its_budget() -> None:
+    print("\n== The shelf sampler is not starved by its own arithmetic ==")
+    from app.config import settings
+    from app.db import SessionLocal, init_db
+    from app.models import Condition, Item
+    from app.services import budget, shelfwatch
+
+    # Three separate things were holding it to 3.2 requests a minute while
+    # several thousand products had never been looked at once.
+
+    # One: it asked for candidates sized from the old per-job setting of ten
+    # a minute, so a four-minute run fetched fifty and then sat there having
+    # used half its time. It was not slow; it had run out of things to read.
+    seconds = settings.shelf_max_seconds_per_run
+    headroom = int(budget.total_per_minute() * (seconds / 60.0)) + 10
+    possible = budget.total_per_minute() * (seconds / 60.0)
+    check("it now asks for enough to fill the run", headroom >= possible, (headroom, possible))
+    check("which is far more than the old fifty", headroom > 50, headroom)
+
+    # Two: it ran for four minutes in every ten, capping it at forty per cent
+    # of whatever rate it was given, however much work was waiting.
+    duty = seconds / 60 / settings.shelf_run_interval_minutes
+    check("it now works most of its interval", duty > 0.8, round(duty, 2))
+    check("with margin before the next run", duty < 1.0, round(duty, 2))
+
+    # Three: the panel quoted the per-job setting it no longer reads.
+    init_db()
+    db = SessionLocal()
+    stats = shelfwatch.coverage(db, "amiami")
+    check(
+        "the panel quotes the rate it may actually use",
+        stats["requests_per_minute"] == round(budget.rate_for("shelf"), 1),
+        (stats["requests_per_minute"], budget.rate_for("shelf")),
+    )
+
+    # And what it adds up to.
+    alone = budget.rate_for("shelf") * duty
+    check(f"alone it averages {alone:.0f}/min against the old 4", alone > 15, alone)
+    with budget.claim("catalogue"):
+        beside = budget.rate_for("shelf") * duty
+    check("and still beats it while a sweep runs", beside > 4.0, beside)
+
+    # The order of attention is unchanged: something never opened comes before
+    # something merely overdue, because the second look is what unlocks an
+    # estimate at all.
+    db.query(Item).delete()
+    db.commit()
+    now = datetime.now(timezone.utc)
+    for n in range(3):
+        db.add(Item(provider="amiami", code=f"NEW-{n}", name=f"never opened {n}",
+                    condition=Condition.preowned, currency="JPY",
+                    order_closed=False, shelf_due_at=None))
+        db.add(Item(provider="amiami", code=f"OLD-{n}", name=f"overdue {n}",
+                    condition=Condition.preowned, currency="JPY",
+                    order_closed=False, shelf_due_at=now - timedelta(days=n + 1)))
+        db.add(Item(provider="amiami", code=f"FUT-{n}", name=f"not due {n}",
+                    condition=Condition.preowned, currency="JPY",
+                    order_closed=False, shelf_due_at=now + timedelta(days=1)))
+    db.commit()
+
+    picked = [i.code for i in shelfwatch.due_items(db, "amiami", 20)]
+    check("never opened comes first", all(c.startswith("NEW") for c in picked[:3]), picked)
+    check("then the longest overdue", picked[3] == "OLD-2", picked)
+    check("and nothing that is not due", not any(c.startswith("FUT") for c in picked), picked)
+
+    db.query(Item).delete()
+    db.commit()
+    db.close()
+
+
 def main() -> int:
     test_url_parsing()
     test_release_dates()
@@ -5421,6 +5491,7 @@ def main() -> int:
     test_every_page_of_the_catalogue_can_be_reached()
     test_every_scheduled_job_actually_runs()
     test_opening_an_item_records_its_whole_gallery()
+    test_the_sampler_can_actually_spend_its_budget()
     test_photo_counts_distinguish_known_from_held()
     test_prefetch_works_through_its_backlog()
     test_the_photo_queue_is_reached_however_full_the_cache_is()
