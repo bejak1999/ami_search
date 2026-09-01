@@ -1,0 +1,33 @@
+Ordering: 'preowned', first 30 pages
+Over 24.7 hours, with 22 snapshot(s) of that head
+  10,291 listings at the start, 10,207 at the end
+  475 arrived, 559 disappeared, 749 changed price range
+
+Arrivals: 457 of 475 appeared in the head (96%)
+    that is 6.55x what 1,500 random slots would have caught
+    within the first  1 page(s):    28 of 475 (6%)
+    within the first  2 page(s):    48 of 475 (10%)
+    within the first  5 page(s):   106 of 475 (22%)
+    within the first 10 page(s):   192 of 475 (40%)
+    within the first 20 page(s):   420 of 475 (88%)
+    within the first 30 page(s):   457 of 475 (96%)
+
+Price-range changes: 245 of 749 appeared in the head (33%)
+    that is 2.23x what 1,500 random slots would have caught
+    within the first  1 page(s):    21 of 749 (3%)
+    within the first  2 page(s):    31 of 749 (4%)
+    within the first  5 page(s):    57 of 749 (8%)
+    within the first 10 page(s):   106 of 749 (14%)
+    within the first 20 page(s):   193 of 749 (26%)
+    within the first 30 page(s):   245 of 749 (33%)
+
+Reading it
+  Above 1.00x the ordering is doing something; at or below it, the head is
+  no better than reading any other part of the slice, and only the full
+  sweep is finding anything.
+
+  One caveat nothing can escape: a copy that appeared and sold between two
+  snapshots is invisible to the head and to the closing enumeration alike,
+  so it counts in neither column.
+
+Drücken Sie eine beliebige Taste . . .

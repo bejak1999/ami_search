@@ -259,6 +259,28 @@ def upsert_item(db: Session, normalized: NormalizedItem, commit: bool = True) ->
             observed_at=item.last_detail_fetch_at,
             sold_out=nothing_buyable,
         )
+    elif nothing_buyable and (item.listing_count or 0) > 0:
+        # A list row carries no copies, so it cannot say which of them went.
+        # But the shop saying the product cannot be bought is the same
+        # statement reconcile acts on when a detail response says it, and the
+        # sweep reaches a sold-out product long before the sampler does: it
+        # reads dozens of products per request where the sampler reads one.
+        #
+        # Leaving this out was a leak with no bottom. The sweep would close
+        # the product, the sampler skips closed products, and nothing ever
+        # looked again - so every copy of it stayed recorded as on sale for
+        # ever. Departures became a trickle while "on sale now" only climbed.
+        #
+        # Gated on the copy count so this costs nothing for the overwhelming
+        # majority of rows: a product with no copies recorded has nothing to
+        # close, and reconcile would still rewrite its counters every time
+        # the sweep passed a sold-out listing.
+        from . import shelflife
+
+        db.flush()
+        shelflife.reconcile(
+            db, item, [], observed_at=item.last_seen_at, sold_out=True
+        )
 
     if commit:
         db.commit()
@@ -316,9 +338,18 @@ def mark_unavailable(db: Session, item: Item, commit: bool = True) -> bool:
     On AmiAmi a sold-out pre-owned listing is deleted rather than flagged, so
     a 'not found' response is real information and belongs in the history.
     """
-    if not item.in_stock and item.order_closed:
-        return False
     from . import shelflife
+
+    if not item.in_stock and item.order_closed:
+        # Already known to be gone, so there is no new price point to write.
+        # Its copies are another matter: the catalogue sweep flags a product
+        # from a list page, where there are no copies to reconcile, so a
+        # product could be closed with every one of its copies still recorded
+        # as on sale. Closing them is idempotent and costs a query.
+        closed = shelflife.close_all(db, item, observed_at=item.last_seen_at)
+        if closed and commit:
+            db.commit()
+        return False
 
     item.in_stock = False
     item.order_closed = True

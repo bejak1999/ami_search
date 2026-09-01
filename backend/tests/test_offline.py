@@ -3740,8 +3740,13 @@ def test_daily_recap_counts_copies_not_products() -> None:
 
     now = datetime.now(timezone.utc)
     for n in range(5):
+        # appeared_after is the look before the one that found it, so these are
+        # datable arrivals rather than copies discovered under a product nobody
+        # had ever opened - which the recap counts in its own column.
         db.add(Listing(item_id=item.id, code=f"R-1-A{n}", currency="JPY",
-                       status=ListingStatus.live, first_seen_at=now - timedelta(days=1),
+                       status=ListingStatus.live,
+                       appeared_after=now - timedelta(days=2),
+                       first_seen_at=now - timedelta(days=1),
                        last_seen_at=now))
     for n in range(3):
         db.add(Listing(item_id=item.id, code=f"R-1-S{n}", currency="JPY",
@@ -4933,7 +4938,12 @@ def test_the_pacer_follows_the_shared_rate() -> None:
     # Against the gap the rate actually asks for, not against mean_delay -
     # that is the base the breaks are piled on top of, so the achieved mean
     # is deliberately larger than it.
-    target_gap = 60.0 / shared.current_rate
+    #
+    # Including the overnight slowdown, which is a deliberate 2.5x between
+    # 01:00 and 07:00. Leaving it out made this test pass by day and fail by
+    # night: the pacer was behaving exactly as designed and the expectation
+    # was the thing that was wrong.
+    target_gap = 60.0 / shared.current_rate * shared._diurnal_factor()
     achieved = sum(delays) / len(delays)
     check(
         "and the achieved pace lands near the rate asked for",
@@ -5127,10 +5137,10 @@ def test_a_failing_slice_rests_rather_than_stopping_for_good() -> None:
 
 
 def test_spare_budget_goes_to_the_longest_unseen() -> None:
-    print("\n== Spare capacity goes to whatever has waited longest ==")
+    print("\n== Every run keeps room for a second look ==")
     from app.db import SessionLocal, init_db
     from app.models import AppSetting, Condition, Item
-    from app.services import shelfwatch
+    from app.services import budget, shelfwatch
 
     init_db()
     db = SessionLocal()
@@ -5139,44 +5149,239 @@ def test_spare_budget_goes_to_the_longest_unseen() -> None:
     db.commit()
 
     now = datetime.now(timezone.utc)
-    # Nothing is due: the tiers have everything covered for the next few hours.
-    for n in range(20):
-        db.add(Item(provider="amiami", code=f"P-{n}", name=f"Figure {n}",
-                    condition=Condition.preowned, currency="JPY", order_closed=False,
-                    shelf_due_at=now + timedelta(hours=5),
+    # A realistic shape mid-discovery: a large backlog of products nobody has
+    # opened, and a smaller set already examined once and long overdue.
+    for n in range(400):
+        db.add(Item(provider="amiami", code=f"NEW-{n}", name=f"Never seen {n}",
+                    condition=Condition.preowned, currency="JPY",
+                    order_closed=False, shelf_due_at=None))
+    for n in range(50):
+        db.add(Item(provider="amiami", code=f"OLD-{n}", name=f"Seen once {n}",
+                    condition=Condition.preowned, currency="JPY",
+                    order_closed=False, shelf_due_at=now - timedelta(hours=3),
                     last_detail_fetch_at=now - timedelta(days=n + 2)))
     db.commit()
 
-    check("nothing is due", due := len(shelfwatch.due_items(db, "amiami", 50)) == 0, due)
-
-    # The tiers would otherwise re-read whatever is hot for the twentieth time
-    # before a quiet product is looked at once. With budget going spare, it is
-    # worth more spent on the least recently examined.
-    picked = shelfwatch.sweep_candidates(db, "amiami", 5, now - timedelta(hours=24))
-    check("five candidates come back", len(picked) == 5, len(picked))
-    ages = [(now - p.last_detail_fetch_at.replace(tzinfo=timezone.utc)).days for p in picked]
+    # A first look can only add copies to the record. Only a second look can
+    # see one leave - so a job that never takes a second look can report
+    # arrivals and nothing else, however fast it runs.
+    revisits = shelfwatch.revisit_candidates(db, "amiami", 10)
+    check("revisits come back", len(revisits) == 10, len(revisits))
+    check(
+        "and never include a product nobody has opened",
+        all(item.last_detail_fetch_at is not None for item in revisits),
+    )
+    ages = [(now - r.last_detail_fetch_at.replace(tzinfo=timezone.utc)).days
+            for r in revisits]
     check("the longest unseen come first", ages == sorted(ages, reverse=True), ages)
-    check("and they are genuinely old", min(ages) > 15, ages)
 
-    # A product looked at recently is not dragged forward.
-    fresh = db.query(Item).filter_by(code="P-0").one()
-    fresh.last_detail_fetch_at = now - timedelta(minutes=5)
-    db.commit()
-    check("something just examined is left alone",
-          "P-0" not in [p.code for p in
-                        shelfwatch.sweep_candidates(db, "amiami", 20,
-                                                    now - timedelta(hours=24))])
+    # The regression this replaces: the old top-up only ran when fewer than a
+    # quarter of the wanted candidates were due, which on a catalogue of this
+    # shape is never true. It never executed once, and the query behind it
+    # sorted never-examined first anyway, so it could not have produced a
+    # revisit even when it did.
+    headroom = int(budget.total_per_minute() * 9) + 10
+    reserved = int(headroom * shelfwatch.REVISIT_SHARE)
+    due = shelfwatch.due_items(db, "amiami", headroom - reserved)
+    check("the due list is saturated by first looks",
+          all(i.last_detail_fetch_at is None for i in due), len(due))
 
-    # Once a day, not a second polling loop.
-    check("no sweep is recorded to start with", shelfwatch._last_sweep_at(db) is None)
-    shelfwatch._note_sweep(db)
-    db.commit()
-    marked = shelfwatch._last_sweep_at(db)
-    check("one is recorded when it runs", marked is not None)
-    check("and it is recent", (now - marked).total_seconds() < 60)
+    already = {i.id for i in due}
+    kept = [i for i in shelfwatch.revisit_candidates(db, "amiami", reserved + len(already))
+            if i.id not in already][:reserved]
+    check("a share is still kept for second looks", len(kept) > 0, len(kept))
+    check("and it is the share we asked for",
+          len(kept) == min(reserved, 50), (len(kept), reserved))
 
     db.query(AppSetting).delete()
     db.query(Item).delete()
+    db.commit()
+    db.close()
+
+
+def test_a_sold_out_product_lets_go_of_its_copies() -> None:
+    print("\n== Copies of a sold-out product stop counting as on sale ==")
+    from app.db import SessionLocal, init_db
+    from app.models import (
+        Condition, Item, Listing, ListingOutcome, ListingStatus, PricePoint,
+    )
+    from app.providers.base import NormalizedItem
+    from app.services import catalog, shelfwatch
+
+    init_db()
+    db = SessionLocal()
+    for model in (PricePoint, Listing, Item):
+        db.query(model).delete()
+    db.commit()
+
+    def copy(code, price):
+        return {"code": code, "price": price, "condition": "Item:B Box:B",
+                "item_grade": "B", "box_grade": "B", "note": None}
+
+    def detail(variants, in_stock=True, closed=False):
+        return NormalizedItem(
+            provider="amiami", code="SO-1", name="Used figure",
+            url="https://www.amiami.com/eng/detail/?gcode=SO-1", currency="JPY",
+            price=min((v["price"] for v in variants), default=None),
+            condition="preowned", in_stock=in_stock, order_closed=closed,
+            detail_loaded=True, variants=variants)
+
+    def from_a_list_page(in_stock=True, closed=False):
+        """What a catalogue sweep sees: the product, and no copies at all."""
+        return NormalizedItem(
+            provider="amiami", code="SO-1", name="Used figure",
+            url="https://www.amiami.com/eng/detail/?gcode=SO-1", currency="JPY",
+            price=None, condition="preowned", in_stock=in_stock,
+            order_closed=closed, detail_loaded=False)
+
+    def live():
+        return db.query(Listing).filter_by(status=ListingStatus.live).count()
+
+    item, _ = catalog.upsert_item(db, detail(
+        [copy("SO-1-R1", 5000), copy("SO-1-R2", 6000), copy("SO-1-R3", 7000)]))
+    db.commit()
+    check("three copies are on the shelf", live() == 3, live())
+
+    # They sell. The catalogue sweep gets there first - it reads dozens of
+    # products per request where the sampler reads one - and a list page has
+    # no copies in it, so nothing used to reconcile them. The sampler then
+    # skips the product for ever because it is closed, so the copies stayed
+    # recorded as on sale with nothing left that could ever look again.
+    catalog.upsert_item(db, from_a_list_page(in_stock=False, closed=True))
+    db.commit()
+    db.expire_all()
+    item = db.query(Item).filter_by(code="SO-1").one()
+    check("the sweep closes them too", live() == 0, live())
+    check("and the sampler was never going to come back",
+          not any(c.id == item.id for c in shelfwatch.due_items(db, "amiami", 100)))
+
+    # And they are recorded as sold, not hedged as a withdrawal. The batch
+    # rule exists for copies vanishing while the product stays on sale, where
+    # several at once is suspicious. Here the shop has said why they are gone.
+    outcomes = {row.outcome for row in db.query(Listing).all()}
+    check("all three count as sold", outcomes == {ListingOutcome.sold}, outcomes)
+
+    # A 404 on a product already flagged closed must still release its copies:
+    # that is the other way in, and it used to return early and do nothing.
+    db.query(Listing).delete()
+    db.query(Item).delete()
+    db.commit()
+    item, _ = catalog.upsert_item(db, detail([copy("SO-2-R1", 5000)]))
+    item.code = "SO-2"
+    item.in_stock = False
+    item.order_closed = True
+    db.commit()
+    check("a copy is stranded under a closed product", live() == 1, live())
+    catalog.mark_unavailable(db, item)
+    db.commit()
+    check("asking again releases it", live() == 0, live())
+
+    # Both ends are fixed, but copies stranded before the fix stay stranded
+    # until something closes them - and they are counted in "on sale now" and
+    # missing from every departure figure. Startup repairs them once.
+    from app.db import close_stranded_listings
+
+    db.query(Listing).delete()
+    db.query(Item).delete()
+    db.commit()
+    stranded = Item(provider="amiami", code="SO-3", name="Long gone",
+                    condition=Condition.preowned, currency="JPY",
+                    in_stock=False, order_closed=True, listing_count=2,
+                    last_seen_at=datetime.now(timezone.utc) - timedelta(days=4))
+    selling = Item(provider="amiami", code="SO-4", name="Still selling",
+                   condition=Condition.preowned, currency="JPY",
+                   in_stock=True, order_closed=False, listing_count=1)
+    db.add_all([stranded, selling])
+    db.flush()
+    for n in range(2):
+        db.add(Listing(item_id=stranded.id, provider="amiami", code=f"SO-3-R{n}",
+                       currency="JPY", status=ListingStatus.live))
+    db.add(Listing(item_id=selling.id, provider="amiami", code="SO-4-R0",
+                   currency="JPY", status=ListingStatus.live))
+    db.commit()
+
+    check("three copies look live beforehand", live() == 3, live())
+    repaired = close_stranded_listings()
+    db.expire_all()
+    check("the repair closes the stranded ones", repaired == 2, repaired)
+    check("and leaves the ones still on sale", live() == 1, live())
+    check(
+        "recorded as unknown, because a repair must not invent a sale on a date "
+        "nobody watched",
+        db.query(Listing).filter_by(code="SO-3-R0").one().outcome
+        == ListingOutcome.unknown,
+    )
+    check("and running it again does nothing", close_stranded_listings() == 0)
+
+    for model in (PricePoint, Listing, Item):
+        db.query(model).delete()
+    db.commit()
+    db.close()
+
+
+def test_the_daily_panel_separates_finding_from_arriving() -> None:
+    print("\n== Discovering a copy is not the shop taking one in ==")
+    from app.db import SessionLocal, init_db
+    from app.models import (
+        Condition, Item, Listing, ListingOutcome, ListingStatus, PricePoint,
+    )
+    from app.services import shelflife
+
+    init_db()
+    db = SessionLocal()
+    for model in (PricePoint, Listing, Item):
+        db.query(model).delete()
+    db.commit()
+
+    now = datetime.now(timezone.utc)
+    item = Item(provider="amiami", code="D-1", name="Figure",
+                condition=Condition.preowned, currency="JPY")
+    db.add(item)
+    db.flush()
+
+    # Copies under a product we had never opened. We have no idea when these
+    # reached the shop - possibly a year ago - only when we first looked.
+    for n in range(5):
+        db.add(Listing(item_id=item.id, provider="amiami", code=f"D-1-R{n}",
+                       price=1000, last_price=1000, currency="JPY",
+                       appeared_after=None, first_seen_at=now - timedelta(hours=2),
+                       last_seen_at=now, status=ListingStatus.live))
+    # And copies that turned up between two looks, which is a real arrival.
+    for n in range(5, 7):
+        db.add(Listing(item_id=item.id, provider="amiami", code=f"D-1-R{n}",
+                       price=1000, last_price=1000, currency="JPY",
+                       appeared_after=now - timedelta(days=1),
+                       first_seen_at=now - timedelta(hours=2),
+                       last_seen_at=now, status=ListingStatus.live))
+    db.commit()
+
+    recap = shelflife.daily_recap(db, days=3)
+    today = [r for r in recap["days"] if r["date"] == now.date().isoformat()][0]
+    check("the datable ones count as arrivals", today["arrived"] == 2, today["arrived"])
+    check("the rest count as discoveries", today["discovered"] == 5, today["discovered"])
+
+    # Counting them together was what made the panel a chart of our own
+    # crawler: every copy ever seen showed as an arrival, so the column summed
+    # to the live count and the shop appeared to take in thousands a day
+    # while selling none.
+    check("and they are not silently added together",
+          today["arrived"] != today["arrived"] + today["discovered"])
+
+    # A delisting is the strongest departure signal there is - AmiAmi deletes
+    # a pre-owned listing when it sells rather than flagging it - so it counts
+    # as a sale rather than sitting in the column meant for the doubtful ones.
+    row = db.query(Listing).filter_by(code="D-1-R0").one()
+    row.status = ListingStatus.gone
+    row.outcome = ListingOutcome.delisted
+    row.vanished_before = now
+    db.commit()
+    recap = shelflife.daily_recap(db, days=3)
+    today = [r for r in recap["days"] if r["date"] == now.date().isoformat()][0]
+    check("a delisting counts as sold", today["sold"] == 1, today)
+    check("and not as withdrawn", today["withdrawn"] == 0, today)
+
+    for model in (PricePoint, Listing, Item):
+        db.query(model).delete()
     db.commit()
     db.close()
 
@@ -5723,6 +5928,8 @@ def main() -> int:
     test_a_whole_pass_is_counted_before_it_is_closed()
     test_a_failing_slice_rests_rather_than_stopping_for_good()
     test_spare_budget_goes_to_the_longest_unseen()
+    test_a_sold_out_product_lets_go_of_its_copies()
+    test_the_daily_panel_separates_finding_from_arriving()
     test_pruning_survives_a_large_catalogue()
     test_a_recovered_breaker_stops_reporting_itself_as_open()
     test_missing_exchange_rates_are_reported()

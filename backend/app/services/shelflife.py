@@ -41,6 +41,7 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from ..models import (
+    Condition,
     Item,
     Listing,
     ListingOutcome,
@@ -455,8 +456,16 @@ def reconcile(
     if missing:
         # Every copy going at once is as easily a shop-side withdrawal as that
         # many simultaneous sales, so it is recorded as the weaker claim.
+        #
+        # Unless the shop has said why. When the product itself reports that
+        # there is nothing left to buy, the copies being gone is not a
+        # mystery to be hedged about - that is what selling out looks like,
+        # and hedging it filed ordinary sell-outs under "withdrawn" and left
+        # the sold column reading as a trickle.
         wholesale = (
-            len(missing) >= BATCH_WITHDRAWAL_SIZE and len(missing) == len(live_before)
+            not sold_out
+            and len(missing) >= BATCH_WITHDRAWAL_SIZE
+            and len(missing) == len(live_before)
         )
         outcome = ListingOutcome.withdrawn if wholesale else ListingOutcome.sold
         for listing in missing:
@@ -809,19 +818,35 @@ def daily_recap(db: Session, days: int = 14) -> dict:
         buckets[key] = {
             "date": key,
             "arrived": 0,
+            "discovered": 0,
             "sold": 0,
             "withdrawn": 0,
             "gone": 0,
             "net": 0,
         }
 
+    # Split by whether we can date the arrival at all.
+    #
+    # ``first_seen_at`` is our first look, not the shop's intake. For a copy
+    # under a product nobody had ever opened, the two are unrelated - it may
+    # have been sitting there for a year. ``appeared_after`` is the previous
+    # look at that product, so it exists only when there was one, and only
+    # then is "arrived on this day" a claim about the shop rather than about
+    # our own crawl progress.
+    #
+    # Counting them together made the panel a chart of the crawler. Every
+    # copy ever discovered showed as an arrival, so the arrivals column
+    # summed to the live count and the shop appeared to take in thousands a
+    # day while selling none.
     arrivals = db.execute(
-        select(Listing.first_seen_at).where(Listing.first_seen_at >= since)
-    ).scalars()
-    for moment in arrivals:
+        select(Listing.first_seen_at, Listing.appeared_after).where(
+            Listing.first_seen_at >= since
+        )
+    ).all()
+    for moment, after in arrivals:
         key = day_of(moment)
         if key in buckets:
-            buckets[key]["arrived"] += 1
+            buckets[key]["arrived" if after is not None else "discovered"] += 1
 
     departures = db.execute(
         select(Listing.vanished_before, Listing.outcome).where(
@@ -833,7 +858,12 @@ def daily_recap(db: Session, days: int = 14) -> dict:
         if key not in buckets:
             continue
         buckets[key]["gone"] += 1
-        if outcome == ListingOutcome.sold:
+        # A delisting counts as a sale. When AmiAmi answers "no such item" for
+        # a pre-owned product, the copies went because somebody bought them -
+        # that is the whole reason the listing is deleted rather than flagged,
+        # and it is the strongest departure signal we get. Filing it under
+        # "withdrawn" put our best evidence in the column meant for our worst.
+        if outcome in (ListingOutcome.sold, ListingOutcome.delisted):
             buckets[key]["sold"] += 1
         else:
             buckets[key]["withdrawn"] += 1
@@ -855,6 +885,11 @@ def daily_recap(db: Session, days: int = 14) -> dict:
     typical_in = (
         round(sum(r["arrived"] for r in complete) / len(complete), 1) if complete else 0.0
     )
+    typical_found = (
+        round(sum(r["discovered"] for r in complete) / len(complete), 1)
+        if complete
+        else 0.0
+    )
     typical_out = (
         round(sum(r["gone"] for r in complete) / len(complete), 1) if complete else 0.0
     )
@@ -863,7 +898,21 @@ def daily_recap(db: Session, days: int = 14) -> dict:
         "days": rows,
         "live_listings": live,
         "typical_arrivals": typical_in,
+        "typical_discoveries": typical_found,
         "typical_departures": typical_out,
+        # Products we have never opened. While this is large the discovered
+        # column is mostly backlog rather than news, and the arrivals column
+        # is the only one worth reading as a rate.
+        "products_unexamined": int(
+            db.execute(
+                select(func.count(Item.id)).where(
+                    Item.condition == Condition.preowned,
+                    Item.order_closed.is_(False),
+                    Item.last_detail_fetch_at.is_(None),
+                )
+            ).scalar_one()
+            or 0
+        ),
         "tracking_since": db.execute(
             select(func.min(Listing.first_seen_at))
         ).scalar_one_or_none(),

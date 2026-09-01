@@ -92,6 +92,12 @@ def init_db() -> None:
     eased = ease_quiet_slices()
     if eased:
         log.info("Eased the re-read interval on %s slow-moving slice(s)", eased)
+    stranded = close_stranded_listings()
+    if stranded:
+        log.info(
+            "Closed %s copy(ies) of sold-out products that were still counted as on sale",
+            stranded,
+        )
     rebuilt = rebuild_price_aggregates()
     if rebuilt:
         log.info("Recomputed the price range on %s item(s) from product-level points", rebuilt)
@@ -176,6 +182,56 @@ def backfill_figure_codes() -> int:
             .values(figure_code=derived)
         )
     return pending
+
+
+def close_stranded_listings() -> int:
+    """Close copies of products the shop has already stopped selling.
+
+    A product that sells out is usually noticed by the catalogue sweep first,
+    because a list page carries dozens of products where a detail page
+    carries one. List pages have no copies in them, so nothing reconciled
+    them, and the sampler skips products already marked closed - so every
+    copy of a sold-out product stayed recorded as being on sale, for ever.
+
+    The leak is fixed at both ends now, but the copies already stranded stay
+    stranded until something closes them, and they are counted in "on sale
+    now" and missing from every departure figure.
+
+    ``vanished_before`` is set to the last time we saw the product, which is
+    the truth: we know they were gone by then and cannot say when they went.
+    They are recorded as ``unknown`` rather than sold for the same reason -
+    this is a repair, and a repair should not manufacture thousands of sales
+    on a date nobody observed.
+    """
+    from . import models
+
+    closed = 0
+    with session_scope() as db:
+        try:
+            stranded = (
+                db.query(models.Item)
+                .join(models.Listing, models.Listing.item_id == models.Item.id)
+                .filter(
+                    models.Item.order_closed.is_(True),
+                    models.Listing.status == models.ListingStatus.live,
+                )
+                .distinct()
+                .all()
+            )
+        except Exception:  # pragma: no cover - tables may predate this
+            return 0
+
+        for item in stranded:
+            when = item.last_seen_at or models.utcnow()
+            for listing in item.listings:
+                if listing.status != models.ListingStatus.live:
+                    continue
+                listing.status = models.ListingStatus.gone
+                listing.vanished_before = when
+                listing.outcome = models.ListingOutcome.unknown
+                closed += 1
+            item.listing_count = 0
+    return closed
 
 
 def ease_quiet_slices() -> int:

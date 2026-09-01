@@ -1223,6 +1223,7 @@ function RecapPanel() {
         days: {
           date: string
           arrived: number
+          discovered: number
           sold: number
           withdrawn: number
           gone: number
@@ -1230,7 +1231,9 @@ function RecapPanel() {
         }[]
         live_listings: number
         typical_arrivals: number
+        typical_discoveries: number
         typical_departures: number
+        products_unexamined: number
       }
     | undefined
 
@@ -1276,7 +1279,33 @@ function RecapPanel() {
               <dt className="text-muted">Typical departures</dt>
               <dd className="tabular-nums text-warning">−{d.typical_departures}/day</dd>
             </div>
+            {d.typical_discoveries > 0 && (
+              <div className="flex justify-between gap-3">
+                <dt className="text-muted">Newly found</dt>
+                <dd className="tabular-nums text-faint">{d.typical_discoveries}/day</dd>
+              </div>
+            )}
+            {d.products_unexamined > 0 && (
+              <div className="flex justify-between gap-3">
+                <dt className="text-muted">Products not yet opened</dt>
+                <dd className="tabular-nums text-faint">
+                  {d.products_unexamined.toLocaleString('en-GB')}
+                </dd>
+              </div>
+            )}
           </dl>
+
+          {/* While the backlog is large, most of what turns up is backlog
+              rather than news, and saying so is the difference between a
+              figure that can be read and one that quietly misleads. */}
+          {d.products_unexamined > 0 && (
+            <p className="mt-2 rounded-control border border-line bg-raised px-3 py-2 text-[11px] leading-relaxed text-muted">
+              {d.products_unexamined.toLocaleString('en-GB')} pre-owned products have never
+              been opened, so their copies arrive in the &ldquo;found&rdquo; column: we know
+              when we first saw them, not when the shop took them in. Only
+              &ldquo;arrived&rdquo; is a rate about AmiAmi.
+            </p>
+          )}
 
           <div className="mt-4 overflow-x-auto">
             <table className="w-full text-[11px] tabular-nums">
@@ -1284,6 +1313,7 @@ function RecapPanel() {
                 <tr className="text-left">
                   <th className="pb-1 pr-3 font-normal">Day</th>
                   <th className="pb-1 pr-3 text-right font-normal">Arrived</th>
+                  <th className="pb-1 pr-3 text-right font-normal">Found</th>
                   <th className="pb-1 pr-3 text-right font-normal">Sold</th>
                   <th className="pb-1 pr-3 text-right font-normal">Withdrawn</th>
                   <th className="pb-1 pr-3 text-right font-normal">Net</th>
@@ -1301,6 +1331,9 @@ function RecapPanel() {
                     </td>
                     <td className="py-1 pr-3 text-right">
                       {row.arrived || <span className="text-faint">0</span>}
+                    </td>
+                    <td className="py-1 pr-3 text-right text-faint">
+                      {row.discovered || 0}
                     </td>
                     <td className="py-1 pr-3 text-right">
                       {row.sold || <span className="text-faint">0</span>}
@@ -1341,9 +1374,14 @@ function RecapPanel() {
           </div>
 
           <p className="mt-3 text-[11px] leading-relaxed text-faint">
-            &ldquo;Sold&rdquo; means the copy went while its product stayed on sale. When every
-            copy of a product disappears at once that is as easily the shop withdrawing it, so
-            it is recorded as the weaker claim rather than counted as sales.
+            &ldquo;Arrived&rdquo; is a copy that appeared between two of our looks at the same
+            product, so its arrival can be dated. &ldquo;Found&rdquo; is a copy under a product
+            we had never opened before, which may have been sitting there for a year — that
+            column measures our own progress through the catalogue, not the shop.{' '}
+            &ldquo;Sold&rdquo; covers copies that went while their product stayed on sale and
+            products AmiAmi deleted outright, which is what it does when the last used copy
+            sells. &ldquo;Withdrawn&rdquo; is the doubtful case only: every copy vanishing at
+            once while the product stayed listed and buyable.
           </p>
         </>
       )}

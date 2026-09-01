@@ -81,7 +81,16 @@ function Bar({ row, span }: { row: ListingRow; span: { start: number; end: numbe
         </p>
       )}
       {row.outcome === 'withdrawn' && (
-        <p className="text-warning">Vanished with every other copy, so possibly withdrawn.</p>
+        <p className="text-warning">
+          Vanished with every other copy while the product was still on sale, so possibly
+          withdrawn rather than sold.
+        </p>
+      )}
+      {row.outcome === 'delisted' && (
+        <p className="text-muted">
+          The whole product was deleted, which is what AmiAmi does when the last used copy
+          sells.
+        </p>
       )}
       <p className="text-faint">Seen on {life.observations} check(s)</p>
     </div>

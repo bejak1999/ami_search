@@ -31,7 +31,6 @@ from sqlalchemy.orm import Session
 from ..config import settings
 from . import budget, reqlog
 from ..models import (
-    AppSetting,
     CollectionEntry,
     Condition,
     Item,
@@ -180,50 +179,26 @@ def promote(db: Session, item: Item, commit: bool = False) -> None:
         db.commit()
 
 
-#: How often the sampler is allowed to walk the whole catalogue rather than
-#: only what the tiers say is due. Once a day: the point is that a product
-#: nothing has asked about in weeks still gets looked at occasionally, not
-#: that everything is re-read constantly.
-SWEEP_EVERY_HOURS = 24
+#: How much of each run is kept for products already examined at least once.
+#: A first look can only add copies; only a second one can see a copy go. At
+#: a quarter, discovery still leads while departures are actually observed -
+#: raise it to see sales sooner, lower it to finish the first pass sooner.
+REVISIT_SHARE = 0.25
 
 
-#: Where the last catalogue walk is remembered. A row in the settings table
-#: rather than a column: it is one timestamp for the whole job, not a fact
-#: about any product.
-SWEEP_MARKER = "shelfwatch:last_sweep"
+def revisit_candidates(db: Session, provider: str, limit: int) -> list[Item]:
+    """Products we have seen before, longest ago first.
 
+    Deliberately excludes anything never examined, which is the whole point.
+    Both other queues put never-examined products first - ``due_items``
+    because a first look unlocks the intake rate, and this one because it
+    used to sort nulls first as well - so between them nothing ever got a
+    *second* look while there was a backlog of first ones.
 
-def _last_sweep_at(db: Session):
-    row = db.get(AppSetting, SWEEP_MARKER)
-    stamp = (row.value or {}).get("at") if row else None
-    if not stamp:
-        return None
-    try:
-        parsed = datetime.fromisoformat(stamp)
-    except ValueError:  # pragma: no cover - a hand-edited row
-        return None
-    return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
-
-
-def _note_sweep(db: Session) -> None:
-    row = db.get(AppSetting, SWEEP_MARKER)
-    if row is None:
-        row = AppSetting(key=SWEEP_MARKER)
-        db.add(row)
-    row.value = {"at": datetime.now(timezone.utc).isoformat()}
-
-
-def sweep_candidates(db: Session, provider: str, limit: int, before) -> list[Item]:
-    """Products nothing has looked at for longest, due or not.
-
-    What this is for: the tiers keep re-reading whatever is hot, and a product
-    that went quiet drops to the cold tier and then waits three days between
-    looks - while a busy one is read for the twentieth time. When there is
-    budget going spare, spending it on the least recently seen is worth more
-    than another look at something already well covered.
-
-    Ordered by when each was last examined, oldest first, so a walk like this
-    works its way through the catalogue rather than picking the same handful.
+    That matters because a second look is the only thing that can see a copy
+    leave. A first look can only ever add copies. With every request going to
+    first looks, arrivals climbed and departures stayed near zero, which is
+    not a fact about the shop but about the order of a query.
     """
     return list(
         db.execute(
@@ -232,12 +207,9 @@ def sweep_candidates(db: Session, provider: str, limit: int, before) -> list[Ite
                 Item.provider == provider,
                 Item.condition == Condition.preowned,
                 Item.order_closed.is_(False),
-                or_(
-                    Item.last_detail_fetch_at.is_(None),
-                    Item.last_detail_fetch_at < before,
-                ),
+                Item.last_detail_fetch_at.is_not(None),
             )
-            .order_by(Item.last_detail_fetch_at.asc().nulls_first(), Item.id)
+            .order_by(Item.last_detail_fetch_at.asc(), Item.id)
             .limit(limit)
         )
         .scalars()
@@ -298,41 +270,37 @@ def run_once(
     # not slow, it had run out of things to look at.
     seconds = budget_seconds or settings.shelf_max_seconds_per_run
     headroom = int(budget.total_per_minute() * (seconds / 60.0)) + 10
-    candidates = due_items(db, provider_id, headroom)
 
-    # Nothing due, and the budget is going spare. Rather than idling, work
-    # through the catalogue from the least recently examined - the tiers will
-    # otherwise re-read a hot product for the twentieth time before a quiet
-    # one is looked at once. Held to once a day, so this is a sweep and not a
-    # second polling loop.
-    swept = False
-    if len(candidates) < headroom // 4:
-        last = _last_sweep_at(db)
-        if last is None or (
-            datetime.now(timezone.utc) - last
-        ) >= timedelta(hours=SWEEP_EVERY_HOURS):
-            already = {item.id for item in candidates}
-            extra = [
-                item
-                for item in sweep_candidates(
-                    db,
-                    provider_id,
-                    headroom - len(candidates),
-                    datetime.now(timezone.utc) - timedelta(hours=SWEEP_EVERY_HOURS),
-                )
-                if item.id not in already
-            ]
-            if extra:
-                candidates = candidates + extra
-                swept = True
-                _note_sweep(db)
+    # Part of every run is kept for products we have already seen.
+    #
+    # This used to be a once-a-day top-up that only ran when fewer than a
+    # quarter of the wanted candidates were due. On a catalogue this size
+    # that condition is never met - there are always more than a handful of
+    # overdue products - so the branch never executed once. And when it did
+    # run it drew from a query that also sorted never-examined first, so it
+    # would not have produced a single revisit anyway.
+    #
+    # A reserved share fixes both. It is a share rather than a schedule
+    # because a second look is the only thing that can observe a copy
+    # leaving: without one, this job can only ever count arrivals.
+    reserved = int(headroom * REVISIT_SHARE)
+    candidates = due_items(db, provider_id, headroom - reserved)
+
+    already = {item.id for item in candidates}
+    revisits = [
+        item
+        for item in revisit_candidates(db, provider_id, reserved + len(already))
+        if item.id not in already
+    ][:reserved]
+    if revisits:
+        candidates = candidates + revisits
 
     reqlog.doing(
         "shelf",
-        f"{len(candidates)} product(s) to re-read"
-        + (" (filling spare budget from the least recently seen)" if swept else ""),
+        f"{len(candidates)} product(s) to read"
+        + (f", {len(revisits)} of them second looks" if revisits else ""),
         due=len(candidates),
-        catalogue_sweep=swept,
+        revisits=len(revisits),
         budget_seconds=budget_seconds or settings.shelf_max_seconds_per_run,
     )
     if not candidates:
