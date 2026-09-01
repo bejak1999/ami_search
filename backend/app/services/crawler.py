@@ -1050,7 +1050,6 @@ def progress(db: Session, provider_id: str = "amiami") -> dict:
                 # Where it sits in the queue, and what the scheduler is doing.
                 "queue_position": queue.get(crawl.scope),
                 "resting": _cooldown_remaining(crawl) > 0,
-                "sort_key": (crawl.query or {}).get("sort") or "newest",
                 # Whether a short pass means anything here. Only for the
                 # second-hand slice: it is the only one where a listing can
                 # appear and sell inside a morning, and the only one whose
@@ -1091,6 +1090,18 @@ def progress(db: Session, provider_id: str = "amiami") -> dict:
                 "next_run_in_seconds": _cooldown_remaining(crawl),
                 "recheck_minutes": crawl.recheck_interval_minutes,
                 "head_pages": crawl.head_pages,
+                # Which ordering this slice actually reads. Shown because the
+                # short pass only pays on one of them, so a head depth set
+                # against the wrong ordering is effort spent on nothing - and
+                # until now the only way to find out was to catch the slice
+                # mid-run in the debug view.
+                "sort": (crawl.query or {}).get("sort") or "newest",
+                "sort_key": SORT_KEYS.get(
+                    (crawl.query or {}).get("sort") or "newest", "?"
+                ),
+                "head_worth_reading": (
+                    ((crawl.query or {}).get("sort") or "newest") in HEAD_WORTH_READING
+                ),
                 "full_sweep_interval_minutes": full_sweep_interval_minutes(crawl),
                 # Which kind of pass this slice is on right now, so the view
                 # can say "reading the newest 30" rather than showing a bar

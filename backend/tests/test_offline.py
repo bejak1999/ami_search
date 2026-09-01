@@ -5770,6 +5770,120 @@ def test_a_price_change_says_which_kind_it_is() -> None:
     db.close()
 
 
+def test_a_slice_that_named_no_ordering_is_moved_over_too() -> None:
+    print("\n== An install from before the sort key existed is not walked past ==")
+    from app.db import SessionLocal, adopt_intake_ordering, init_db
+    from app.models import CatalogCrawl
+    from app.providers.amiami import SORT_KEYS
+    from app.services import crawler
+
+    init_db()
+    db = SessionLocal()
+    db.query(CatalogCrawl).delete()
+    db.commit()
+
+    # Exactly what the first release of this slice wrote: no ordering named at
+    # all. _build_query falls back to "newest" when none is named, so such an
+    # installation was sending regtimed - the one ordering measured as worse
+    # than reading pages at random - while storing nothing that said so.
+    db.add(
+        CatalogCrawl(
+            provider="amiami",
+            scope="figures_preowned",
+            label="Pre-owned figures",
+            query={"category_id": 1, "condition": "preowned"},
+            head_pages=30,
+            recheck_interval_minutes=60,
+            cursor_page=88,
+        )
+    )
+    db.commit()
+
+    row = db.query(CatalogCrawl).filter_by(scope="figures_preowned").one()
+    check("nothing is stored for the ordering", (row.query or {}).get("sort") is None)
+    check(
+        "but it sends the worst one there is",
+        SORT_KEYS[crawler._build_query(row, 1).sort] == "regtimed",
+    )
+
+    # The migration used to test for the literal string "newest" and so walked
+    # straight past these - the oldest installations, and the ones that needed
+    # it most. A key that is absent was never chosen by anyone either.
+    check("the upgrade moves it", adopt_intake_ordering() > 0)
+
+    db.close()
+    db = SessionLocal()
+    row = db.query(CatalogCrawl).filter_by(scope="figures_preowned").one()
+    check("onto the ordering that tracks intake", row.query["sort"] == "updated", row.query)
+    check(
+        "and that is what it now sends",
+        SORT_KEYS[crawler._build_query(row, 1).sort] == "preowned",
+    )
+    check(
+        "the pass restarts, because its cursor pointed into a different list",
+        row.cursor_page == 1,
+        row.cursor_page,
+    )
+
+    # Settings someone has already tuned are not swept up with it.
+    check("the page depth is left alone", row.head_pages == 30, row.head_pages)
+    check("and so is the interval", row.recheck_interval_minutes == 60)
+    check("a second upgrade changes nothing", adopt_intake_ordering() == 0)
+
+    # An ordering somebody picked on purpose still survives.
+    row.query = {"category_id": 1, "condition": "preowned", "sort": "release"}
+    db.commit()
+    db.close()
+    adopt_intake_ordering()
+    db = SessionLocal()
+    row = db.query(CatalogCrawl).filter_by(scope="figures_preowned").one()
+    check("a deliberate choice is untouched", row.query["sort"] == "release", row.query)
+
+    db.query(CatalogCrawl).delete()
+    db.commit()
+    db.close()
+
+
+def test_the_panel_says_which_ordering_a_slice_reads() -> None:
+    print("\n== A slice reports the ordering it is actually reading ==")
+    from app.db import SessionLocal, init_db
+    from app.models import CatalogCrawl
+    from app.services import crawler
+
+    init_db()
+    db = SessionLocal()
+    db.query(CatalogCrawl).delete()
+    db.add(
+        CatalogCrawl(
+            provider="amiami",
+            scope="figures_preowned",
+            label="Pre-owned figures",
+            query={"category_id": 1, "condition": "preowned"},
+            head_pages=30,
+            recheck_interval_minutes=60,
+        )
+    )
+    db.commit()
+
+    # The head depth only buys anything on one ordering, so tuning it without
+    # being told which one is in use is guesswork - and finding out meant
+    # catching the slice mid-run in the debug view.
+    slice_ = crawler.progress(db)["slices"][0]
+    check("the ordering is reported", slice_["sort_key"] == "regtimed", slice_["sort_key"])
+    check("and flagged as not worth a head pass", slice_["head_worth_reading"] is False)
+
+    row = db.query(CatalogCrawl).one()
+    row.query = {"category_id": 1, "condition": "preowned", "sort": "updated"}
+    db.commit()
+    slice_ = crawler.progress(db)["slices"][0]
+    check("on the right ordering it says so", slice_["sort_key"] == "preowned")
+    check("and the head pass is worth having", slice_["head_worth_reading"] is True)
+
+    db.query(CatalogCrawl).delete()
+    db.commit()
+    db.close()
+
+
 def test_the_sampler_can_actually_spend_its_budget() -> None:
     print("\n== The shelf sampler is not starved by its own arithmetic ==")
     from app.config import settings
@@ -5935,6 +6049,8 @@ def main() -> int:
     test_missing_exchange_rates_are_reported()
     test_newly_listed_used_is_not_newly_known()
     test_a_price_change_says_which_kind_it_is()
+    test_a_slice_that_named_no_ordering_is_moved_over_too()
+    test_the_panel_says_which_ordering_a_slice_reads()
     test_settings()
 
     print(f"\n{'=' * 46}\n  {PASS} passed, {FAIL} failed\n{'=' * 46}")

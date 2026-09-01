@@ -633,7 +633,15 @@ def adopt_intake_ordering() -> int:
         crawl = by_scope.get("figures_preowned")
         if crawl is not None:
             query = dict(crawl.query or {})
-            if query.get("sort") == "newest":
+            # A missing key counts as much as an explicit "newest". The first
+            # release of this slice named no ordering at all, and _build_query
+            # falls back to "newest" when none is named - so the oldest
+            # installations were sending regtimed while storing nothing, and
+            # a migration that only recognised the literal string walked past
+            # every one of them. They are exactly the installations that
+            # needed it: the fallback is the one ordering measured as worse
+            # than reading at random.
+            if query.get("sort") in (None, "", "newest"):
                 query["sort"] = "updated"
                 crawl.query = query
                 # A pass in progress was ordered the old way, so its cursor

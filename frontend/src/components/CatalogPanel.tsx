@@ -422,11 +422,31 @@ function Slice({
                 />
               </Field>
 
+              {/* The head only pays on one of AmiAmi's orderings, so the
+                  ordering in use belongs beside the depth. Without it a page
+                  count can be tuned carefully against an ordering that
+                  carries nothing to its front — which is exactly what an
+                  installation created before this slice named a sort was
+                  quietly doing. */}
               <p className="text-[11px] leading-relaxed text-faint sm:col-span-3">
-                Re-reading the front only pays because of how this slice is ordered: measured
-                against 594 known arrivals, its first 30 pages held 452 of them. No other
-                ordering AmiAmi offers does that, which is why no other slice has this
-                setting.
+                {slice.head_worth_reading ? (
+                  <>
+                    Reading{' '}
+                    <span className="font-medium text-muted">{slice.sort_key}</span> order.
+                    Re-reading the front only pays because of it: over 24 hours, 617 arrivals,
+                    99% of them within the first 20 pages and none at all past page 22. No
+                    other ordering AmiAmi offers does that, which is why no other slice has
+                    this setting.
+                  </>
+                ) : (
+                  <span className="text-warning">
+                    This slice is reading{' '}
+                    <span className="font-medium">{slice.sort_key}</span> order, which carries
+                    nothing useful to its front — measured against known arrivals it does
+                    worse than reading pages at random. The page count below buys nothing
+                    until the ordering is changed.
+                  </span>
+                )}
               </p>
             </>
           ) : (
