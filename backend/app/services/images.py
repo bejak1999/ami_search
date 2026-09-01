@@ -25,6 +25,7 @@ from sqlalchemy import and_, case, func, or_, select
 from sqlalchemy.orm import Session
 
 from ..config import settings
+from . import reqlog
 from ..models import (
     CachedImage,
     CollectionEntry,
@@ -127,7 +128,13 @@ def _download(url: str) -> tuple[bytes, str]:
     )
     # Photos come from the shop's image host on their own allowance, but they
     # are the same connection to the same company and belong in the tally.
-    reqlog.record("amiami", ok=response.status_code < 400, name="images")
+    reqlog.record(
+        "amiami",
+        ok=response.status_code < 400,
+        name="images",
+        url=url,
+        status=response.status_code,
+    )
     if response.status_code == 404:
         raise FileNotFoundError("origin no longer serves this image")
     if response.status_code >= 400:
@@ -393,11 +400,20 @@ def prefetch(db: Session, limit: int | None = None) -> dict:
 
     limit = limit or settings.image_prefetch_batch
     fetched = failed = 0
-    for row in _pending_queue(db, limit):
+    queue = _pending_queue(db, limit)
+    for index, row in enumerate(queue, start=1):
+        reqlog.doing(
+            "images",
+            f"photo {index} of {len(queue)} in this batch",
+            queued=pending_count(db) if index == 1 else None,
+            source=row.source_url,
+            kind=row.kind,
+        )
         if fetch(db, row.source_url, touch=False):
             fetched += 1
         else:
             failed += 1
+    reqlog.done("images")
     return _prefetch_result(db, fetched, failed)
 
 

@@ -52,6 +52,12 @@ class Settings(BaseSettings):
     # ---- Catalogue ingest --------------------------------------------------
     crawler_enabled: bool = True
     """Walk the shop catalogue in the background so discovery has a corpus."""
+    #: The whole allowance to AmiAmi's API, shared out by services.budget
+    #: rather than split into fixed per-job rates. The old arrangement asked
+    #: for at most 18 of a 40 ceiling and left the rest idle; this is drawn on
+    #: by whoever is running, so a quiet instance uses all of it.
+    amiami_budget_per_minute: float = 24.0
+    #: Kept for the estimates, which quote what a sweep costs on its own.
     crawler_requests_per_minute: float = 8.0
     """The crawler's own budget. It also passes through the shared provider
     limiter, and it yields entirely whenever a watch is due, so alerts always

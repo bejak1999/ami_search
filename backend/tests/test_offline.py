@@ -4822,6 +4822,151 @@ def test_waits_are_quoted_from_what_was_measured() -> None:
     db.close()
 
 
+def test_the_amiami_budget_is_shared_out_and_used() -> None:
+    print("\n== One allowance, shared by what matters, never left idle ==")
+    from app.config import settings
+    from app.services import budget
+
+    total = budget.total_per_minute()
+
+    # Fixed per-job rates cannot lend. The sampler was given ten a minute for
+    # four minutes in every ten - four a minute averaged, measured at 3.4 -
+    # while nothing else was using the rest of the allowance.
+    check("a job on its own gets the whole pool",
+          budget.rate_for("shelf") == total, budget.rate_for("shelf"))
+
+    with budget.claim("catalogue"):
+        alone = budget.rate_for("catalogue")
+        check("so does a sweep", alone == total, alone)
+        shelf_beside = budget.rate_for("shelf")
+        check("and a sampler starting up gets the rest",
+              0 < shelf_beside < total, shelf_beside)
+
+        with budget.claim("shelf"):
+            sweep = budget.rate_for("catalogue")
+            shelf = budget.rate_for("shelf")
+            check("with both running the sweep gets more", sweep > shelf, (sweep, shelf))
+            check("and between them they use the pool",
+                  abs(sweep + shelf - total) < 0.01, (sweep, shelf, total))
+
+            with budget.claim("watch"):
+                watch = budget.rate_for("watch")
+                check("a watch outranks both",
+                      watch > budget.rate_for("catalogue") > budget.rate_for("shelf"),
+                      (watch, budget.rate_for("catalogue"), budget.rate_for("shelf")))
+                check(
+                    "and all three still add up to the pool",
+                    abs(
+                        watch + budget.rate_for("catalogue") + budget.rate_for("shelf") - total
+                    ) < 0.01,
+                )
+
+    check("everything releases its claim", budget.snapshot()["running"] == [])
+    check("and the pool is whole again", budget.rate_for("shelf") == total)
+
+    # What it buys the sampler, which is the job this was written for.
+    duty = settings.shelf_max_seconds_per_run / 60 / settings.shelf_run_interval_minutes
+    was = 10.0 * duty
+    now = budget.rate_for("shelf") * duty
+    check(f"the sampler goes from {was:.1f}/min to {now:.1f}/min when alone",
+          now > was * 2, (was, now))
+
+    # Nesting: two threads inside one job must not let the first one out.
+    with budget.claim("shelf"):
+        with budget.claim("shelf"):
+            pass
+        check("a nested claim does not release the outer one",
+              "shelf" in budget.snapshot()["running"])
+    check("only the last one does", budget.snapshot()["running"] == [])
+
+    # Something that never declared a weight is still paced rather than
+    # given the run of the place.
+    stranger = budget.rate_for("something-else")
+    check("an unknown job gets a modest share", 0 < stranger < total, stranger)
+
+
+def test_the_pacer_follows_the_shared_rate() -> None:
+    print("\n== The pacing follows the pool, and stays irregular ==")
+    from app.services import budget
+    from app.services.pacing import HumanPacer
+
+    fixed = HumanPacer(requests_per_minute=10.0)
+    check("a fixed pacer reports its own rate", fixed.current_rate == 10.0)
+    check("and does not claim to be sharing", not fixed.stats()["rate_is_shared"])
+
+    shared = HumanPacer(rate_source=lambda: budget.rate_for("shelf"))
+    alone = shared.current_rate
+    check("a shared pacer reads the pool", alone == budget.total_per_minute(), alone)
+    check("and says so", shared.stats()["rate_is_shared"])
+
+    with budget.claim("watch"), budget.claim("catalogue"):
+        crowded = shared.current_rate
+        check("it slows down when others start", crowded < alone, (alone, crowded))
+    check("and speeds up again when they stop", shared.current_rate == alone)
+
+    # The whole point of the pacer survives: the gaps are still drawn, not
+    # spaced evenly. A steady stream would be easier to write and would look
+    # exactly like a machine.
+    delays = [shared.next_delay() for _ in range(60)]
+    check("the gaps vary", len(set(round(d, 2) for d in delays)) > 30, len(set(delays)))
+    check("none is below the floor", min(delays) >= shared.minimum_delay)
+    check("and the mean lands near the target",
+          abs(sum(delays) / len(delays) - shared.mean_delay) < shared.mean_delay,
+          (sum(delays) / len(delays), shared.mean_delay))
+
+
+def test_failures_are_attributed_and_requests_are_readable() -> None:
+    print("\n== A failure says which job it belongs to ==")
+    from app.providers.base import _describe
+    from app.services import reqlog
+
+    reqlog._events.clear()
+    reqlog._recent.clear()
+    reqlog._doing.clear()
+
+    with reqlog.purpose("catalogue"):
+        for n in range(6):
+            reqlog.record("amiami", ok=(n != 2), url=f"/api/v1.0/items?pagecnt={n}",
+                          status=200 if n != 2 else 503, ms=180.0)
+    with reqlog.purpose("shelf"):
+        for n in range(3):
+            reqlog.record("amiami", url=f"/api/v1.0/item?gcode=F-{n}", status=200, ms=120.0)
+
+    host = reqlog.rates(60)["hosts"]["amiami"]
+    by_key = {p["key"]: p for p in host["purposes"]}
+    check("the total is still there", host["errors"] == 1, host["errors"])
+    check("and now says which job", by_key["catalogue"]["errors"] == 1)
+    check("leaving the innocent one alone", by_key["shelf"]["errors"] == 0)
+
+    # A request is written down as it went out, so a debug view can settle
+    # whether a setting took effect rather than merely asserting it did.
+    line = _describe("https://api.amiami.com/api/v1.0/items",
+                     {"pagemax": 50, "pagecnt": 14, "s_sortkey": "preowned", "lang": "eng"})
+    check("the host is dropped", not line.startswith("http"), line)
+    check("the path is kept", line.startswith("/api/v1.0/items"), line)
+    check("and the query is legible", "s_sortkey=preowned" in line, line)
+    check("a value of None is left out",
+          "lang" not in _describe("/x", {"lang": None}), _describe("/x", {"lang": None}))
+
+    # The debug view: what it is doing, and what just went out.
+    reqlog.doing("catalogue", "Pre-owned figures: page 14 of 30",
+                 sort_key="preowned", page=14)
+    view = reqlog.debug("catalogue")
+    check("it says what it is doing", view["doing"]["what"].endswith("page 14 of 30"))
+    check("with the detail the log cannot know", view["doing"]["sort_key"] == "preowned")
+    check("and how long it has been at it", view["doing"]["for_seconds"] >= 0)
+    check("the trail is newest first", view["recent"][0]["url"].endswith("pagecnt=5"),
+          view["recent"][0]["url"])
+    check("and holds the failure", any(not e["ok"] for e in view["recent"]))
+
+    reqlog.done("catalogue")
+    check("a finished job reports nothing in flight",
+          reqlog.debug("catalogue")["doing"] is None)
+
+    reqlog._events.clear()
+    reqlog._recent.clear()
+
+
 def main() -> int:
     test_url_parsing()
     test_release_dates()
@@ -4879,6 +5024,9 @@ def main() -> int:
     test_image_fallback()
     test_run_log()
     test_request_accounting()
+    test_the_amiami_budget_is_shared_out_and_used()
+    test_the_pacer_follows_the_shared_rate()
+    test_failures_are_attributed_and_requests_are_readable()
     test_photo_counts_distinguish_known_from_held()
     test_prefetch_works_through_its_backlog()
     test_the_photo_queue_is_reached_however_full_the_cache_is()

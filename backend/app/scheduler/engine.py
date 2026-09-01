@@ -22,6 +22,7 @@ from ..config import settings
 from ..db import session_scope
 from ..models import Watch
 from ..services import (
+    budget,
     catalog,
     crawler,
     dealradar,
@@ -243,7 +244,7 @@ class PollingEngine:
                 watch = db.get(Watch, watch_id)
                 if watch is None or not watch.enabled:
                     return
-                with reqlog.purpose("watch"):
+                with reqlog.purpose("watch"), budget.claim("watch"):
                     outcome = matcher.run_watch(db, watch)
             self.runs_total += 1
             self.alerts_total += outcome.alerts
@@ -291,7 +292,7 @@ class PollingEngine:
     def run_crawler(self) -> None:
         try:
             with session_scope() as db:
-                with reqlog.purpose("catalogue"):
+                with reqlog.purpose("catalogue"), budget.claim("catalogue"):
                     outcome = crawler.run_once(db)
             if outcome.pages:
                 self.crawl_pages_total += outcome.pages
@@ -303,7 +304,7 @@ class PollingEngine:
     def run_shelfwatch(self) -> None:
         try:
             with session_scope() as db:
-                with reqlog.purpose("shelf"):
+                with reqlog.purpose("shelf"), budget.claim("shelf"):
                     outcome = shelfwatch.run_once(db)
             if outcome.checked:
                 self.shelf_checked_total += outcome.checked

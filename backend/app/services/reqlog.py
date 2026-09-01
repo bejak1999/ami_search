@@ -40,8 +40,19 @@ PURPOSE_LABELS = {
     "other": "Other",
 }
 
-_events: deque[tuple[float, str, str, bool]] = deque()
+#: (when, host, purpose, ok, url, status, milliseconds)
+_events: deque[tuple[float, str, str, bool, str, int | None, float | None]] = deque()
 _lock = threading.Lock()
+
+#: The last few requests in full, per purpose, for the debug view. Short: this
+#: is for looking over a job's shoulder, not for keeping history.
+RECENT_PER_PURPOSE = 40
+_recent: dict[str, deque] = {}
+
+#: What each job says it is doing at this moment. Set by the job itself,
+#: because only it knows - the request log can say a page was fetched but not
+#: that it was page 14 of the pre-owned slice on its third pass.
+_doing: dict[str, dict] = {}
 
 
 class purpose:
@@ -70,14 +81,71 @@ def current() -> str:
     return _purpose.get()
 
 
-def record(host: str, ok: bool = True, name: str | None = None) -> None:
+def record(
+    host: str,
+    ok: bool = True,
+    name: str | None = None,
+    url: str | None = None,
+    status: int | None = None,
+    ms: float | None = None,
+) -> None:
     """Note one outbound request against whatever work is running."""
     now = time.time()
+    why = name or _purpose.get()
     with _lock:
-        _events.append((now, host, name or _purpose.get(), ok))
+        _events.append((now, host, why, ok, url or "", status, ms))
         cutoff = now - WINDOW_SECONDS
         while _events and _events[0][0] < cutoff:
             _events.popleft()
+
+        trail = _recent.get(why)
+        if trail is None:
+            trail = _recent[why] = deque(maxlen=RECENT_PER_PURPOSE)
+        trail.appendleft(
+            {
+                "at": now,
+                "host": host,
+                "ok": ok,
+                "url": url or "",
+                "status": status,
+                "ms": round(ms, 1) if ms is not None else None,
+            }
+        )
+
+
+def doing(purpose: str, what: str, **detail) -> None:
+    """Say what this job is doing at the moment, for the debug view.
+
+    Called by the job because only the job knows. The request log can say a
+    page was fetched; it cannot say that it was page 14 of 213 of the
+    pre-owned slice, read newest-updated first, on the third pass of the day.
+    """
+    with _lock:
+        _doing[purpose] = {"what": what, "since": time.time(), **detail}
+
+
+def done(purpose: str) -> None:
+    """This job has stopped; it is doing nothing until it says otherwise."""
+    with _lock:
+        _doing.pop(purpose, None)
+
+
+def debug(purpose: str) -> dict:
+    """Everything worth showing about one job: what now, and what just went."""
+    with _lock:
+        current = dict(_doing.get(purpose) or {})
+        trail = list(_recent.get(purpose) or [])
+    now = time.time()
+    if current:
+        current["for_seconds"] = round(now - current.get("since", now), 1)
+    for entry in trail:
+        entry = entry  # already a copy per append
+    return {
+        "purpose": purpose,
+        "label": PURPOSE_LABELS.get(purpose, purpose),
+        "doing": current or None,
+        "recent": [dict(e, ago_seconds=round(now - e["at"], 1)) for e in trail],
+    }
 
 
 def rates(seconds: int = 60) -> dict:
@@ -93,12 +161,19 @@ def rates(seconds: int = 60) -> dict:
         sample = [event for event in _events if event[0] >= cutoff]
 
     hosts: dict[str, dict] = {}
-    for _, host, why, ok in sample:
+    for event in sample:
+        _, host, why, ok = event[0], event[1], event[2], event[3]
         entry = hosts.setdefault(host, {"total": 0, "errors": 0, "purposes": {}})
         entry["total"] += 1
         if not ok:
             entry["errors"] += 1
-        entry["purposes"][why] = entry["purposes"].get(why, 0) + 1
+        # Counted per purpose as well as in total. A failure count on its own
+        # says something is wrong somewhere; the one that says which job is
+        # failing is the one worth reading.
+        counts = entry["purposes"].setdefault(why, {"requests": 0, "errors": 0})
+        counts["requests"] += 1
+        if not ok:
+            counts["errors"] += 1
 
     for entry in hosts.values():
         entry["per_minute"] = round(entry["total"] / seconds * 60, 1)
@@ -107,11 +182,18 @@ def rates(seconds: int = 60) -> dict:
             {
                 "key": why,
                 "label": PURPOSE_LABELS.get(why, why),
-                "requests": count,
-                "per_minute": round(count / seconds * 60, 1),
-                "share": round(count / entry["total"] * 100, 1) if entry["total"] else 0.0,
+                "requests": counts["requests"],
+                "errors": counts["errors"],
+                "per_minute": round(counts["requests"] / seconds * 60, 1),
+                "share": (
+                    round(counts["requests"] / entry["total"] * 100, 1)
+                    if entry["total"]
+                    else 0.0
+                ),
             }
-            for why, count in sorted(entry["purposes"].items(), key=lambda kv: -kv[1])
+            for why, counts in sorted(
+                entry["purposes"].items(), key=lambda kv: -kv[1]["requests"]
+            )
         ]
 
     with _lock:

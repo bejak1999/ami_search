@@ -19,6 +19,7 @@ from __future__ import annotations
 import math
 import random
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime
 
@@ -28,6 +29,11 @@ class HumanPacer:
     """Turns a requests-per-minute target into irregular, human-ish delays."""
 
     requests_per_minute: float = 10.0
+    #: Where to get the rate from, if it is not a fixed number. Set by jobs
+    #: that draw on the shared budget: what they may use depends on who else
+    #: is running, so it has to be asked for at each gap rather than settled
+    #: when the pacer was built.
+    rate_source: "Callable[[], float] | None" = None
     #: Spread of the log-normal draw. Higher means more varied gaps.
     sigma: float = 0.55
     #: Chance that any given gap becomes a long break instead.
@@ -47,15 +53,28 @@ class HumanPacer:
     total_sleep: float = 0.0
 
     @property
+    def current_rate(self) -> float:
+        """The rate to pace towards right now.
+
+        A fixed number for anything that has one; for a job sharing the
+        AmiAmi budget it is whatever the pool currently allows, which changes
+        as other jobs start and stop. Asked for at every gap, so a sampler
+        that had the shop to itself slows down the moment a watch wants it.
+        """
+        if self.rate_source is not None:
+            return max(0.1, self.rate_source())
+        return max(0.1, self.requests_per_minute)
+
+    @property
     def mean_delay(self) -> float:
-        """Average gap needed to actually achieve the configured rate.
+        """Average gap needed to actually achieve the current rate.
 
         The long breaks land on top of the ordinary gaps, so the ordinary gaps
         have to be correspondingly shorter or the real rate comes out well
         below what was asked for. Getting this wrong would also make every
         completion estimate in the admin view optimistic.
         """
-        target = 60.0 / max(0.1, self.requests_per_minute)
+        target = 60.0 / self.current_rate
         low, high = self.break_multiplier
         expected_break = (low + high) / 2.0
         inflation = (1.0 - self.break_probability) + self.break_probability * expected_break
@@ -91,7 +110,8 @@ class HumanPacer:
 
     def stats(self) -> dict:
         return {
-            "requests_per_minute": self.requests_per_minute,
+            "requests_per_minute": round(self.current_rate, 1),
+            "rate_is_shared": self.rate_source is not None,
             "mean_delay_seconds": round(self.mean_delay, 2),
             "delays_generated": self.delays_generated,
             "breaks_taken": self.breaks_taken,

@@ -111,6 +111,21 @@ class ItemNotFound(ProviderError):
     pass
 
 
+def _describe(url: str, params: dict | None) -> str:
+    """A request as one readable line: the path and what was asked of it.
+
+    The host is dropped - it is already a column - and the query is rebuilt
+    rather than passed through, so a debug view shows the sort key and the
+    page number the way they went out rather than a percent-encoded blur.
+    """
+    path = url.split("://", 1)[-1]
+    path = path[path.index("/") :] if "/" in path else path
+    if not params:
+        return path
+    query = "&".join(f"{key}={value}" for key, value in params.items() if value is not None)
+    return f"{path}?{query}" if query else path
+
+
 class ShopProvider(ABC):
     """Base class holding the shared HTTP client, limiter and breaker."""
 
@@ -185,14 +200,25 @@ class ShopProvider(ABC):
                 response = self.client.request(method, url, **kwargs)
             except Exception as exc:  # curl_cffi raises its own error tree
                 self.breaker.record_failure()
-                reqlog.record(self.id, ok=False)
+                reqlog.record(
+                    self.id,
+                    ok=False,
+                    url=_describe(url, kwargs.get("params")),
+                    ms=(time.monotonic() - started) * 1000,
+                )
                 raise ProviderError(f"{self.name}: {exc}") from exc
             finally:
                 self.last_latency_ms = (time.monotonic() - started) * 1000
 
         # Counted here rather than at each call site, so nothing that reaches
         # the shop can escape the tally by taking a different route.
-        reqlog.record(self.id, ok=response.status_code < 400)
+        reqlog.record(
+            self.id,
+            ok=response.status_code < 400,
+            url=_describe(url, kwargs.get("params")),
+            status=response.status_code,
+            ms=self.last_latency_ms,
+        )
 
         if response.status_code in (403, 429, 503):
             self.breaker.record_failure()

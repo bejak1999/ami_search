@@ -29,6 +29,7 @@ from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
 from ..config import settings
+from . import budget, reqlog
 from ..models import (
     CollectionEntry,
     Condition,
@@ -77,7 +78,10 @@ def _pacer() -> HumanPacer:
     # Same shaping as the catalogue crawler: log-normal gaps, the occasional
     # long break, slower overnight. A steady metronome is what gets noticed.
     return HumanPacer(
-        requests_per_minute=settings.shelf_requests_per_minute,
+        # The job this was written for: ten a minute for four minutes in
+        # every ten came out at 3.4 a minute measured, while thirty-odd of
+        # the allowance sat unused. It now takes whatever is going.
+        rate_source=lambda: budget.rate_for("shelf"),
         sigma=settings.crawler_jitter_sigma,
         break_probability=settings.crawler_break_probability,
         quiet_hours=(settings.crawler_quiet_hours_start, settings.crawler_quiet_hours_end),
@@ -221,6 +225,12 @@ def run_once(
     # Enough candidates to fill the budget even if every fetch is quick.
     headroom = int(settings.shelf_requests_per_minute * 4) + 10
     candidates = due_items(db, provider_id, headroom)
+    reqlog.doing(
+        "shelf",
+        f"{len(candidates)} product(s) due to be re-read",
+        due=len(candidates),
+        budget_seconds=budget_seconds or settings.shelf_max_seconds_per_run,
+    )
     if not candidates:
         run.stopped_because = "nothing due"
         return run

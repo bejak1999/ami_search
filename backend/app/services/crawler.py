@@ -24,6 +24,7 @@ from sqlalchemy import Integer, func, or_, select
 from sqlalchemy.orm import Session
 
 from ..config import settings
+from . import budget, reqlog
 from ..models import CatalogCrawl, CrawlState, Item, Watch, utcnow
 from ..providers import ProviderError, SearchQuery, get_provider
 from . import catalog
@@ -205,7 +206,9 @@ def ensure_scopes(db: Session, provider: str = "amiami") -> int:
 
 def _pacer() -> HumanPacer:
     return HumanPacer(
-        requests_per_minute=settings.crawler_requests_per_minute,
+        # Drawn from the shared pool rather than fixed: with nothing else
+        # running a sweep gets the lot, and steps back when a watch does.
+        rate_source=lambda: budget.rate_for("catalogue"),
         sigma=settings.crawler_jitter_sigma,
         break_probability=settings.crawler_break_probability,
         quiet_hours=(settings.crawler_quiet_hours_start, settings.crawler_quiet_hours_end),
@@ -562,6 +565,17 @@ def run_once(db: Session, provider_id: str = "amiami", budget_seconds: int | Non
             continue
 
         limit = _page_limit(crawl)
+        reqlog.doing(
+            "catalogue",
+            f"{crawl.label or crawl.scope}: page {crawl.cursor_page} of {limit}",
+            slice=crawl.scope,
+            sort=(crawl.query or {}).get("sort") or "newest",
+            sort_key=SORT_KEYS.get((crawl.query or {}).get("sort") or "newest", "?"),
+            page=crawl.cursor_page,
+            pages=limit,
+            sweeping=bool(crawl.sweeping_all),
+            pass_number=(crawl.cycles_completed or 0) + 1,
+        )
         if crawl.cursor_page > limit:
             _complete_cycle(db, crawl)
             run.stopped_because = "cycle complete"

@@ -6,6 +6,7 @@ import { duration, relativeTime } from '@/lib/format'
 import { ActivityPanel } from './ActivityPanel'
 import { BackupPanel } from './BackupPanel'
 import { LoadPanel } from './LoadPanel'
+import { JobDebug } from './JobDebug'
 import { Icon } from './Icon'
 import { Badge, Card, Field, SectionTitle, SegmentedControl, Spinner, Toggle } from './ui'
 import clsx from 'clsx'
@@ -446,6 +447,7 @@ function Slice({
             </>
           )}
 
+          <JobDebug purpose="catalogue" className="sm:col-span-3" />
           <RunLog runs={slice.recent_runs} />
 
           <p className="text-[11px] leading-relaxed text-faint sm:col-span-3">
@@ -789,6 +791,8 @@ function ShelfLifePanel() {
           · {d.requests_per_minute} requests a minute
         </p>
       )}
+
+      <JobDebug purpose="shelf" className="mt-3" />
     </Card>
   )
 }
@@ -977,6 +981,8 @@ export function CatalogPanel() {
             The first pass is the expensive one. Once the catalogue is built the shop only adds a
             modest number of listings a day, so the backlog stops growing.
           </p>
+
+          <JobDebug purpose="mfc" className="mt-3" />
         </Card>
       </div>
 
@@ -1144,6 +1150,8 @@ function ImageCache() {
           <dd className="truncate font-mono text-[11px]">{d.path}</dd>
         </div>
       </dl>
+
+      <JobDebug purpose="images" className="mt-3" />
     </Card>
   )
 }

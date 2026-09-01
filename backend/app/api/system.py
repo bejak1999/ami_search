@@ -299,6 +299,25 @@ def preowned_recap(
     return MessageResponse(message="ok", detail=shelflife.daily_recap(db, days))
 
 
+@admin.get("/debug/{purpose}", response_model=MessageResponse)
+def job_debug(
+    purpose: str,
+    _admin: User = Depends(admin_user),
+) -> MessageResponse:
+    """What one job is doing now, and the requests it just made.
+
+    Two halves because they answer different questions. The state says what it
+    is working on - which slice, which ordering, which page - and only the job
+    itself can say that. The trail says what actually went to the shop, which
+    is the half that settles an argument about whether a setting took effect.
+    """
+    from ..services import budget, reqlog
+
+    detail = reqlog.debug(purpose)
+    detail["budget"] = budget.snapshot()
+    return MessageResponse(message="ok", detail=detail)
+
+
 @admin.get("/load", response_model=MessageResponse)
 def upstream_load(
     seconds: int = Query(default=60, ge=10, le=3600),
@@ -314,9 +333,14 @@ def upstream_load(
 
     detail = reqlog.rates(seconds)
     detail["budgets"] = {
-        "amiami": _settings.provider_requests_per_minute,
+        "amiami": _settings.amiami_budget_per_minute,
         "mfc": _settings.mfc_requests_per_minute,
     }
+    # How the AmiAmi allowance is being shared out at this moment, so the
+    # panel can show why a job is running at the rate it is.
+    from ..services import budget as _budget
+
+    detail["sharing"] = _budget.snapshot()
     return MessageResponse(message="ok", detail=detail)
 
 

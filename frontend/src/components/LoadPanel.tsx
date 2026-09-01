@@ -37,6 +37,9 @@ type Purpose = {
   key: string
   label: string
   requests: number
+  /** Failures within this purpose. A total on its own says something is
+   *  wrong somewhere; this says which job it is. */
+  errors: number
   per_minute: number
   share: number
 }
@@ -193,6 +196,9 @@ function HostRow({
               <span className="truncate">{p.label}</span>
             </dt>
             <dd className="shrink-0 tabular-nums">
+              {p.errors > 0 && (
+                <span className="mr-1.5 text-danger">{p.errors} failed</span>
+              )}
               {p.per_minute.toLocaleString('en-GB')}/min
               <span className="ml-1.5 text-faint">{p.share.toFixed(0)}%</span>
             </dd>
