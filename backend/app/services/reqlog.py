@@ -25,10 +25,23 @@ from contextvars import ContextVar
 #: someone opening an item and it refreshing from the shop.
 _purpose: ContextVar[str] = ContextVar("request_purpose", default="other")
 
+#: Which of a purpose's several jobs this is. The catalogue is four slices
+#: sharing one purpose, and a debug view that mixed them told you what some
+#: slice was doing rather than the one you opened.
+_tag: ContextVar[str] = ContextVar("request_tag", default="")
+
 #: Long enough for an hourly rate to be real rather than extrapolated, and
 #: small enough to stay cheap: at 40 requests a minute this holds under three
 #: thousand entries, a few hundred kilobytes.
 WINDOW_SECONDS = 3600
+
+#: Hosts, as they are counted. Photos come from a static image server with
+#: its own allowance; the API is the one jobs queue for.
+HOST_LABELS = {
+    "amiami": "AmiAmi API",
+    "amiami-images": "AmiAmi photos",
+    "mfc": "MyFigureCollection",
+}
 
 PURPOSE_LABELS = {
     "catalogue": "Catalogue sweep",
@@ -63,17 +76,22 @@ class purpose:
     not "this is one HTTP request".
     """
 
-    def __init__(self, name: str) -> None:
+    def __init__(self, name: str, tag: str = "") -> None:
         self.name = name
+        self.tag = tag
         self._token = None
+        self._tag_token = None
 
     def __enter__(self) -> "purpose":
         self._token = _purpose.set(self.name)
+        self._tag_token = _tag.set(self.tag)
         return self
 
     def __exit__(self, *exc) -> None:
         if self._token is not None:
             _purpose.reset(self._token)
+        if self._tag_token is not None:
+            _tag.reset(self._tag_token)
         return None
 
 
@@ -106,6 +124,7 @@ def record(
                 "at": now,
                 "host": host,
                 "ok": ok,
+                "tag": _tag.get(),
                 "url": url or "",
                 "status": status,
                 "ms": round(ms, 1) if ms is not None else None,
@@ -113,28 +132,40 @@ def record(
         )
 
 
-def doing(purpose: str, what: str, **detail) -> None:
+def doing(purpose: str, what: str, tag: str = "", **detail) -> None:
     """Say what this job is doing at the moment, for the debug view.
 
     Called by the job because only the job knows. The request log can say a
     page was fetched; it cannot say that it was page 14 of 213 of the
     pre-owned slice, read newest-updated first, on the third pass of the day.
     """
+    key = f"{purpose}:{tag}" if tag else purpose
     with _lock:
-        _doing[purpose] = {"what": what, "since": time.time(), **detail}
+        _doing[key] = {"what": what, "since": time.time(), **detail}
 
 
-def done(purpose: str) -> None:
+def done(purpose: str, tag: str = "") -> None:
     """This job has stopped; it is doing nothing until it says otherwise."""
+    key = f"{purpose}:{tag}" if tag else purpose
     with _lock:
-        _doing.pop(purpose, None)
+        _doing.pop(key, None)
 
 
-def debug(purpose: str) -> dict:
-    """Everything worth showing about one job: what now, and what just went."""
+def debug(purpose: str, tag: str = "") -> dict:
+    """Everything worth showing about one job: what now, and what just went.
+
+    A tag narrows it to one of a purpose's several jobs. The catalogue is four
+    slices sharing one purpose and one allowance; without this, opening the
+    debug view on the pre-owned slice showed whatever slice had run last.
+    """
+    key = f"{purpose}:{tag}" if tag else purpose
     with _lock:
-        current = dict(_doing.get(purpose) or {})
-        trail = list(_recent.get(purpose) or [])
+        current = dict(_doing.get(key) or {})
+        trail = [
+            entry
+            for entry in (_recent.get(purpose) or [])
+            if not tag or entry.get("tag") == tag
+        ]
     now = time.time()
     if current:
         current["for_seconds"] = round(now - current.get("since", now), 1)
@@ -142,6 +173,7 @@ def debug(purpose: str) -> dict:
         entry = entry  # already a copy per append
     return {
         "purpose": purpose,
+        "tag": tag or None,
         "label": PURPOSE_LABELS.get(purpose, purpose),
         "doing": current or None,
         "recent": [dict(e, ago_seconds=round(now - e["at"], 1)) for e in trail],

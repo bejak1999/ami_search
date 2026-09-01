@@ -500,6 +500,21 @@ def run_once(db: Session, provider_id: str = "amiami", budget_seconds: int | Non
         return run
 
     run.scope = crawl.scope
+    # Set here rather than by the scheduler, because only now is it known
+    # which slice this run belongs to - and four slices sharing one purpose
+    # is what made a per-slice debug view show whichever ran last.
+    with reqlog.purpose("catalogue", tag=crawl.scope):
+        return _crawl_slice(db, provider_id, crawl, run, budget_seconds)
+
+
+def _crawl_slice(
+    db: Session,
+    provider_id: str,
+    crawl: CatalogCrawl,
+    run: CrawlRun,
+    budget_seconds: int | None,
+) -> CrawlRun:
+    """One slice's turn, with its requests already attributed to it."""
     provider = get_provider(provider_id)
     pacer = _pacer()
     deadline = time.monotonic() + (budget_seconds or settings.crawler_max_seconds_per_run)
@@ -568,6 +583,7 @@ def run_once(db: Session, provider_id: str = "amiami", budget_seconds: int | Non
         reqlog.doing(
             "catalogue",
             f"{crawl.label or crawl.scope}: page {crawl.cursor_page} of {limit}",
+            tag=crawl.scope,
             slice=crawl.scope,
             sort=(crawl.query or {}).get("sort") or "newest",
             sort_key=SORT_KEYS.get((crawl.query or {}).get("sort") or "newest", "?"),

@@ -16,12 +16,22 @@ import clsx from 'clsx'
  * Folded away by default and only polled while open: this is for when
  * something looks wrong, not a thing to watch all day.
  */
-export function JobDebug({ purpose, className }: { purpose: string; className?: string }) {
+export function JobDebug({
+  purpose,
+  tag,
+  className,
+}: {
+  purpose: string
+  /** Which of a purpose's several jobs, when it has more than one. The
+   *  catalogue is four slices sharing one purpose and one allowance. */
+  tag?: string
+  className?: string
+}) {
   const [open, setOpen] = useState(false)
 
   const debug = useQuery({
-    queryKey: ['jobDebug', purpose],
-    queryFn: () => api.admin.jobDebug(purpose),
+    queryKey: ['jobDebug', purpose, tag],
+    queryFn: () => api.admin.jobDebug(purpose, tag),
     enabled: open,
     refetchInterval: open ? 3_000 : false,
   })

@@ -128,8 +128,11 @@ def _download(url: str) -> tuple[bytes, str]:
     )
     # Photos come from the shop's image host on their own allowance, but they
     # are the same connection to the same company and belong in the tally.
+    # Counted against the image host, not against the API. They are separate
+    # servers with separate allowances, and lumping them together made the
+    # panel report 116% of a 24/min budget that photos were never drawing on.
     reqlog.record(
-        "amiami",
+        "amiami-images",
         ok=response.status_code < 400,
         name="images",
         url=url,

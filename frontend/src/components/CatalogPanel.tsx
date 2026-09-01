@@ -447,7 +447,7 @@ function Slice({
             </>
           )}
 
-          <JobDebug purpose="catalogue" className="sm:col-span-3" />
+          <JobDebug purpose="catalogue" tag={slice.scope} className="sm:col-span-3" />
           <RunLog runs={slice.recent_runs} />
 
           <p className="text-[11px] leading-relaxed text-faint sm:col-span-3">

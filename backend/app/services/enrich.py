@@ -234,14 +234,37 @@ def pending_items(db: Session, limit: int = 20) -> list[Item]:
     return candidates[:limit]
 
 
+def _say(item, stage: str) -> None:
+    """Report what the linker is working on, for the debug view.
+
+    It had nothing to say, so the panel showed it idle while it was plainly
+    making a request every few seconds - which is a worse answer than no
+    panel at all.
+    """
+    from . import reqlog
+
+    reqlog.doing(
+        "mfc",
+        f"{stage}: {item.name[:60]}" if item is not None else stage,
+        code=getattr(item, "code", None),
+        attempt=(getattr(item, "mfc_attempts", 0) or 0) + 1,
+        of_attempts=MAX_ATTEMPTS,
+    )
+
+
 def run_batch(db: Session, limit: int = 10) -> dict:
     """One pass of the background enrichment job."""
+    from . import reqlog
+
     linked, missed = 0, 0
-    for item in pending_items(db, limit=limit):
+    queue = list(pending_items(db, limit=limit))
+    for index, item in enumerate(queue, start=1):
+        _say(item, f"looking up {index} of {len(queue)}")
         if enrich_item(db, item):
             linked += 1
         else:
             missed += 1
+    reqlog.done("mfc")
     if linked or missed:
         log.info("MFC enrichment batch: %s linked, %s unmatched", linked, missed)
     return {"linked": linked, "unmatched": missed}

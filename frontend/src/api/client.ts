@@ -267,7 +267,8 @@ export const api = {
     activity: (days = 30) => get<MessageResponse>(`/admin/activity${qs({ days })}`),
     resetActivity: () => post<MessageResponse>('/admin/activity/reset'),
     load: (seconds = 60) => get<MessageResponse>(`/admin/load${qs({ seconds })}`),
-    jobDebug: (purpose: string) => get<MessageResponse>(`/admin/debug/${purpose}`),
+    jobDebug: (purpose: string, tag?: string) =>
+      get<MessageResponse>(`/admin/debug/${purpose}${qs({ tag })}`),
     recap: (days = 14) => get<MessageResponse>(`/admin/recap${qs({ days })}`),
     setBehaviour: (body: Record<string, boolean>) =>
       request<MessageResponse>('/admin/behaviour', {

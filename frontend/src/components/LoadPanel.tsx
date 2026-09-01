@@ -19,7 +19,10 @@ import clsx from 'clsx'
  */
 
 const HOST_LABELS: Record<string, string> = {
-  amiami: 'AmiAmi',
+  amiami: 'AmiAmi API',
+  // Its own server and its own allowance. Counting photos against the API
+  // budget made this panel report 116% of a limit they never drew on.
+  'amiami-images': 'AmiAmi photos',
   mfc: 'MyFigureCollection',
 }
 

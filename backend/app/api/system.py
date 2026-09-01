@@ -302,6 +302,7 @@ def preowned_recap(
 @admin.get("/debug/{purpose}", response_model=MessageResponse)
 def job_debug(
     purpose: str,
+    tag: str | None = Query(default=None),
     _admin: User = Depends(admin_user),
 ) -> MessageResponse:
     """What one job is doing now, and the requests it just made.
@@ -313,8 +314,12 @@ def job_debug(
     """
     from ..services import budget, reqlog
 
-    detail = reqlog.debug(purpose)
-    detail["budget"] = budget.snapshot()
+    detail = reqlog.debug(purpose, tag or "")
+    # Only for the jobs that actually queue for it. Photos have their own
+    # allowance on a different host and MyFigureCollection is a different site
+    # again, so showing them the AmiAmi pool said something untrue.
+    if purpose in budget.WEIGHTS:
+        detail["budget"] = budget.snapshot()
     return MessageResponse(message="ok", detail=detail)
 
 

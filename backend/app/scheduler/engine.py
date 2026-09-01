@@ -292,7 +292,7 @@ class PollingEngine:
     def run_crawler(self) -> None:
         try:
             with session_scope() as db:
-                with reqlog.purpose("catalogue"), budget.claim("catalogue"):
+                with budget.claim("catalogue"):
                     outcome = crawler.run_once(db)
             if outcome.pages:
                 self.crawl_pages_total += outcome.pages
