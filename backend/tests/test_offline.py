@@ -5257,6 +5257,106 @@ def _refuses(call) -> bool:
     return False
 
 
+def test_every_scheduled_job_actually_runs() -> None:
+    print("\n== Each background job survives being called ==")
+    from app.db import SessionLocal, init_db
+    from app.models import CatalogCrawl
+    from app.providers.base import SearchResult
+    from app.services import crawler, enrich, images, shelfwatch
+    import app.providers.amiami as amiami_provider
+
+    # Why this exists: the crawler spent a day doing nothing at all because a
+    # name used in one branch was never imported. Every run raised NameError,
+    # the scheduler caught it, logged it and moved on, and the only outward
+    # sign was the request panel quietly reading 3.8/min instead of 24 - no
+    # catalogue requests, no sweeps, and a debug view with nothing in it.
+    #
+    # Nothing in the suite called these end to end, so nothing noticed. This
+    # does: it is not a test of what they do, it is a test that they do it.
+    init_db()
+    db = SessionLocal()
+    db.query(CatalogCrawl).delete()
+    db.commit()
+    crawler.ensure_scopes(db, "amiami")
+    db.commit()
+
+    original = amiami_provider.AmiAmiProvider.search
+    amiami_provider.AmiAmiProvider.search = lambda self, query: SearchResult(
+        items=[], total=500, page=query.page, per_page=50
+    )
+    try:
+        run = crawler.run_once(db, "amiami", budget_seconds=1)
+        check("the crawler runs", run.scope != "", run.as_dict())
+        check("and says why it stopped", bool(run.stopped_because), run.stopped_because)
+    finally:
+        amiami_provider.AmiAmiProvider.search = original
+
+    check("the shelf sampler runs",
+          shelfwatch.run_once(db, "amiami", budget_seconds=1) is not None)
+    check("the photo queue runs", "fetched" in images.prefetch(db, limit=1))
+    check("the linker runs", "linked" in enrich.run_batch(db, limit=0))
+
+    db.query(CatalogCrawl).delete()
+    db.commit()
+    db.close()
+
+
+def test_opening_an_item_records_its_whole_gallery() -> None:
+    print("\n== Every photo an item page shows can be served ==")
+    from app.api.serializers import register_images
+    from app.db import SessionLocal, init_db
+    from app.models import CachedImage, Condition, Item
+    from app.services import images
+
+    init_db()
+    db = SessionLocal()
+    db.query(CachedImage).delete()
+    db.query(Item).delete()
+    db.commit()
+
+    item = Item(provider="amiami", code="G-1", name="With a gallery",
+                condition=Condition.preowned, currency="JPY",
+                image_url="https://img.amiami.com/main/a.jpg",
+                images=["https://img.amiami.com/main/a.jpg",
+                        "https://img.amiami.com/review/b.jpg",
+                        "https://img.amiami.com/review/c.jpg"])
+    db.add(item)
+    db.flush()
+
+    # What a catalogue pass records: the main photo, thumbnail and full. The
+    # gallery only arrives with a detail fetch and is not part of this.
+    images.register(db, images.urls_for_item(item), item_id=item.id)
+    db.commit()
+    catalogue_only = db.query(CachedImage).count()
+    check("the catalogue records the main photo", catalogue_only == 2, catalogue_only)
+    check(
+        "and not the gallery",
+        not db.query(CachedImage).filter(CachedImage.source_url.like("%review%")).count(),
+    )
+
+    # The public route is a hash of the source URL and cannot be reversed, so
+    # a photo nobody wrote down renders as a blank frame however well the file
+    # would download. Opening or reloading an item is where the gallery
+    # arrives, so that is where it has to be recorded - it was recorded
+    # nowhere, and the extra pictures stopped appearing after a reload.
+    register_images(db, [item])
+    with_gallery = db.query(CachedImage).count()
+    check("opening the page records the rest", with_gallery == 4, with_gallery)
+    check(
+        "including the review shots",
+        db.query(CachedImage).filter(CachedImage.source_url.like("%review%")).count() == 2,
+    )
+
+    # And every one of them can be turned into a servable route.
+    for url in item.images:
+        check(f"servable: {url.rsplit('/', 1)[-1]}", images.public_url(url) is not None)
+
+    db.query(CachedImage).delete()
+    db.query(Item).delete()
+    db.commit()
+    db.close()
+
+
 def main() -> int:
     test_url_parsing()
     test_release_dates()
@@ -5319,6 +5419,8 @@ def main() -> int:
     test_failures_are_attributed_and_requests_are_readable()
     test_a_deleted_listing_is_still_reachable_by_its_code()
     test_every_page_of_the_catalogue_can_be_reached()
+    test_every_scheduled_job_actually_runs()
+    test_opening_an_item_records_its_whole_gallery()
     test_photo_counts_distinguish_known_from_held()
     test_prefetch_works_through_its_backlog()
     test_the_photo_queue_is_reached_however_full_the_cache_is()

@@ -27,6 +27,9 @@ from ..config import settings
 from . import budget, reqlog
 from ..models import CatalogCrawl, CrawlState, Item, Watch, utcnow
 from ..providers import ProviderError, SearchQuery, get_provider
+# The shop's own name for each ordering, so the debug view can say which one
+# a slice is reading rather than only our label for it.
+from ..providers.amiami import SORT_KEYS
 from . import catalog
 from .pacing import HumanPacer
 

@@ -91,6 +91,13 @@ def get_history(
     profile: CostProfile = Depends(user_cost_profile),
 ) -> ItemHistoryOut:
     item = _get_or_404(db, item_id)
+    # Every photo this page will show, the gallery included. The public route
+    # is a hash of the source URL and cannot be reversed, so a photo that was
+    # never written down renders as a blank frame however well the file would
+    # download. The catalogue only records the main one - the gallery arrives
+    # with a detail fetch and was registered nowhere, so the extra pictures
+    # stopped appearing after a manual reload.
+    register_images(db, [item])
     points = catalog.history(db, item_id, days=days)
     return ItemHistoryOut(
         item=item_out(
@@ -206,4 +213,7 @@ def refresh_item(
         raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc
 
     updated, _ = catalog.upsert_item(db, normalized)
+    # The reload is the moment the gallery changes, so it is the moment worth
+    # recording it.
+    register_images(db, [updated])
     return item_out(db, updated, user=user, profile=profile, with_context=True)
