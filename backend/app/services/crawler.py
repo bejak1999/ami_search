@@ -25,8 +25,8 @@ from sqlalchemy.orm import Session
 
 from ..config import settings
 from . import budget, reqlog
-from ..models import CatalogCrawl, CrawlState, Item, Watch, utcnow
-from ..providers import ProviderError, SearchQuery, get_provider
+from ..models import CatalogCrawl, Condition, CrawlState, Item, Watch, utcnow
+from ..providers import ItemNotFound, ProviderError, SearchQuery, get_provider
 # The shop's own name for each ordering, so the debug view can say which one
 # a slice is reading rather than only our label for it.
 from ..providers.amiami import SORT_KEYS
@@ -626,6 +626,9 @@ def _crawl_slice(
     """One slice's turn, with its requests already attributed to it."""
     provider = get_provider(provider_id)
     pacer = _pacer()
+    #: Pre-owned products this run has just discovered, opened at the end so
+    #: the page reading keeps its rhythm rather than stalling on every find.
+    first_looks: list[int] = []
     #: Whether this slot took the pass to its end. Decided in the loop, acted
     #: on after the accounting, so the pass is complete before it is written.
     finished = False
@@ -739,7 +742,9 @@ def _crawl_slice(
             run.stopped_because = "no more results"
             break
 
-        new_count, changed_count = _store_page(db, result.items)
+        new_count, changed_count, fresh = _store_page(db, result.items)
+        if fresh and SCOPE_FILTERS.get(crawl.scope) == "preowned":
+            first_looks.extend(fresh)
         crawl.pages_fetched += 1
         crawl.items_seen += len(result.items)
         crawl.items_new += new_count
@@ -751,6 +756,11 @@ def _crawl_slice(
         run.items += len(result.items)
         run.new_items += new_count
         run.changed += changed_count
+
+    if first_looks:
+        opened = _first_looks(db, provider, first_looks, pacer, deadline, run)
+        if opened:
+            log.info("Opened %s newly found product(s) on %s", opened, crawl.scope)
 
     if crawl.state == CrawlState.running and run.stopped_because not in ("cycle complete",):
         crawl.state = CrawlState.paused
@@ -918,19 +928,77 @@ def _record_throughput(crawl: CatalogCrawl) -> None:
     )
 
 
-def _store_page(db: Session, items) -> tuple[int, int]:
-    """Persist one page. Returns (new items, items whose price or stock moved)."""
+def _store_page(db: Session, items) -> tuple[int, int, list[int]]:
+    """Persist one page.
+
+    Returns the count of new items, the count whose price or stock moved, and
+    the ids of pre-owned products seen here for the very first time - those
+    are the ones worth opening straight away, since nothing is yet known about
+    their shelf.
+    """
     new_count = 0
     changed_count = 0
+    fresh: list[int] = []
     for normalized in items:
         existed = catalog.get_item(db, normalized.provider, normalized.code) is not None
-        _item, changed = catalog.upsert_item(db, normalized, commit=False)
+        item, changed = catalog.upsert_item(db, normalized, commit=False)
         if not existed:
             new_count += 1
+            if item.condition == Condition.preowned:
+                db.flush()  # it needs an id before it can be queued
+                fresh.append(item.id)
         elif changed:
             changed_count += 1
     db.commit()
-    return new_count, changed_count
+    return new_count, changed_count, fresh
+
+
+#: How many newly found products one sweep run may open for itself.
+#:
+#: A first look is what anchors a product: until one happens there is no
+#: previous fetch to date the next copy against, so every copy found before it
+#: counts as "already there" rather than as an arrival. The sampler gets to
+#: them within the hour on its own - new products sort to the front of its
+#: queue - so this is about promptness, not about whether it happens at all.
+#:
+#: Intake is bursty: around four in the morning several hundred can arrive at
+#: once, against fewer than ten on an ordinary day. The cap covers an ordinary
+#: day outright and takes a useful bite out of a burst, while leaving the
+#: sweep doing what it came to do. Without one, a run that rediscovered the
+#: catalogue would spend its whole budget on detail fetches and read no pages
+#: at all.
+FIRST_LOOKS_PER_RUN = 60
+
+
+def _first_looks(
+    db: Session, provider, items: list[int], pacer, deadline: float, run: "CrawlRun"
+) -> int:
+    """Open newly found pre-owned products, so their shelf has a starting point."""
+    opened = 0
+    for item_id in items[:FIRST_LOOKS_PER_RUN]:
+        if time.monotonic() >= deadline:
+            break
+        item = db.get(Item, item_id)
+        if item is None or item.last_detail_fetch_at is not None:
+            continue  # something else got there first
+        pacer.sleep()
+        try:
+            detailed = provider.get_item(item.code)
+        except ItemNotFound:
+            catalog.mark_unavailable(db, item, commit=False)
+            db.commit()
+            opened += 1
+            continue
+        except ProviderError as exc:
+            # Groundwork, not the job. One refusal is not worth ending the
+            # sweep over, and the sampler will come to it anyway.
+            log.debug("First look at %s failed: %s", item.code, exc)
+            run.errors.append(str(exc))
+            break
+        catalog.upsert_item(db, detailed, commit=False)
+        db.commit()
+        opened += 1
+    return opened
 
 
 def _complete_cycle(db: Session, crawl: CatalogCrawl) -> None:
@@ -973,8 +1041,6 @@ def local_count(
     whole used catalogue into the in-stock total and reported 13,834 held
     against 2,813 listed, as though eleven thousand rows had gone stale.
     """
-    from ..models import Condition
-
     stmt = select(func.count(Item.id)).where(Item.provider == provider_id)
     kind = SCOPE_FILTERS.get(scope, "all")
     if kind == "preowned":

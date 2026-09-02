@@ -1,14 +1,33 @@
 import { useState } from 'react'
+import { useNavigate } from 'react-router-dom'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import {
+  Area,
+  AreaChart,
+  ResponsiveContainer,
+  Tooltip as RechartsTooltip,
+  XAxis,
+  YAxis,
+} from 'recharts'
 import { api } from '@/api/client'
 import { useToast } from '@/lib/toast'
 import { duration, relativeTime } from '@/lib/format'
 import { ActivityPanel } from './ActivityPanel'
 import { BackupPanel } from './BackupPanel'
+import { ItemCard } from './ItemCard'
 import { LoadPanel } from './LoadPanel'
 import { JobDebug } from './JobDebug'
 import { Icon } from './Icon'
-import { Badge, Card, Field, SectionTitle, SegmentedControl, Spinner, Toggle } from './ui'
+import {
+  Badge,
+  Card,
+  Field,
+  Modal,
+  SectionTitle,
+  SegmentedControl,
+  Spinner,
+  Toggle,
+} from './ui'
 import clsx from 'clsx'
 
 function Bar({ percent, tone = 'accent' }: { percent: number; tone?: 'accent' | 'positive' }) {
@@ -705,22 +724,169 @@ function RunLog({ runs }: { runs?: Run[] }) {
   )
 }
 
-/**
- * How much of the pre-owned catalogue is being followed copy by copy.
- *
- * Two numbers matter and they mean different things. "Counter seen" is every
- * product we have opened at least once, which is enough for a turnover
- * estimate. "With an estimate" is every product that actually has a shelf-life
- * figure attached, by any of the three methods.
- */
+/** One stacked bar whose parts add up to the whole, with a legend under it. */
+function Composition({
+  parts,
+  total,
+  tones,
+}: {
+  parts: { label: string; products: number }[]
+  total: number
+  tones: string[]
+}) {
+  const shown = parts.filter((p) => p.products > 0)
+  return (
+    <div>
+      <div className="flex h-2.5 overflow-hidden rounded-full bg-raised">
+        {shown.map((part, index) => (
+          <div
+            key={part.label}
+            className={clsx(tones[index % tones.length], 'h-full')}
+            style={{ width: `${total ? (part.products / total) * 100 : 0}%` }}
+            title={`${part.label}: ${part.products.toLocaleString('en-GB')}`}
+          />
+        ))}
+      </div>
+      <dl className="mt-1.5 grid gap-x-5 gap-y-0.5 text-[11px] sm:grid-cols-2">
+        {parts.map((part, index) => (
+          <div key={part.label} className="flex items-baseline justify-between gap-2">
+            <dt className="flex items-center gap-1.5 text-muted">
+              <span
+                className={clsx(
+                  tones[index % tones.length],
+                  'inline-block h-2 w-2 shrink-0 rounded-sm',
+                  part.products === 0 && 'opacity-30',
+                )}
+              />
+              <span className={clsx(part.products === 0 && 'text-faint')}>{part.label}</span>
+            </dt>
+            <dd
+              className={clsx(
+                'tabular-nums',
+                part.products === 0 ? 'text-faint' : 'text-ink',
+              )}
+            >
+              {part.products.toLocaleString('en-GB')}
+            </dd>
+          </div>
+        ))}
+      </dl>
+    </div>
+  )
+}
+
+/** The figures inside one attention tier, opened from the cadence table. */
+function TierList({ tier, onClose }: { tier: string; onClose: () => void }) {
+  const navigate = useNavigate()
+  const [page, setPage] = useState(1)
+  const list = useQuery({
+    queryKey: ['admin', 'shelfTier', tier, page],
+    queryFn: () => api.admin.shelfTier(tier, page),
+  })
+  const d = list.data?.detail as
+    | {
+        total: number
+        pages: number
+        items: {
+          item: any
+          last_look_hours: number | null
+          due_in_hours: number | null
+          dwell_days: number | null
+          dwell_basis: string | null
+          copies: number
+        }[]
+      }
+    | undefined
+
+  const RULE: Record<string, string> = {
+    hot: 'On your wishlist, or named by a watch. Looked at every couple of hours.',
+    warm: 'Has shown turnover already, or belongs to a series you collect. Every twelve hours.',
+    cold: 'Everything else. Every three days — enough to feed the statistics.',
+  }
+
+  return (
+    <Modal
+      open
+      onClose={onClose}
+      title={`${tier[0].toUpperCase()}${tier.slice(1)} products`}
+      subtitle={RULE[tier]}
+    >
+      {list.isLoading || !d ? (
+        <Spinner className="h-4 w-4" />
+      ) : (
+        <div className="space-y-3">
+          <p className="text-xs text-muted">
+            {d.total.toLocaleString('en-GB')} in this tier, longest since a look first.
+          </p>
+          <div className="grid grid-cols-2 gap-3 sm:grid-cols-3">
+            {d.items.map((row) => (
+              <div key={row.item.id} className="space-y-1">
+                <ItemCard
+                  item={row.item}
+                  onOpen={() => row.item.id && navigate(`/item/${row.item.id}`)}
+                  compact
+                />
+                <p className="px-0.5 text-[10px] leading-relaxed text-faint">
+                  {row.last_look_hours === null
+                    ? 'never opened'
+                    : `looked at ${duration(row.last_look_hours * 3600)} ago`}
+                  {row.due_in_hours !== null && (
+                    <>
+                      {' · '}
+                      {row.due_in_hours <= 0
+                        ? 'due now'
+                        : `due in ${duration(row.due_in_hours * 3600)}`}
+                    </>
+                  )}
+                  {row.dwell_days !== null && <> · sells in ~{row.dwell_days}d</>}
+                  {row.copies > 0 && <> · {row.copies} on the shelf</>}
+                </p>
+              </div>
+            ))}
+          </div>
+          {d.pages > 1 && (
+            <div className="flex items-center justify-between text-xs">
+              <button
+                onClick={() => setPage((n) => Math.max(1, n - 1))}
+                disabled={page <= 1}
+                className="btn-quiet disabled:opacity-40"
+              >
+                Previous
+              </button>
+              <span className="text-faint">
+                Page {page} of {d.pages}
+              </span>
+              <button
+                onClick={() => setPage((n) => Math.min(d.pages, n + 1))}
+                disabled={page >= d.pages}
+                className="btn-quiet disabled:opacity-40"
+              >
+                Next
+              </button>
+            </div>
+          )}
+        </div>
+      )}
+    </Modal>
+  )
+}
+
 function ShelfLifePanel() {
   const toast = useToast()
   const queryClient = useQueryClient()
+  const [openTier, setOpenTier] = useState<string | null>(null)
 
   const shelf = useQuery({
     queryKey: ['admin', 'shelfLife'],
     queryFn: () => api.admin.shelfLife(),
     refetchInterval: 20_000,
+  })
+  // Asked for separately and far less often: this one walks every copy ever
+  // recorded, where the coverage figures only count rows.
+  const stats = useQuery({
+    queryKey: ['admin', 'shelfStats'],
+    queryFn: () => api.admin.shelfStats(),
+    refetchInterval: 300_000,
   })
 
   const runNow = useMutation({
@@ -739,10 +905,23 @@ function ShelfLifePanel() {
         preowned_closed: number
         listings_sold: number
         counter_seen: number
+        counter_anchored: number
         with_estimate: number
         due_now: number
-        tiers: Record<string, number>
-        by_basis: Record<string, number>
+        cadence: {
+          tier: string
+          products: number
+          every_hours: number
+          overdue: number
+          seen_in_window: number
+          oldest_look_hours: number | null
+          keeping_up: boolean
+        }[]
+        demanded_per_hour: number
+        looks_per_hour: number
+        looks_last_day: number
+        confidence: { basis: string; label: string; products: number }[]
+        progress: { stage: string; label: string; products: number }[]
         listings_total: number
         listings_live: number
         listings_departed: number
@@ -750,18 +929,33 @@ function ShelfLifePanel() {
       }
     | undefined
 
+  const s = stats.data?.detail as
+    | {
+        survival: {
+          copies: number
+          departures: number
+          median_days: number | null
+          still_listed_after: Record<string, number | null>
+          curve: { day: number; still_listed: number }[]
+        }
+        by_grade: {
+          grade: string
+          copies: number
+          departures: number
+          median_days: number | null
+        }[]
+        cheapest_first: { wins: number; of: number; percent: number } | null
+      }
+    | undefined
+
   if (!d) return null
 
-  const pct = (n: number) => (d.preowned_total ? (n / d.preowned_total) * 100 : 0)
-  const BASIS_LABEL: Record<string, string> = {
-    observed: 'Watched copies sell',
-    intake: 'Shop turnover',
-    intake_bootstrap: 'Turnover, rough',
-    product: 'Whole listing',
-  }
+  const capacityShort = d.looks_per_hour > 0 && d.looks_per_hour < d.demanded_per_hour
 
   return (
     <Card className="p-4">
+      {openTier && <TierList tier={openTier} onClose={() => setOpenTier(null)} />}
+
       <div className="mb-3 flex items-start justify-between gap-3">
         <div>
           <h3 className="flex items-center gap-2 text-sm font-semibold">
@@ -782,30 +976,120 @@ function ShelfLifePanel() {
         </button>
       </div>
 
-      <div className="space-y-3">
+      {/* Each tier against the cadence it was promised, rather than against a
+          daily round nobody designed: cold is meant to be read every three
+          days, so "seen today" would report it as permanently behind. */}
+      <div className="overflow-x-auto">
+        <table className="w-full text-xs">
+          <thead className="text-faint">
+            <tr className="text-left">
+              <th className="pb-1 pr-3 font-normal">Tier</th>
+              <th className="pb-1 pr-3 text-right font-normal">Products</th>
+              <th className="pb-1 pr-3 text-right font-normal">Read every</th>
+              <th className="pb-1 pr-3 text-right font-normal">In its window</th>
+              <th className="pb-1 pr-3 text-right font-normal">Overdue</th>
+              <th className="pb-1 text-right font-normal">Longest untouched</th>
+            </tr>
+          </thead>
+          <tbody className="tabular-nums">
+            {d.cadence.map((row) => (
+              <tr key={row.tier} className="border-t border-line/60">
+                <td className="py-1.5 pr-3">
+                  <button
+                    onClick={() => setOpenTier(row.tier)}
+                    className="capitalize underline decoration-dotted underline-offset-2 hover:text-accent"
+                    title={`See which figures are in the ${row.tier} tier`}
+                  >
+                    {row.tier}
+                  </button>
+                </td>
+                <td className="py-1.5 pr-3 text-right">
+                  {row.products.toLocaleString('en-GB')}
+                </td>
+                <td className="py-1.5 pr-3 text-right text-muted">{row.every_hours}h</td>
+                <td className="py-1.5 pr-3 text-right">
+                  {row.seen_in_window.toLocaleString('en-GB')}
+                </td>
+                <td
+                  className={clsx(
+                    'py-1.5 pr-3 text-right',
+                    row.overdue > 0 ? 'text-warning' : 'text-faint',
+                  )}
+                >
+                  {row.overdue.toLocaleString('en-GB')}
+                </td>
+                <td
+                  className={clsx(
+                    'py-1.5 text-right',
+                    row.oldest_look_hours === null
+                      ? 'text-faint'
+                      : row.keeping_up
+                        ? 'text-positive'
+                        : 'text-warning',
+                  )}
+                  title={
+                    row.keeping_up
+                      ? 'Even the most neglected product here is inside its own interval.'
+                      : 'Something here has waited longer than this tier promises.'
+                  }
+                >
+                  {row.oldest_look_hours === null
+                    ? '—'
+                    : duration(row.oldest_look_hours * 3600)}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+
+      {/* What the cadences ask for against what is actually happening. Nothing
+          showed this, so a promise the sampler could not keep looked exactly
+          like one it was keeping. */}
+      <p
+        className={clsx(
+          'mt-2 text-[11px] leading-relaxed',
+          capacityShort ? 'text-warning' : 'text-faint',
+        )}
+      >
+        These cadences ask for{' '}
+        <span className="tabular-nums">{Math.round(d.demanded_per_hour)}</span> looks an hour.{' '}
+        {d.looks_per_hour > 0 ? (
+          <>
+            <span className="tabular-nums">{d.looks_per_hour}</span> happened in the last hour,{' '}
+            <span className="tabular-nums">{d.looks_last_day.toLocaleString('en-GB')}</span> in
+            the last day.
+            {capacityShort && ' Less than asked for, so the intervals above are aspirations.'}
+          </>
+        ) : (
+          <>Nothing has been looked at in the last hour.</>
+        )}
+      </p>
+
+      <div className="mt-4 grid gap-4 border-t border-line pt-3 sm:grid-cols-2">
         <div>
-          <div className="mb-1 flex justify-between text-xs">
-            <span className="text-muted">Products opened at least once</span>
-            <span
-              className="tabular-nums"
-              title={
-                d.preowned_closed
-                  ? `Out of the ${d.preowned_total.toLocaleString('en-GB')} still on sale. A further ${d.preowned_closed.toLocaleString('en-GB')} are records of listings the shop has removed — nothing looks at those again, so they are not part of the target.`
-                  : undefined
-              }
-            >
-              {d.counter_seen.toLocaleString('en-GB')} of{' '}
-              {d.preowned_total.toLocaleString('en-GB')}
-            </span>
-          </div>
-          <Bar percent={pct(d.counter_seen)} />
+          <p className="mb-1.5 text-xs font-medium text-muted">
+            How firm the figures are
+          </p>
+          <Composition
+            parts={d.confidence.map((c) => ({ label: c.label, products: c.products }))}
+            total={d.with_estimate}
+            tones={['bg-positive', 'bg-accent', 'bg-warning', 'bg-line']}
+          />
+          {(d.confidence.find((c) => c.basis === 'observed')?.products ?? 0) === 0 && (
+            <p className="mt-1.5 text-[11px] leading-relaxed text-faint">
+              No product yet has the three watched sales the firmest method needs, so every
+              figure on this page is derived rather than observed.
+            </p>
+          )}
         </div>
         <div>
-          <div className="mb-1 flex justify-between text-xs">
-            <span className="text-muted">Products with a shelf-life figure</span>
-            <span className="tabular-nums">{d.with_estimate.toLocaleString('en-GB')}</span>
-          </div>
-          <Bar percent={pct(d.with_estimate)} tone="positive" />
+          <p className="mb-1.5 text-xs font-medium text-muted">What is still owed</p>
+          <Composition
+            parts={d.progress.map((p) => ({ label: p.label, products: p.products }))}
+            total={d.preowned_total}
+            tones={['bg-line', 'bg-warning', 'bg-warning/60', 'bg-accent', 'bg-positive']}
+          />
         </div>
       </div>
 
@@ -819,11 +1103,10 @@ function ShelfLifePanel() {
           <p className="font-mono tabular-nums">{d.listings_live.toLocaleString('en-GB')}</p>
         </div>
         <div>
-          {/* Departures we can attribute to a sale, rather than every copy
-              no longer on the shelf. The rest are batch disappearances we
-              record as the weaker claim, and copies closed by a repair
-              without anyone watching them go. */}
-          <p className="text-faint" title="Copies that went while their product stayed on sale, plus products AmiAmi deleted outright. Batch disappearances are not counted here.">
+          <p
+            className="text-faint"
+            title="Copies that went while their product stayed on sale, plus products AmiAmi deleted outright. Batch disappearances are not counted here."
+          >
             Seen to sell
           </p>
           <p className="font-mono tabular-nums">{d.listings_sold.toLocaleString('en-GB')}</p>
@@ -840,31 +1123,115 @@ function ShelfLifePanel() {
         </div>
       </div>
 
-      {Object.keys(d.by_basis).length > 0 && (
-        <div className="mt-3 border-t border-line pt-3">
-          <p className="mb-1.5 text-xs text-faint">Where the figures come from</p>
-          <div className="flex flex-wrap gap-x-4 gap-y-1 text-xs">
-            {Object.entries(d.by_basis).map(([basis, count]) => (
-              <span key={basis} className="text-muted">
-                {BASIS_LABEL[basis] ?? basis}:{' '}
-                <span className="font-mono tabular-nums text-ink">
-                  {count.toLocaleString('en-GB')}
-                </span>
-              </span>
-            ))}
+      {/* The question the whole subsystem exists for. Per product the sample
+          is almost always too thin to draw; over every copy at once it is not. */}
+      {s?.survival && s.survival.departures > 0 && (
+        <div className="mt-4 border-t border-line pt-3">
+          <div className="mb-1 flex flex-wrap items-baseline justify-between gap-2">
+            <p className="text-xs font-medium text-muted">How long a copy lasts</p>
+            <p className="text-[11px] text-faint">
+              {s.survival.copies.toLocaleString('en-GB')} copies,{' '}
+              {s.survival.departures.toLocaleString('en-GB')} of them gone
+              {s.survival.median_days !== null && (
+                <>
+                  {' · '}
+                  <span className="text-ink">half sell within {s.survival.median_days}d</span>
+                </>
+              )}
+            </p>
           </div>
+          <div className="h-40">
+            <ResponsiveContainer width="100%" height="100%">
+              <AreaChart data={s.survival.curve} margin={{ top: 4, right: 4, bottom: 0, left: 0 }}>
+                <XAxis
+                  dataKey="day"
+                  type="number"
+                  domain={[0, 'dataMax']}
+                  tick={{ fontSize: 10 }}
+                  stroke="currentColor"
+                  className="text-faint"
+                  tickFormatter={(v: number) => `${Math.round(v)}d`}
+                />
+                <YAxis
+                  domain={[0, 100]}
+                  tick={{ fontSize: 10 }}
+                  stroke="currentColor"
+                  className="text-faint"
+                  tickFormatter={(v: number) => `${v}%`}
+                  width={34}
+                />
+                <RechartsTooltip
+                  contentStyle={{ fontSize: 11 }}
+                  formatter={(v: any) => [`${v}% still listed`, '']}
+                  labelFormatter={(v: any) => `after ${Math.round(Number(v))} days`}
+                />
+                <Area
+                  type="stepAfter"
+                  dataKey="still_listed"
+                  stroke="var(--accent)"
+                  fill="var(--accent)"
+                  fillOpacity={0.15}
+                  strokeWidth={1.5}
+                  dot={false}
+                  isAnimationActive={false}
+                />
+              </AreaChart>
+            </ResponsiveContainer>
+          </div>
+          <p className="mt-1 text-[11px] leading-relaxed text-faint">
+            Of the copies listed, how many are still there after N days. Copies that were
+            already on the shelf when we first looked count as &ldquo;lasted at least this
+            long&rdquo; rather than as sales — leaving them out would say everything sells
+            briskly, since the slow ones are precisely the ones still sitting there.
+          </p>
         </div>
       )}
 
-      {Object.keys(d.tiers).length > 0 && (
-        <p className="mt-3 border-t border-line pt-2 text-xs text-faint">
-          Attention split:{' '}
-          {(['hot', 'warm', 'cold'] as const)
-            .filter((t) => d.tiers[t])
-            .map((t) => `${d.tiers[t].toLocaleString('en-GB')} ${t}`)
-            .join(' · ')}{' '}
-          · {d.requests_per_minute} requests a minute
-        </p>
+      {s && (s.by_grade.length > 0 || s.cheapest_first) && (
+        <div className="mt-4 grid gap-4 border-t border-line pt-3 sm:grid-cols-2">
+          {s.by_grade.length > 0 && (
+            <div>
+              <p className="mb-1.5 text-xs font-medium text-muted">Do the good ones go first?</p>
+              <dl className="space-y-0.5 text-[11px]">
+                {s.by_grade
+                  .filter((row) => row.departures > 0)
+                  .map((row) => (
+                    <div key={row.grade} className="flex items-baseline justify-between gap-3">
+                      <dt className="text-muted">
+                        Grade {row.grade}
+                        <span className="ml-1.5 text-faint">
+                          ({row.copies.toLocaleString('en-GB')} copies)
+                        </span>
+                      </dt>
+                      <dd className="tabular-nums">
+                        {row.median_days === null ? (
+                          <span className="text-faint">too few sold</span>
+                        ) : (
+                          <>half within {row.median_days}d</>
+                        )}
+                      </dd>
+                    </div>
+                  ))}
+              </dl>
+            </div>
+          )}
+          {s.cheapest_first && (
+            <div>
+              <p className="mb-1.5 text-xs font-medium text-muted">Does the bargain go first?</p>
+              <p className="text-[11px] leading-relaxed text-muted">
+                Of {s.cheapest_first.of.toLocaleString('en-GB')} sales where more than one copy
+                was on the shelf, the one that sold was the cheapest{' '}
+                <span className="font-medium text-ink">{s.cheapest_first.percent}%</span> of the
+                time.
+              </p>
+              <p className="mt-1 text-[11px] leading-relaxed text-faint">
+                {s.cheapest_first.percent >= 60
+                  ? 'So hesitating tends to cost you the bargain rather than getting you a better one.'
+                  : 'So the cheap copy is not automatically the one that goes — usually there is a reason it is cheap.'}
+              </p>
+            </div>
+          )}
+        </div>
       )}
 
       <JobDebug purpose="shelf" className="mt-3" />

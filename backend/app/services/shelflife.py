@@ -171,6 +171,37 @@ def lifetime_of(listing: Listing, now: datetime | None = None) -> Lifetime:
 # ---------------------------------------------------------------------------
 
 
+def kaplan_meier_curve(samples: list[tuple[float, bool]]) -> list[tuple[float, float, int]]:
+    """The survival curve itself: (day, still listed, how many events here).
+
+    Same estimator as the median below, kept as one calculation so the two
+    cannot disagree. Returned as the steps rather than a smooth line, because
+    that is what it is - the fraction only moves when something actually
+    leaves, and drawing it as a curve between those points would imply
+    measurements nobody made.
+    """
+    if not samples:
+        return []
+
+    ordered = sorted(samples, key=lambda s: s[0])
+    at_risk = len(ordered)
+    survival = 1.0
+    steps: list[tuple[float, float, int]] = [(0.0, 1.0, 0)]
+    index = 0
+
+    while index < len(ordered):
+        time = ordered[index][0]
+        tied = [s for s in ordered[index:] if s[0] == time]
+        events = sum(1 for _, ended in tied if ended)
+        if events and at_risk > 0:
+            survival *= 1.0 - events / at_risk
+            steps.append((time, survival, events))
+        at_risk -= len(tied)
+        index += len(tied)
+
+    return steps
+
+
 def kaplan_meier_median(samples: list[tuple[float, bool]]) -> float | None:
     """Median lifetime from observations where some have not ended yet.
 
@@ -783,6 +814,197 @@ def summary(db: Session, item: Item, now: datetime | None = None) -> dict:
         ),
     }
 
+
+
+# ---------------------------------------------------------------------------
+# Catalogue-wide statistics
+# ---------------------------------------------------------------------------
+
+
+def _lifetime_rows(db: Session, now: datetime | None = None) -> list[tuple]:
+    """Every copy's lifetime, as (days, ended, grade, price, item_id).
+
+    Column-selected rather than loaded as objects: this walks every copy the
+    tracker has ever recorded, and twenty thousand mapped rows to compute one
+    chart is a page load nobody would forgive.
+
+    "ended" is deliberately conservative. A copy that was already on the shelf
+    when we first looked at its product has no known start, so what we
+    measured is a fragment of its real life; counting that fragment as a
+    completed sale would pull every figure down. It counts as "lasted at least
+    this long" instead - which is the whole reason Kaplan-Meier is here.
+    """
+    now = _as_aware(now) or utcnow()
+    rows = db.execute(
+        select(
+            Listing.first_seen_at,
+            Listing.last_seen_at,
+            Listing.appeared_after,
+            Listing.status,
+            Listing.outcome,
+            Listing.item_grade,
+            Listing.price,
+            Listing.item_id,
+        )
+    ).all()
+
+    out: list[tuple] = []
+    for first, last, after, status, outcome, grade, price, item_id in rows:
+        live = status == ListingStatus.live
+        end = now if live else _as_aware(last)
+        days = _days_between(first, end) or 0.0
+        # A batch disappearance is not a sale, so it is not an event either.
+        ended = (
+            not live
+            and after is not None
+            and outcome in (ListingOutcome.sold, ListingOutcome.delisted)
+        )
+        out.append((days, ended, grade, price, item_id))
+    return out
+
+
+def survival_curve(db: Session, points: int = 60) -> dict:
+    """How much of the shelf is still there after N days, across the shop.
+
+    The per-product version of this is usually too thin to say anything - a
+    figure with two copies and one sale has no curve worth drawing. Over every
+    copy at once the sample is large enough, and the question it answers is
+    the one the whole subsystem exists for: how long do you have to think
+    about it.
+    """
+    rows = _lifetime_rows(db)
+    samples = [(days, ended) for days, ended, *_ in rows]
+    events = sum(1 for _, ended in samples if ended)
+
+    full = kaplan_meier_curve(samples)
+
+    def at(day: float) -> float | None:
+        surviving = None
+        for time, value, _ in full:
+            if time > day:
+                break
+            surviving = value
+        return round(surviving * 100, 1) if surviving is not None else None
+
+    # Thinned to something a chart can draw. Every step is a real observation,
+    # so the ones kept are real too - this drops points, it does not smooth.
+    steps = full
+    if len(steps) > points:
+        stride = len(steps) / points
+        kept = [steps[int(index * stride)] for index in range(points)]
+        if kept[-1] != steps[-1]:
+            kept.append(steps[-1])
+        steps = kept
+
+    return {
+        "copies": len(samples),
+        "departures": events,
+        "median_days": (
+            round(median, 1)
+            if (median := kaplan_meier_median(samples)) is not None
+            else None
+        ),
+        "still_listed_after": {str(day): at(float(day)) for day in (1, 3, 7, 14, 30, 60)},
+        "curve": [
+            {"day": round(day, 2), "still_listed": round(value * 100, 1)}
+            for day, value, _ in steps
+        ],
+    }
+
+
+def dwell_by_grade(db: Session) -> list[dict]:
+    """Whether the good copies go first, as a median per condition grade.
+
+    A median rather than a mean, and Kaplan-Meier rather than either, because
+    the copies still sitting there are exactly the slow ones: leaving them out
+    would say every grade sells briskly.
+    """
+    buckets: dict[str, list[tuple[float, bool]]] = {}
+    for days, ended, grade, _price, _item in _lifetime_rows(db):
+        if not grade:
+            continue
+        buckets.setdefault(grade.upper(), []).append((days, ended))
+
+    out = []
+    for grade, samples in buckets.items():
+        events = sum(1 for _, ended in samples if ended)
+        out.append(
+            {
+                "grade": grade,
+                "copies": len(samples),
+                "departures": events,
+                "median_days": (
+                    round(median, 1)
+                    if (median := kaplan_meier_median(samples)) is not None
+                    else None
+                ),
+            }
+        )
+    return sorted(out, key=lambda row: _grade_key(row["grade"]))
+
+
+def cheapest_first_overall(db: Session) -> dict | None:
+    """How often the copy that sold was the cheapest one on the shelf.
+
+    Worth knowing before deciding to wait. If the bargain always goes first,
+    hesitating costs you the bargain rather than getting you a better one; if
+    it does not, the cheap copy is cheap for a reason somebody else can see.
+
+    Counted only where there was a choice to make: a product with one copy on
+    the shelf tells us nothing about which copy buyers prefer.
+    """
+    sold = db.execute(
+        select(Listing.id, Listing.item_id, Listing.price, Listing.last_seen_at)
+        .where(
+            Listing.status == ListingStatus.gone,
+            Listing.outcome == ListingOutcome.sold,
+            Listing.price.is_not(None),
+        )
+    ).all()
+    if not sold:
+        return None
+
+    wanted = {item_id for _, item_id, _, _ in sold}
+    siblings: dict[int, list[tuple]] = {}
+    for start in range(0, len(wanted), 5_000):
+        chunk = list(wanted)[start : start + 5_000]
+        for row_id, item_id, price, first_seen, vanished in db.execute(
+            select(
+                Listing.id,
+                Listing.item_id,
+                Listing.price,
+                Listing.first_seen_at,
+                Listing.vanished_before,
+            ).where(Listing.item_id.in_(chunk), Listing.price.is_not(None))
+        ).all():
+            siblings.setdefault(item_id, []).append((row_id, price, first_seen, vanished))
+
+    wins = considered = 0
+    for row_id, item_id, price, moment in sold:
+        when = _as_aware(moment)
+        # Identified by row, not by price and date: two copies of the same
+        # figure at the same price on the same day are ordinary, and matching
+        # on those would have excluded the wrong one from its own comparison.
+        rivals = [
+            other_price
+            for other_id, other_price, other_first, other_gone in siblings.get(item_id, [])
+            if other_id != row_id
+            and (_as_aware(other_first) or when) <= when
+            and (other_gone is None or (_as_aware(other_gone) or when) >= when)
+        ]
+        if not rivals:
+            continue  # nothing else was on the shelf, so there was no choice
+        considered += 1
+        if price <= min(rivals):
+            wins += 1
+
+    if not considered:
+        return None
+    return {
+        "wins": wins,
+        "of": considered,
+        "percent": round(wins / considered * 100, 1),
+    }
 
 def daily_recap(db: Session, days: int = 14) -> dict:
     """Pre-owned copies arriving and leaving, day by day.

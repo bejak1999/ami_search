@@ -6604,6 +6604,236 @@ def test_only_the_preowned_slice_offers_a_head_sweep() -> None:
     db.close()
 
 
+def test_the_survival_curve_keeps_the_slow_copies_in() -> None:
+    print("\n== How long a copy lasts, without flattering the answer ==")
+    from app.db import SessionLocal, init_db
+    from app.models import Condition, Item, Listing, ListingOutcome, ListingStatus
+    from app.services import shelflife
+
+    init_db()
+    db = SessionLocal()
+    db.query(Listing).delete()
+    db.query(Item).delete()
+    db.commit()
+
+    now = datetime.now(timezone.utc)
+    item = Item(provider="amiami", code="SV-1", name="Figure",
+                condition=Condition.preowned, currency="JPY")
+    db.add(item)
+    db.flush()
+
+    def copy(code, listed_days_ago, sold_after=None, grade="B", price=3000,
+             datable=True):
+        listed = now - timedelta(days=listed_days_ago)
+        gone = listed + timedelta(days=sold_after) if sold_after is not None else None
+        db.add(Listing(
+            item_id=item.id, provider="amiami", code=code, price=price,
+            last_price=price, currency="JPY", item_grade=grade,
+            appeared_after=listed - timedelta(hours=6) if datable else None,
+            first_seen_at=listed,
+            last_seen_at=gone or now,
+            vanished_before=gone,
+            status=ListingStatus.gone if gone else ListingStatus.live,
+            outcome=ListingOutcome.sold if gone else None,
+        ))
+
+    # Four sold quickly, six are still sitting there after far longer. Taking
+    # the mean of only the four says this figure sells in two days, which is
+    # the classic way to get this wrong: the slow ones never enter the average
+    # precisely because they have not finished.
+    for n in range(4):
+        copy(f"SV-1-R{n}", 30, sold_after=2)
+    for n in range(4, 10):
+        copy(f"SV-1-R{n}", 40)
+    db.commit()
+
+    curve = shelflife.survival_curve(db)
+    check("every copy is in the sample", curve["copies"] == 10, curve["copies"])
+    check("but only the finished ones are events", curve["departures"] == 4,
+          curve["departures"])
+    check(
+        "so the curve does not fall to half",
+        curve["median_days"] is None,
+        curve["median_days"],
+    )
+    after_two = curve["still_listed_after"]["3"]
+    check("and after three days most are still there", 55 < after_two < 65, after_two)
+
+    # A copy that was already on the shelf when we first looked has no known
+    # start, so the span we measured is a fragment of its real life. Counting
+    # that fragment as a completed sale would drag every figure down.
+    db.query(Listing).delete()
+    db.commit()
+    for n in range(6):
+        copy(f"SV-2-R{n}", 3, sold_after=1, datable=False)
+    for n in range(6, 10):
+        copy(f"SV-2-R{n}", 40)
+    db.commit()
+    curve = shelflife.survival_curve(db)
+    check("a copy we never saw arrive is not counted as a sale",
+          curve["departures"] == 0, curve["departures"])
+
+    # A batch disappearance is not a sale either - that is the whole reason it
+    # is recorded as the weaker claim.
+    db.query(Listing).delete()
+    db.commit()
+    copy("SV-3-R1", 10, sold_after=4)
+    db.commit()
+    db.query(Listing).filter_by(code="SV-3-R1").one().outcome = ListingOutcome.withdrawn
+    db.commit()
+    check("a withdrawal is not a departure",
+          shelflife.survival_curve(db)["departures"] == 0)
+
+    db.query(Listing).delete()
+    db.query(Item).delete()
+    db.commit()
+    db.close()
+
+
+def test_the_bargain_is_only_counted_where_there_was_a_choice() -> None:
+    print("\n== Did the cheapest copy go first ==")
+    from app.db import SessionLocal, init_db
+    from app.models import Condition, Item, Listing, ListingOutcome, ListingStatus
+    from app.services import shelflife
+
+    init_db()
+    db = SessionLocal()
+    db.query(Listing).delete()
+    db.query(Item).delete()
+    db.commit()
+
+    now = datetime.now(timezone.utc)
+
+    def product(code: str) -> Item:
+        item = Item(provider="amiami", code=code, name=code,
+                    condition=Condition.preowned, currency="JPY")
+        db.add(item)
+        db.flush()
+        return item
+
+    def copy(item, code, price, sold=False):
+        db.add(Listing(
+            item_id=item.id, provider="amiami", code=code, price=price,
+            last_price=price, currency="JPY",
+            first_seen_at=now - timedelta(days=10),
+            last_seen_at=now - timedelta(days=1) if sold else now,
+            vanished_before=now - timedelta(days=1) if sold else None,
+            status=ListingStatus.gone if sold else ListingStatus.live,
+            outcome=ListingOutcome.sold if sold else None,
+        ))
+
+    # One product where the cheap copy went, one where the dear one did.
+    a = product("CF-1")
+    copy(a, "CF-1-R1", 2000, sold=True)
+    copy(a, "CF-1-R2", 5000)
+    b = product("CF-2")
+    copy(b, "CF-2-R1", 2000)
+    copy(b, "CF-2-R2", 5000, sold=True)
+    # And one where there was nothing to choose between: a single copy that
+    # sold says nothing about which copy buyers prefer, so it must not count.
+    c = product("CF-3")
+    copy(c, "CF-3-R1", 4000, sold=True)
+    db.commit()
+
+    result = shelflife.cheapest_first_overall(db)
+    check("only the sales with a choice are counted", result["of"] == 2, result)
+    check("and the cheap one won one of them", result["wins"] == 1, result)
+    check("which reads as fifty per cent", result["percent"] == 50.0, result)
+
+    db.query(Listing).delete()
+    db.query(Item).delete()
+    db.commit()
+    db.close()
+
+
+def test_the_shelf_panel_adds_up() -> None:
+    print("\n== Every bar on the shelf panel accounts for everything ==")
+    from app.db import SessionLocal, init_db
+    from app.models import Condition, Item
+    from app.services import shelfwatch
+
+    init_db()
+    db = SessionLocal()
+    db.query(Item).delete()
+    db.commit()
+
+    now = datetime.now(timezone.utc)
+    # A spread across every stage, so nothing can be double counted without
+    # the totals disagreeing.
+    for n in range(20):  # never opened
+        db.add(Item(provider="amiami", code=f"N-{n}", name="never",
+                    condition=Condition.preowned, currency="JPY", order_closed=False))
+    for n in range(30):  # opened once
+        db.add(Item(provider="amiami", code=f"O-{n}", name="once",
+                    condition=Condition.preowned, currency="JPY", order_closed=False,
+                    shelf_tier="cold", last_detail_fetch_at=now - timedelta(hours=5),
+                    dwell_days=12.0, dwell_basis="intake_bootstrap"))
+    for n in range(40):  # looked at twice, estimate only
+        db.add(Item(provider="amiami", code=f"E-{n}", name="estimated",
+                    condition=Condition.preowned, currency="JPY", order_closed=False,
+                    shelf_tier="warm", last_detail_fetch_at=now - timedelta(hours=2),
+                    prev_detail_fetch_at=now - timedelta(days=4),
+                    dwell_days=9.0, dwell_basis="intake_bootstrap"))
+    for n in range(10):  # looked at twice, measured
+        db.add(Item(provider="amiami", code=f"M-{n}", name="measured",
+                    condition=Condition.preowned, currency="JPY", order_closed=False,
+                    shelf_tier="hot", last_detail_fetch_at=now - timedelta(minutes=20),
+                    prev_detail_fetch_at=now - timedelta(days=5),
+                    dwell_days=4.0, dwell_basis="intake"))
+    for n in range(5):  # looked at twice, no figure at all
+        db.add(Item(provider="amiami", code=f"U-{n}", name="unrated",
+                    condition=Condition.preowned, currency="JPY", order_closed=False,
+                    shelf_tier="cold", last_detail_fetch_at=now - timedelta(hours=1),
+                    prev_detail_fetch_at=now - timedelta(days=6)))
+    # Sold out: outside every figure here, because nothing looks at them again.
+    for n in range(15):
+        db.add(Item(provider="amiami", code=f"C-{n}", name="closed",
+                    condition=Condition.preowned, currency="JPY", order_closed=True,
+                    shelf_tier="cold", last_detail_fetch_at=now))
+    db.commit()
+
+    cover = shelfwatch.coverage(db)
+    check("the followable population is what it can work on",
+          cover["preowned_total"] == 105, cover["preowned_total"])
+    check("with the sold-out ones counted apart",
+          cover["preowned_closed"] == 15, cover["preowned_closed"])
+
+    # The old bar counted products whose copies carried a readable intake
+    # number, under a label that said "opened at least once" - so a product
+    # opened and answered without numbers was missing from it.
+    check("opened counts openings, not intake numbers",
+          cover["counter_seen"] == 85, cover["counter_seen"])
+    check("and the intake anchor is reported separately",
+          cover["counter_anchored"] == 0, cover["counter_anchored"])
+
+    # A stacked bar whose parts overlap is not a bar. These have to partition
+    # the population exactly.
+    stages = {row["stage"]: row["products"] for row in cover["progress"]}
+    check("the stages add up to the population",
+          sum(stages.values()) == cover["preowned_total"], stages)
+    check("never opened", stages["never_opened"] == 20, stages)
+    check("opened once", stages["one_look"] == 30, stages)
+    check("looked at again but still unrated", stages["no_figure"] == 5, stages)
+    check("estimated", stages["estimated"] == 40, stages)
+    check("resting on a measurement", stages["firm"] == 10, stages)
+
+    # Each tier against its own cadence, not against a daily round nobody
+    # designed - cold is meant to be read every three days.
+    by_tier = {row["tier"]: row for row in cover["cadence"]}
+    check("hot is read most often",
+          by_tier["hot"]["every_hours"] < by_tier["cold"]["every_hours"])
+    check("the hot products are all inside their window",
+          by_tier["hot"]["seen_in_window"] == 10, by_tier["hot"])
+    check("and the tier counts exclude sold-out products",
+          by_tier["cold"]["products"] == 35, by_tier["cold"])
+    check("what the cadences ask for is reported",
+          cover["demanded_per_hour"] > 0, cover["demanded_per_hour"])
+
+    db.query(Item).delete()
+    db.commit()
+    db.close()
+
+
 def test_the_sampler_can_actually_spend_its_budget() -> None:
     print("\n== The shelf sampler is not starved by its own arithmetic ==")
     from app.config import settings
@@ -6780,6 +7010,9 @@ def main() -> int:
     test_watches_draw_from_the_pool_at_the_front_of_the_queue()
     test_a_pass_started_by_hand_is_the_kind_that_was_asked_for()
     test_only_the_preowned_slice_offers_a_head_sweep()
+    test_the_survival_curve_keeps_the_slow_copies_in()
+    test_the_bargain_is_only_counted_where_there_was_a_choice()
+    test_the_shelf_panel_adds_up()
     test_settings()
 
     print(f"\n{'=' * 46}\n  {PASS} passed, {FAIL} failed\n{'=' * 46}")

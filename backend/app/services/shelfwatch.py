@@ -436,7 +436,23 @@ def coverage(db: Session, provider: str = "amiami") -> dict:
         ).scalar_one()
         or 0
     )
+    # Products this job has actually opened. Counted from the detail fetch,
+    # not from whether the copies carried a readable intake number: about
+    # fourteen hundred products had been opened and answered with copies this
+    # could not number, and they were missing from a figure labelled "opened
+    # at least once", which is not what it was measuring.
     seen_once = int(
+        db.execute(
+            select(func.count(Item.id)).where(
+                Item.provider == provider,
+                Item.condition == Condition.preowned,
+                Item.order_closed.is_(False),
+                Item.last_detail_fetch_at.is_not(None),
+            )
+        ).scalar_one()
+        or 0
+    )
+    counter_anchored = int(
         db.execute(
             select(func.count(Item.id)).where(
                 Item.provider == provider,
@@ -509,9 +525,171 @@ def coverage(db: Session, provider: str = "amiami") -> dict:
         ).scalar_one()
         or 0
     )
+    # How each tier is doing against the cadence it was promised, rather than
+    # against a daily round nobody designed. Hot is looked at every couple of
+    # hours because somebody is waiting on it; cold every three days because
+    # it only has to feed the statistics. A single "seen today" bar would
+    # report the cold tier as permanently behind on a schedule it does not
+    # have.
+    cadence = []
+    demanded_per_hour = 0.0
+    for tier, hours in (
+        (HOT, settings.shelf_hot_interval_hours),
+        (WARM, settings.shelf_warm_interval_hours),
+        (COLD, settings.shelf_cold_interval_hours),
+    ):
+        window = max(0.25, float(hours))
+        in_tier = int(
+            db.execute(
+                select(func.count(Item.id)).where(
+                    Item.provider == provider,
+                    Item.condition == Condition.preowned,
+                    Item.order_closed.is_(False),
+                    Item.shelf_tier == tier,
+                )
+            ).scalar_one()
+            or 0
+        )
+        fresh = int(
+            db.execute(
+                select(func.count(Item.id)).where(
+                    Item.provider == provider,
+                    Item.condition == Condition.preowned,
+                    Item.order_closed.is_(False),
+                    Item.shelf_tier == tier,
+                    Item.last_detail_fetch_at >= now - timedelta(hours=window),
+                )
+            ).scalar_one()
+            or 0
+        )
+        late = int(
+            db.execute(
+                select(func.count(Item.id)).where(
+                    Item.provider == provider,
+                    Item.condition == Condition.preowned,
+                    Item.order_closed.is_(False),
+                    Item.shelf_tier == tier,
+                    or_(Item.shelf_due_at.is_(None), Item.shelf_due_at <= now),
+                )
+            ).scalar_one()
+            or 0
+        )
+        oldest = db.execute(
+            select(func.min(Item.last_detail_fetch_at)).where(
+                Item.provider == provider,
+                Item.condition == Condition.preowned,
+                Item.order_closed.is_(False),
+                Item.shelf_tier == tier,
+                Item.last_detail_fetch_at.is_not(None),
+            )
+        ).scalar_one_or_none()
+        oldest_hours = None
+        if oldest is not None:
+            if oldest.tzinfo is None:
+                oldest = oldest.replace(tzinfo=timezone.utc)
+            oldest_hours = round((now - oldest).total_seconds() / 3600, 1)
+        demanded_per_hour += in_tier / window
+        cadence.append(
+            {
+                "tier": tier,
+                "products": in_tier,
+                "every_hours": window,
+                "overdue": late,
+                "seen_in_window": fresh,
+                "oldest_look_hours": oldest_hours,
+                # A tier is keeping up when the product it has neglected
+                # longest is still inside its own interval.
+                "keeping_up": oldest_hours is not None and oldest_hours <= window,
+            }
+        )
+
+    # What is actually being got through, measured the way every other
+    # estimate here is: from the timestamps, not from the settings.
+    looks_last_hour = int(
+        db.execute(
+            select(func.count(Item.id)).where(
+                Item.provider == provider,
+                Item.last_detail_fetch_at >= now - timedelta(hours=1),
+            )
+        ).scalar_one()
+        or 0
+    )
+    looks_last_day = int(
+        db.execute(
+            select(func.count(Item.id)).where(
+                Item.provider == provider,
+                Item.last_detail_fetch_at >= now - timedelta(hours=24),
+            )
+        ).scalar_one()
+        or 0
+    )
+
+    # How firm the figures are, ordered from measured to guessed. The panel
+    # used to show two bars that differed by two hundred out of eleven
+    # thousand, because almost every product that gets opened gets a figure
+    # immediately - so the second bar re-measured the first.
+    confidence = [
+        {"basis": basis, "products": by_basis.get(basis, 0), "label": label}
+        for basis, label in (
+            ("observed", "Copies we watched sell"),
+            ("intake", "Measured shop turnover"),
+            ("intake_bootstrap", "Turnover, estimated"),
+            ("product", "Whole listing only"),
+        )
+    ]
+
+    # And what is still owed. A ladder, each rung excluding the ones below it,
+    # so the four add up to the population exactly - a stacked bar whose parts
+    # overlap is not a bar, it is four bars drawn on top of each other.
+    FIRM_BASES = ("observed", "intake")
+
+    def in_stage(*conditions) -> int:
+        return int(
+            db.execute(
+                select(func.count(Item.id)).where(
+                    Item.provider == provider,
+                    Item.condition == Condition.preowned,
+                    Item.order_closed.is_(False),
+                    *conditions,
+                )
+            ).scalar_one()
+            or 0
+        )
+
+    never = in_stage(Item.last_detail_fetch_at.is_(None))
+    one_look = in_stage(
+        Item.last_detail_fetch_at.is_not(None), Item.prev_detail_fetch_at.is_(None)
+    )
+    # Looked at more than once, so the figure has had a chance to firm up.
+    looked_twice = (
+        Item.last_detail_fetch_at.is_not(None),
+        Item.prev_detail_fetch_at.is_not(None),
+    )
+    firm = in_stage(*looked_twice, Item.dwell_basis.in_(FIRM_BASES))
+    estimated = in_stage(*looked_twice, Item.dwell_basis.not_in(FIRM_BASES))
+    unrated = in_stage(*looked_twice, Item.dwell_basis.is_(None))
+
+    progress = [
+        {"stage": "never_opened", "products": never, "label": "Never opened"},
+        {"stage": "one_look", "products": one_look,
+         "label": "Opened once, awaiting a second look"},
+        {"stage": "no_figure", "products": unrated,
+         "label": "Looked at again, still no figure"},
+        {"stage": "estimated", "products": estimated,
+         "label": "Has a figure, but an estimated one"},
+        {"stage": "firm", "products": firm, "label": "Resting on a measurement"},
+    ]
+
     return {
         "enabled": settings.shelf_tracking_enabled,
         "preowned_total": total,
+        "cadence": cadence,
+        "demanded_per_hour": round(demanded_per_hour, 1),
+        "looks_per_hour": looks_last_hour,
+        "looks_last_day": looks_last_day,
+        "confidence": confidence,
+        "progress": progress,
+        "counter_anchored": counter_anchored,
         #: Records kept of products the shop has stopped selling. Outside the
         #: denominator above, because nothing will ever look at them again.
         "preowned_closed": closed,

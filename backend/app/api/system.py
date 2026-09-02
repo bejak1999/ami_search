@@ -25,9 +25,10 @@ from sqlalchemy.orm import Session
 
 from ..config import settings
 from ..db import get_db
-from ..deps import admin_user, current_user
+from ..deps import admin_user, current_user, user_cost_profile
 from ..models import (
     Alert,
+    CostProfile,
     Item,
     NotificationChannel,
     PricePoint,
@@ -447,6 +448,118 @@ def shelf_coverage(
     from ..services import shelfwatch
 
     return MessageResponse(message="ok", detail=shelfwatch.coverage(db, provider))
+
+
+@admin.get("/shelf-life/stats", response_model=MessageResponse)
+def shelf_statistics(
+    db: Session = Depends(get_db),
+    _admin: User = Depends(admin_user),
+) -> MessageResponse:
+    """What following the copies has actually told us.
+
+    Kept apart from the coverage endpoint because these walk every copy ever
+    recorded, where that one only counts rows - so the panel can refresh its
+    progress figures briskly and ask for the analysis less often.
+    """
+    from ..services import shelflife
+
+    return MessageResponse(
+        message="ok",
+        detail={
+            "survival": shelflife.survival_curve(db),
+            "by_grade": shelflife.dwell_by_grade(db),
+            "cheapest_first": shelflife.cheapest_first_overall(db),
+        },
+    )
+
+
+@admin.get("/shelf-life/tier/{tier}", response_model=MessageResponse)
+def shelf_tier_items(
+    tier: str,
+    page: int = Query(default=1, ge=1, le=1000),
+    per_page: int = Query(default=24, ge=1, le=96),
+    provider: str = "amiami",
+    db: Session = Depends(get_db),
+    admin: User = Depends(admin_user),
+    profile: CostProfile = Depends(user_cost_profile),
+) -> MessageResponse:
+    """Which figures are actually in one attention tier.
+
+    The tiers are a rule nobody can see the effect of - hot is what someone is
+    waiting on, warm has shown turnover or belongs to a series being
+    collected, cold is everything else - so being able to open one and look is
+    the difference between trusting the rule and taking it on faith.
+
+    Ordered by longest since its last look, because that is what you open a
+    tier to find: the ones falling behind, not the ones just done.
+    """
+    from ..models import Condition, utcnow
+    from .serializers import item_out, register_images
+
+    if tier not in ("hot", "warm", "cold"):
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Unknown tier"
+        )
+
+    base = (
+        select(Item)
+        .where(
+            Item.provider == provider,
+            Item.condition == Condition.preowned,
+            Item.order_closed.is_(False),
+            Item.shelf_tier == tier,
+        )
+    )
+    total = int(
+        db.execute(select(func.count()).select_from(base.subquery())).scalar_one() or 0
+    )
+    rows = list(
+        db.execute(
+            base.order_by(
+                Item.last_detail_fetch_at.asc().nulls_first(), Item.id
+            )
+            .offset((page - 1) * per_page)
+            .limit(per_page)
+        )
+        .scalars()
+        .all()
+    )
+    register_images(db, rows)
+
+    now = utcnow()
+
+    def since_hours(moment) -> float | None:
+        if moment is None:
+            return None
+        if moment.tzinfo is None:
+            moment = moment.replace(tzinfo=timezone.utc)
+        return round((now - moment).total_seconds() / 3600, 1)
+
+    return MessageResponse(
+        message="ok",
+        detail={
+            "tier": tier,
+            "page": page,
+            "per_page": per_page,
+            "total": total,
+            "pages": max(1, -(-total // per_page)),
+            "items": [
+                {
+                    "item": item_out(db, item, user=admin, profile=profile).model_dump(),
+                    "last_look_hours": since_hours(item.last_detail_fetch_at),
+                    "due_in_hours": (
+                        -h if (h := since_hours(item.shelf_due_at)) is not None else None
+                    ),
+                    "dwell_days": (
+                        round(item.dwell_days, 1) if item.dwell_days else None
+                    ),
+                    "dwell_basis": item.dwell_basis,
+                    "copies": item.listing_count or 0,
+                }
+                for item in rows
+            ],
+        },
+    )
 
 
 @admin.post("/shelf-life/run", response_model=MessageResponse)

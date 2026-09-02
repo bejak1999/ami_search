@@ -265,6 +265,9 @@ export const api = {
     generateVapid: () => post<MessageResponse>('/admin/vapid/generate'),
     catalog: () => get<MessageResponse>('/admin/catalog'),
     shelfLife: () => get<MessageResponse>('/admin/shelf-life'),
+    shelfStats: () => get<MessageResponse>('/admin/shelf-life/stats'),
+    shelfTier: (tier: string, page = 1) =>
+      get<MessageResponse>(`/admin/shelf-life/tier/${tier}${qs({ page })}`),
     behaviour: () => get<MessageResponse>('/admin/behaviour'),
     activity: (days = 30) => get<MessageResponse>(`/admin/activity${qs({ days })}`),
     resetActivity: () => post<MessageResponse>('/admin/activity/reset'),
