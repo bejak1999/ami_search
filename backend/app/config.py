@@ -57,11 +57,12 @@ class Settings(BaseSettings):
     #: for at most 18 of a 40 ceiling and left the rest idle; this is drawn on
     #: by whoever is running, so a quiet instance uses all of it.
     amiami_budget_per_minute: float = 24.0
-    #: Kept for the estimates, which quote what a sweep costs on its own.
+    #: NO LONGER READ. The crawler draws from amiami_budget_per_minute above,
+    #: shared out by weight against whatever else is running. Kept as a field
+    #: so an existing .env that sets it still loads, but setting it changes
+    #: nothing - which is worth saying plainly, because a knob that looks live
+    #: and is not is how the panel came to advertise rates no job was using.
     crawler_requests_per_minute: float = 8.0
-    """The crawler's own budget. It also passes through the shared provider
-    limiter, and it yields entirely whenever a watch is due, so alerts always
-    win the race for the request budget."""
     crawler_max_seconds_per_run: int = 240
     crawler_run_interval_minutes: int = 5
     crawler_jitter_sigma: float = 0.55
@@ -87,6 +88,8 @@ class Settings(BaseSettings):
     #: minutes were not protecting anything. The shared pool caps the rate,
     #: so running for longer costs the shop nothing extra.
     shelf_max_seconds_per_run: int = 540
+    #: NO LONGER READ - see crawler_requests_per_minute. The sampler's rate
+    #: comes from the shared pool.
     shelf_requests_per_minute: float = 10.0
     #: How often each tier gets looked at. Hot is the handful of products
     #: someone is actually waiting on, where the tight bound is worth paying

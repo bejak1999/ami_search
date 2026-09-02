@@ -107,13 +107,24 @@ export function JobDebug({
                 Sharing {d.budget.total_per_minute}/min to AmiAmi
               </p>
               <div className="mt-1 flex flex-wrap gap-x-4 gap-y-0.5 text-[11px]">
+                {/* An idle job's figure is what it *would* get if it
+                    started, not what it is taking — the pool is shared out
+                    between whoever is actually running. Saying so, because
+                    "shelf 24/min" beside "watch 17.1/min" reads as though
+                    both were spending, which adds up to more than the pool
+                    and makes the panel look broken. */}
                 {d.budget.shares.map((share) => (
                   <span
                     key={share.purpose}
                     className={share.running ? 'text-ink' : 'text-faint'}
+                    title={
+                      share.running
+                        ? `${share.purpose} is running and drawing ${share.per_minute} a minute.`
+                        : `${share.purpose} is idle. If it started now it would get ${share.per_minute} a minute, and the others would slow to make room.`
+                    }
                   >
                     {share.purpose} {share.per_minute}/min
-                    {share.running ? ' · running' : ''}
+                    {share.running ? ' · running' : ' · if it starts'}
                   </span>
                 ))}
               </div>

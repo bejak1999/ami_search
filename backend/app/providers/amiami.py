@@ -445,11 +445,22 @@ class AmiAmiProvider(ShopProvider):
         for key in (first, "gcode" if first == "scode" else "scode"):
             try:
                 response = self.request(
-                    "GET", API_ROOT + "/item", params={key: code, "lang": "eng"}
+                    "GET",
+                    API_ROOT + "/item",
+                    params={key: code, "lang": "eng"},
+                    not_found_ok=True,
                 )
             except ProviderError:
                 # "Invalid Request 22" is what a gcode passed as scode gets.
                 continue
+            if self.is_missing(response):
+                # Answered, and the answer is that it is gone. Read from the
+                # status rather than from the body: a 404 body is not
+                # guaranteed to be JSON, and _decode reported that as "a
+                # Cloudflare challenge" - so a sold-out listing surfaced as
+                # an upstream fault, counted against the error budget, and
+                # could end a sampler run five listings later.
+                raise ItemNotFound("AmiAmi no longer lists " + code)
             payload = self._decode(response)
             raw = payload.get("item")
             if raw:

@@ -163,6 +163,46 @@ def collect_issues(db: Session) -> list[Issue]:
             )
         )
 
+    # A job that stops without failing says nothing at all, which is worse
+    # than one that fails loudly. A slice whose last run is many intervals
+    # behind has not errored - it would be above if it had - so nothing else
+    # in here notices, and the panel goes on showing its last known progress
+    # as though it were current. That is exactly how a crawler that died at
+    # a quarter to seven one morning went unremarked until someone happened
+    # to look at the request rate.
+    from .crawler import resting_after_errors
+
+    now = datetime.now(timezone.utc)
+    quiet = []
+    for crawl in db.execute(
+        select(CatalogCrawl).where(CatalogCrawl.enabled.is_(True))
+    ).scalars():
+        if resting_after_errors(crawl) or crawl.consecutive_errors >= 5:
+            continue  # already reported above, or deliberately backing off
+        last = _aware(crawl.last_run_at)
+        if last is None:
+            continue  # never started; the first run has not come round yet
+        # Generous, so a slice that merely waited its turn behind three
+        # others is not reported: this is for silence, not for slowness.
+        overdue = timedelta(minutes=max(30, crawl.recheck_interval_minutes or 30) * 6)
+        if now - last > overdue:
+            quiet.append((crawl, now - last))
+    if quiet:
+        worst = max(quiet, key=lambda pair: pair[1])
+        issues.append(
+            Issue(
+                key="crawler:quiet",
+                title=f"{len(quiet)} catalogue slice(s) have gone quiet",
+                detail=(
+                    f"{worst[0].label or worst[0].scope} last ran "
+                    f"{int(worst[1].total_seconds() // 3600)}h ago, with no error recorded. "
+                    "A job that stops without failing looks exactly like one that is idle."
+                ),
+                hint="Check the scheduler is running. Restarting the container starts every slice again.",
+                urgent=True,
+            )
+        )
+
     # A channel that keeps rejecting messages is the worst failure of all: the
     # alerts are being raised and thrown away.
     dead = list(

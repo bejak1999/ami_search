@@ -14,7 +14,7 @@ from typing import Any
 from curl_cffi import requests as curl_requests
 
 from ..config import settings
-from .ratelimit import CircuitBreaker, TokenBucket
+from .ratelimit import CircuitBreaker, CircuitOpen, RateLimitExceeded, TokenBucket
 
 
 @dataclass(slots=True)
@@ -186,14 +186,34 @@ class ShopProvider(ABC):
                 pass
         self._local = threading.local()
 
-    def request(self, method: str, url: str, **kwargs: Any) -> Any:
-        """Rate-limited, breaker-guarded HTTP call."""
+    def request(
+        self, method: str, url: str, not_found_ok: bool = False, **kwargs: Any
+    ) -> Any:
+        """Rate-limited, breaker-guarded HTTP call.
+
+        ``not_found_ok`` says that a 404 is one of the answers the caller is
+        asking for rather than a fault. On a shop that deletes a listing when
+        it sells, "no such item" is the most useful thing it can say, and
+        counting it as a failed request put the tracker's best signal in the
+        error column - which is exactly where someone reading the panel goes
+        looking for trouble.
+        """
         import time
 
         from ..services import reqlog
 
-        self.breaker.check()
-        self.bucket.acquire()
+        # Both of these are provider errors as far as anything upstream of
+        # here is concerned, and every caller already handles that. Raised
+        # bare they were RuntimeErrors that nothing caught: a tripped breaker
+        # took the crawl run down mid-pass, so the code that records the
+        # failure never ran, the slice was left in "running" with no error
+        # against it, and the panel showed a job that had simply stopped for
+        # no stated reason. The scheduler logged it and went quiet.
+        try:
+            self.breaker.check()
+            self.bucket.acquire()
+        except (CircuitOpen, RateLimitExceeded) as exc:
+            raise ProviderError(f"{self.name}: {exc}") from exc
         with self._semaphore:
             started = time.monotonic()
             try:
@@ -212,9 +232,10 @@ class ShopProvider(ABC):
 
         # Counted here rather than at each call site, so nothing that reaches
         # the shop can escape the tally by taking a different route.
+        expected_miss = not_found_ok and response.status_code == 404
         reqlog.record(
             self.id,
-            ok=response.status_code < 400,
+            ok=response.status_code < 400 or expected_miss,
             url=_describe(url, kwargs.get("params")),
             status=response.status_code,
             ms=self.last_latency_ms,
@@ -232,6 +253,11 @@ class ShopProvider(ABC):
 
         self.breaker.record_success()
         return response
+
+    @staticmethod
+    def is_missing(response: Any) -> bool:
+        """Did the shop answer that there is no such thing?"""
+        return getattr(response, "status_code", None) == 404
 
     # -- Interface --------------------------------------------------------
     @abstractmethod

@@ -16,7 +16,7 @@ import logging
 import re
 from datetime import datetime, timedelta, timezone
 
-from sqlalchemy import func, select
+from sqlalchemy import case, func, select
 from sqlalchemy.orm import Session
 
 from ..enrichment.mfc import MfcError, MfcItem, MfcNotFound, client
@@ -209,29 +209,40 @@ def pending_items(db: Session, limit: int = 20) -> list[Item]:
 
     Anything on a wishlist or matched by a watch jumps the queue, because
     those are the items a person will actually open.
+
+    The ordering is done by the database rather than afterwards. It used to
+    take the forty most recently seen unlinked items and then sort *those* so
+    the interesting ones came first - which sorts a window, not a queue. A
+    wishlisted figure jumped the queue only if it happened to be in the forty
+    already, and out of a backlog of tens of thousands it never was. The
+    promise in this docstring was not being kept.
+
+    Least-tried first within each band, so a lookup that keeps failing does
+    not hold a turn that a never-tried item has been waiting for.
     """
-    interesting = set(
-        db.execute(select(CollectionEntry.item_id)).scalars().all()
-    ) | set(
+    watched = (
+        select(WatchSeenItem.item_id)
+        .join(Watch, Watch.id == WatchSeenItem.watch_id)
+        .where(Watch.enabled.is_(True))
+    )
+    priority = case(
+        (Item.id.in_(select(CollectionEntry.item_id)), 0),
+        (Item.id.in_(watched), 1),
+        else_=2,
+    )
+    return list(
         db.execute(
-            select(WatchSeenItem.item_id).join(Watch, Watch.id == WatchSeenItem.watch_id)
+            select(Item)
+            .where(
+                Item.mfc_id.is_(None),
+                Item.mfc_attempts < MAX_ATTEMPTS,
+            )
+            .order_by(priority, Item.mfc_attempts.asc(), Item.last_seen_at.desc())
+            .limit(limit)
         )
         .scalars()
         .all()
     )
-
-    stmt = (
-        select(Item)
-        .where(
-            Item.mfc_id.is_(None),
-            Item.mfc_attempts < MAX_ATTEMPTS,
-        )
-        .order_by(Item.last_seen_at.desc())
-        .limit(limit * 4)
-    )
-    candidates = list(db.execute(stmt).scalars().all())
-    candidates.sort(key=lambda i: (i.id not in interesting, -(i.id or 0)))
-    return candidates[:limit]
 
 
 def _say(item, stage: str) -> None:

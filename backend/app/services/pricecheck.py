@@ -51,16 +51,25 @@ def baseline_for(db: Session, user_id: int, item_id: int) -> PriceCheck | None:
     ).scalar_one_or_none()
 
 
+#: SQLite refuses a statement with more than 32,766 bound parameters, and the
+#: failure is a hard error rather than a slow query. A collection large enough
+#: to reach it is unusual but not impossible, and the page that would break is
+#: the one someone looks at most.
+_ID_CHUNK = 5_000
+
+
 def baselines_for(db: Session, user_id: int, item_ids: list[int]) -> dict[int, PriceCheck]:
     """Every stored check for these items, keyed by item id."""
-    if not item_ids:
-        return {}
-    rows = db.execute(
-        select(PriceCheck).where(
-            PriceCheck.user_id == user_id, PriceCheck.item_id.in_(item_ids)
-        )
-    ).scalars()
-    return {row.item_id: row for row in rows}
+    found: dict[int, PriceCheck] = {}
+    for start in range(0, len(item_ids), _ID_CHUNK):
+        chunk = item_ids[start : start + _ID_CHUNK]
+        rows = db.execute(
+            select(PriceCheck).where(
+                PriceCheck.user_id == user_id, PriceCheck.item_id.in_(chunk)
+            )
+        ).scalars()
+        found.update({row.item_id: row for row in rows})
+    return found
 
 
 def cheapest_copy(db: Session, item: Item) -> Listing | None:

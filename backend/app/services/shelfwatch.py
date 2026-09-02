@@ -185,6 +185,16 @@ def promote(db: Session, item: Item, commit: bool = False) -> None:
 #: raise it to see sales sooner, lower it to finish the first pass sooner.
 REVISIT_SHARE = 0.25
 
+#: How long a product waits after a failed look before it is offered again.
+#: Short, because the failure says nothing about the product - only about the
+#: moment - but not zero, or the run spends itself retrying the same row.
+RETRY_AFTER_ERROR = timedelta(minutes=5)
+
+#: Failures in a row before a run gives up. In a row rather than in total:
+#: an upstream that refuses one request in ten is not an upstream that has
+#: stopped answering, and treating it as one throws away the other nine.
+ERRORS_BEFORE_GIVING_UP = 5
+
 
 def revisit_candidates(db: Session, provider: str, limit: int) -> list[Item]:
     """Products we have seen before, longest ago first.
@@ -311,6 +321,7 @@ def run_once(
     from ..scheduler.engine import engine
 
     first = True
+    consecutive_errors = 0
     for item in candidates:
         if getattr(engine, "stopping", False):
             run.stopped_because = "shutting down"
@@ -336,7 +347,6 @@ def run_once(
 
         tier = tier_for(db, item, watched)
         item.shelf_tier = tier
-        item.shelf_due_at = utcnow() + _interval(tier)
 
         try:
             detailed = provider.get_item(item.code)
@@ -346,16 +356,33 @@ def run_once(
             catalog.mark_unavailable(db, item, commit=False)
             run.delisted += 1
             run.checked += 1
+            consecutive_errors = 0  # the shop answered, and told us something
             db.commit()
             continue
         except ProviderError as exc:
+            # A look that failed is not a look. Pushing the due date out
+            # before the fetch meant one refused request retired a product
+            # for the length of its whole interval - up to days for a cold
+            # one - so a bad patch upstream quietly emptied the rotation of
+            # everything it touched. It goes to the back of the queue for a
+            # few minutes instead, which is long enough not to spin on it.
+            item.shelf_due_at = utcnow() + RETRY_AFTER_ERROR
+            consecutive_errors += 1
             run.errors += 1
             log.debug("Shelf check failed for %s: %s", item.code, exc)
             db.commit()
-            if run.errors >= 5:
-                run.stopped_because = "too many upstream errors"
+            # Consecutive, not cumulative. Counting every failure in the run
+            # meant a steady low rate of refusals ended it early: at one in
+            # twenty, a run stopped after a hundred fetches; at one in six it
+            # stopped after thirty, and the job looked far slower than it was
+            # for a reason that had nothing to do with its budget.
+            if consecutive_errors >= ERRORS_BEFORE_GIVING_UP:
+                run.stopped_because = "too many upstream errors in a row"
                 break
             continue
+
+        consecutive_errors = 0
+        item.shelf_due_at = utcnow() + _interval(tier)
 
         before = {row.id for row in item.listings if row.status == ListingStatus.live}
         priced = {row.id: row.last_price for row in item.listings}
@@ -385,10 +412,26 @@ def run_once(
 
 def coverage(db: Session, provider: str = "amiami") -> dict:
     """How much of the pre-owned catalogue is actually being followed."""
+    # Products this job can actually work on. A sold-out one is never
+    # selected - due_items excludes it - so counting it in the denominator
+    # made the coverage bar unreachable by construction, and pushed it
+    # further down every time something sold.
     total = int(
         db.execute(
             select(func.count(Item.id)).where(
-                Item.provider == provider, Item.condition == Condition.preowned
+                Item.provider == provider,
+                Item.condition == Condition.preowned,
+                Item.order_closed.is_(False),
+            )
+        ).scalar_one()
+        or 0
+    )
+    closed = int(
+        db.execute(
+            select(func.count(Item.id)).where(
+                Item.provider == provider,
+                Item.condition == Condition.preowned,
+                Item.order_closed.is_(True),
             )
         ).scalar_one()
         or 0
@@ -398,15 +441,22 @@ def coverage(db: Session, provider: str = "amiami") -> dict:
             select(func.count(Item.id)).where(
                 Item.provider == provider,
                 Item.condition == Condition.preowned,
+                Item.order_closed.is_(False),
                 Item.intake_first_seq.is_not(None),
             )
         ).scalar_one()
         or 0
     )
+    # Counted over the same population as the figure it is shown against,
+    # or the two bars are drawn on different denominators and the shorter
+    # one is not necessarily the smaller.
     rated = int(
         db.execute(
             select(func.count(Item.id)).where(
-                Item.provider == provider, Item.dwell_days.is_not(None)
+                Item.provider == provider,
+                Item.condition == Condition.preowned,
+                Item.order_closed.is_(False),
+                Item.dwell_days.is_not(None),
             )
         ).scalar_one()
         or 0
@@ -434,6 +484,19 @@ def coverage(db: Session, provider: str = "amiami") -> dict:
         ).scalar_one()
         or 0
     )
+    # Split by what we can honestly claim. "Departed" covered every copy no
+    # longer on the shelf, and was labelled as having been seen to sell -
+    # which swept in the batch disappearances we deliberately record as the
+    # weaker claim, and the ones a repair closed without watching them go.
+    by_outcome = {
+        (outcome.value if outcome else "unknown"): int(count or 0)
+        for outcome, count in db.execute(
+            select(Listing.outcome, func.count(Listing.id))
+            .where(Listing.status == ListingStatus.gone)
+            .group_by(Listing.outcome)
+        ).all()
+    }
+    sold = by_outcome.get("sold", 0) + by_outcome.get("delisted", 0)
     now = datetime.now(timezone.utc)
     due = int(
         db.execute(
@@ -449,6 +512,9 @@ def coverage(db: Session, provider: str = "amiami") -> dict:
     return {
         "enabled": settings.shelf_tracking_enabled,
         "preowned_total": total,
+        #: Records kept of products the shop has stopped selling. Outside the
+        #: denominator above, because nothing will ever look at them again.
+        "preowned_closed": closed,
         "counter_seen": seen_once,
         "with_estimate": rated,
         "due_now": due,
@@ -457,6 +523,8 @@ def coverage(db: Session, provider: str = "amiami") -> dict:
         "listings_total": listings_total,
         "listings_live": listings_live,
         "listings_departed": listings_total - listings_live,
+        "listings_sold": sold,
+        "listings_by_outcome": by_outcome,
         # What it may actually use right now, not the per-job setting it no
         # longer reads. The panel was reporting ten a minute while the job
         # was drawing on a shared pool of twenty-four.

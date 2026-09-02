@@ -584,10 +584,6 @@ def _crawl_slice(
             "interruptions": 0,
         }
     crawl.state = CrawlState.running
-    # Kept before it is overwritten: the gap since this slice last ran is what
-    # turns pages-per-run into pages-per-hour of real time, and the idle part
-    # of that gap is exactly what the old estimate pretended did not exist.
-    previous_run_at = crawl.last_run_at
     crawl.last_run_at = utcnow()
     db.commit()
 
@@ -691,7 +687,6 @@ def _crawl_slice(
     # a pages-per-minute figure to show.
     run.seconds = time.monotonic() - started
 
-    _record_throughput(crawl, run.pages, previous_run_at)
     # This slot is folded in first, and only then is the pass closed. The
     # other way round - which is how this was written - closed the pass,
     # cleared the accumulator, and then added the final slot's pages to the
@@ -699,6 +694,9 @@ def _crawl_slice(
     # last, which is why a thirty-page short pass was recorded as 13, 22, 26,
     # anything but thirty.
     _accumulate(crawl, run)
+    # After the slot is folded in, so the measurement covers the pass as it
+    # actually stands rather than the slot in isolation.
+    _record_throughput(crawl)
     if finished:
         _complete_cycle(db, crawl)
     db.commit()
@@ -804,21 +802,40 @@ def _record_pass(crawl: CatalogCrawl, ended_because: str) -> None:
     crawl.current_pass = {}
 
 
-def _record_throughput(crawl: CatalogCrawl, pages: int, previous_run_at) -> None:
-    """Fold this run into the slice's observed pages-per-hour.
+def _record_throughput(crawl: CatalogCrawl) -> None:
+    """Fold the pass so far into the slice's observed pages-per-hour.
 
-    Measured against wall-clock time since the slice last ran, idle included,
-    because that is the number an estimate needs: a slice waiting its turn is
-    not making progress, however fast it moves when it is running.
+    Measured over the pass itself: from when it started to now, including the
+    waits between the scheduler slots it is spread over, because those are
+    part of how long a pass takes. What it must *not* include is the cooldown
+    before the pass began.
+
+    That was the previous measure - wall clock since the slice last ran - and
+    for a short pass it timed the wrong thing entirely. A thirty-page pass
+    that runs once an hour and finishes in two minutes came out at thirty
+    pages an hour, so the panel promised "this sweep done in about an hour"
+    for work that was over before anyone read the sentence. It was quoting
+    the cadence, not the pass.
     """
-    if pages <= 0 or previous_run_at is None:
+    state = dict(crawl.current_pass or {})
+    pages = int(state.get("pages") or 0)
+    started = state.get("started_at")
+    if pages <= 0 or not started:
         return
-    elapsed = (utcnow() - previous_run_at).total_seconds() / 3600.0
-    # A gap long enough to be a restart rather than a rhythm says nothing
-    # useful about throughput.
-    if elapsed <= 0 or elapsed > 12:
+    try:
+        began = datetime.fromisoformat(started)
+    except ValueError:  # pragma: no cover - a hand-edited row
         return
-    observed = pages / elapsed
+    if began.tzinfo is None:
+        began = began.replace(tzinfo=timezone.utc)
+
+    hours = (utcnow() - began).total_seconds() / 3600.0
+    # Too short to divide by: a pass one slot old has fetched its pages in
+    # seconds, and extrapolating that to an hourly rate produces a number in
+    # the thousands. The next slot will have a usable span.
+    if hours < 30 / 3600.0:
+        return
+    observed = pages / hours
     crawl.pages_per_hour = (
         observed if crawl.pages_per_hour is None else crawl.pages_per_hour * 0.7 + observed * 0.3
     )
@@ -861,7 +878,9 @@ def _complete_cycle(db: Session, crawl: CatalogCrawl) -> None:
     )
 
 
-def local_count(db: Session, scope: str, provider_id: str) -> int:
+def local_count(
+    db: Session, scope: str, provider_id: str, live_only: bool = False
+) -> int:
     """How many distinct items this slice has actually put in the database.
 
     Counting rows beats trusting a counter: ``items_seen`` accumulates fifty
@@ -892,6 +911,14 @@ def local_count(db: Session, scope: str, provider_id: str) -> int:
         stmt = stmt.where(
             Item.is_preorder.is_(True), Item.condition != Condition.preowned
         )
+    if live_only:
+        # Only what the shop could still be listing. Keeping the record of a
+        # sold-out listing is the point of the application, but it is not
+        # something the shop counts, so including it in the comparison made
+        # coverage meaningless: once the kept records outnumbered the live
+        # ones the ratio pinned itself at 100% and stayed there, whether we
+        # held everything currently on sale or half of it.
+        stmt = stmt.where(Item.order_closed.is_(False))
     return int(db.execute(stmt).scalar_one() or 0)
 
 
@@ -959,9 +986,15 @@ def activity_profile(db: Session, provider_id: str = "amiami", days: int = 30) -
     if baseline is not None and baseline > since:
         since = baseline
 
-    def buckets(column, expression: str, extra=None) -> dict[int, int]:
+    def buckets(column, field: str, extra=None) -> dict[int, int]:
+        # extract() rather than strftime(): the same query has to run on
+        # PostgreSQL, which this application supports and which has no such
+        # function - the endpoint raised there rather than returning a
+        # profile. SQLAlchemy compiles this to STRFTIME on SQLite and to
+        # EXTRACT on PostgreSQL, and "dow" numbers the week from Sunday on
+        # both, which is what the view expects.
         stmt = select(
-            func.cast(func.strftime(expression, column), Integer).label("bucket"),
+            func.cast(func.extract(field, column), Integer).label("bucket"),
             func.count().label("n"),
         ).where(column >= since)
         if extra is not None:
@@ -975,10 +1008,10 @@ def activity_profile(db: Session, provider_id: str = "amiami", days: int = 30) -
 
     from ..models import PricePoint
 
-    listings_hour = buckets(Item.first_seen_at, "%H", Item.provider == provider_id)
-    listings_day = buckets(Item.first_seen_at, "%w", Item.provider == provider_id)
-    changes_hour = buckets(PricePoint.recorded_at, "%H")
-    changes_day = buckets(PricePoint.recorded_at, "%w")
+    listings_hour = buckets(Item.first_seen_at, "hour", Item.provider == provider_id)
+    listings_day = buckets(Item.first_seen_at, "dow", Item.provider == provider_id)
+    changes_hour = buckets(PricePoint.recorded_at, "hour")
+    changes_day = buckets(PricePoint.recorded_at, "dow")
 
     def series(data: dict[int, int], size: int) -> list[int]:
         return [data.get(index, 0) for index in range(size)]
@@ -998,7 +1031,7 @@ def activity_profile(db: Session, provider_id: str = "amiami", days: int = 30) -
         "new_listings": observed,
         "price_changes": sum(changes_hour.values()),
         # Index 0 is midnight UTC; index 0 of the weekday series is Sunday,
-        # matching strftime's %w.
+        # which is how both engines number the week.
         "listings_by_hour_utc": series(listings_hour, 24),
         "changes_by_hour_utc": series(changes_hour, 24),
         "listings_by_weekday": series(listings_day, 7),
@@ -1036,17 +1069,25 @@ def progress(db: Session, provider_id: str = "amiami") -> dict:
         limit = _page_limit(crawl) if crawl.pages_total else 0
         done = min((crawl.cursor_page or 1) - 1, limit) if limit else 0
         local = local_count(db, crawl.scope, provider_id)
+        live = local_count(db, crawl.scope, provider_id, live_only=True)
         upstream = crawl.total_results or 0
         slices.append(
             {
                 "scope": crawl.scope,
+                # Measured over what the shop could still be listing, so this
+                # answers "how much of the shop do we hold" rather than
+                # "do we hold more rows than the shop has listings", which is
+                # true of every mature installation and says nothing.
                 "coverage_percent": (
-                    round(min(local, upstream) / upstream * 100, 1) if upstream else 0.0
+                    round(min(live, upstream) / upstream * 100, 1) if upstream else 0.0
                 ),
-                # Rows held here that the shop no longer counts in this slice:
-                # a listing marked in stock stays that way until something
-                # rechecks it, and until then the two numbers disagree.
-                "stale_local": max(0, local - upstream) if upstream else 0,
+                # Records of listings the shop has taken down. Not a fault -
+                # keeping them is why this exists - and counted separately
+                # from rows whose status simply has not been rechecked.
+                "removed_local": max(0, local - live),
+                # Rows we still believe are on sale that the shop does not
+                # list. These are the ones a sweep corrects.
+                "stale_local": max(0, live - upstream) if upstream else 0,
                 # Where it sits in the queue, and what the scheduler is doing.
                 "queue_position": queue.get(crawl.scope),
                 "resting": _cooldown_remaining(crawl) > 0,

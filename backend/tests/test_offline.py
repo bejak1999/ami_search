@@ -1488,26 +1488,57 @@ def test_sweep_estimate_uses_observed_speed() -> None:
 
     check("nothing left means no estimate", _eta_seconds(0, 25) is None)
 
-    # Throughput is measured against wall-clock time including the waiting, so
-    # a slice that only runs now and then is not credited with the speed it
-    # manages during the few minutes it holds the budget.
-    crawl = CatalogCrawl(provider="amiami", scope="s")
-    _record_throughput(crawl, 30, datetime.now(timezone.utc) - timedelta(hours=1))
-    check("one hour and 30 pages reads as 30 an hour", abs(crawl.pages_per_hour - 30) < 0.5)
+    # Throughput is measured over the pass itself - start to now, including
+    # the waits between the scheduler slots it is spread over - and not over
+    # the wall clock since the slice last ran. That older measure included
+    # the cooldown *before* the pass, so a thirty-page pass that runs once an
+    # hour and takes two minutes read as thirty pages an hour, and the panel
+    # promised an hour for work that was already over.
+    def pass_state(pages: int, ago_hours: float) -> dict:
+        return {
+            "started_at": (
+                datetime.now(timezone.utc) - timedelta(hours=ago_hours)
+            ).isoformat(),
+            "pages": pages,
+        }
 
-    _record_throughput(crawl, 10, datetime.now(timezone.utc) - timedelta(hours=1))
+    crawl = CatalogCrawl(provider="amiami", scope="s")
+    crawl.current_pass = pass_state(30, 1.0)
+    _record_throughput(crawl)
+    check("thirty pages over an hour reads as thirty an hour",
+          abs(crawl.pages_per_hour - 30) < 0.5, crawl.pages_per_hour)
+
+    crawl.current_pass = pass_state(10, 1.0)
+    _record_throughput(crawl)
     check(
-        "a slower run pulls the average down without jumping to it",
+        "a slower pass pulls the average down without jumping to it",
         10 < crawl.pages_per_hour < 30,
         crawl.pages_per_hour,
     )
 
-    # A gap long enough to be a restart says nothing about throughput.
+    # A pass one slot old has fetched its pages in seconds; extrapolating
+    # that to an hour gives a number in the thousands.
     steady = crawl.pages_per_hour
-    _record_throughput(crawl, 50, datetime.now(timezone.utc) - timedelta(days=2))
-    check("a restart-sized gap is ignored", crawl.pages_per_hour == steady)
-    _record_throughput(crawl, 0, datetime.now(timezone.utc) - timedelta(hours=1))
-    check("and so is a run that fetched nothing", crawl.pages_per_hour == steady)
+    crawl.current_pass = pass_state(30, 2 / 3600)
+    _record_throughput(crawl)
+    check("a pass too young to divide by is ignored", crawl.pages_per_hour == steady,
+          crawl.pages_per_hour)
+    crawl.current_pass = pass_state(0, 1.0)
+    _record_throughput(crawl)
+    check("and so is a pass that fetched nothing", crawl.pages_per_hour == steady)
+    crawl.current_pass = {}
+    _record_throughput(crawl)
+    check("and so is no pass at all", crawl.pages_per_hour == steady)
+
+    # The case that matters in the panel: a short pass done inside one slot.
+    quick = CatalogCrawl(provider="amiami", scope="q")
+    quick.current_pass = pass_state(30, 2 / 60)
+    _record_throughput(quick)
+    check(
+        "a two-minute pass is not quoted at the hourly cadence",
+        quick.pages_per_hour > 200,
+        quick.pages_per_hour,
+    )
 
 
 def test_slice_counts_compare_like_with_like() -> None:
@@ -5341,17 +5372,22 @@ def test_the_daily_panel_separates_finding_from_arriving() -> None:
 
     # Copies under a product we had never opened. We have no idea when these
     # reached the shop - possibly a year ago - only when we first looked.
+    # Dated now rather than a couple of hours ago: the recap buckets by the
+    # day a copy was first seen, so "two hours back" lands on yesterday for
+    # anyone running the suite after midnight - the test would then pass by
+    # day and fail by night, which is a property of the clock and not of the
+    # code under test.
     for n in range(5):
         db.add(Listing(item_id=item.id, provider="amiami", code=f"D-1-R{n}",
                        price=1000, last_price=1000, currency="JPY",
-                       appeared_after=None, first_seen_at=now - timedelta(hours=2),
+                       appeared_after=None, first_seen_at=now,
                        last_seen_at=now, status=ListingStatus.live))
     # And copies that turned up between two looks, which is a real arrival.
     for n in range(5, 7):
         db.add(Listing(item_id=item.id, provider="amiami", code=f"D-1-R{n}",
                        price=1000, last_price=1000, currency="JPY",
                        appeared_after=now - timedelta(days=1),
-                       first_seen_at=now - timedelta(hours=2),
+                       first_seen_at=now,
                        last_seen_at=now, status=ListingStatus.live))
     db.commit()
 
@@ -6045,6 +6081,264 @@ def test_the_photo_panel_cannot_report_more_than_all_of_them() -> None:
     db.close()
 
 
+def test_a_tripped_breaker_is_reported_not_thrown() -> None:
+    print("\n== A blocked upstream stops a job the way any other error does ==")
+    from app.providers.base import ShopProvider
+    from app.providers.ratelimit import CircuitOpen, RateLimitExceeded
+    from app.providers import ProviderError
+
+    class Blocked(ShopProvider):
+        id = "test-blocked"
+        name = "Blocked shop"
+
+        def search(self, query):  # pragma: no cover - not reached
+            raise NotImplementedError
+
+        def get_item(self, code):  # pragma: no cover - not reached
+            raise NotImplementedError
+
+    provider = Blocked()
+
+    # Both of these used to escape as bare RuntimeErrors. Every job catches
+    # ProviderError and nothing catches RuntimeError, so the run died where
+    # it stood: the code that records the failure never ran, the slice was
+    # left marked "running" with no error against it, and the panel showed a
+    # job that had stopped for no stated reason.
+    for failure in (CircuitOpen("open for 300s"), RateLimitExceeded("no token")):
+        provider.breaker.check = lambda: (_ for _ in ()).throw(failure)
+        try:
+            provider.request("GET", "https://example.invalid/x")
+        except ProviderError as exc:
+            check(f"{type(failure).__name__} arrives as a provider error",
+                  "Blocked shop" in str(exc), str(exc))
+        except Exception as exc:  # noqa: BLE001
+            check(f"{type(failure).__name__} arrives as a provider error",
+                  False, f"{type(exc).__name__}: {exc}")
+        else:
+            check(f"{type(failure).__name__} is raised at all", False)
+
+    # And a job that meets one records it rather than falling over.
+    from app.db import SessionLocal, init_db
+    from app.models import CatalogCrawl, CrawlState
+
+    init_db()
+    db = SessionLocal()
+    db.query(CatalogCrawl).delete()
+    row = CatalogCrawl(provider="amiami", scope="figures_preowned",
+                       label="Pre-owned", query={"category_id": 1, "sort": "updated"},
+                       head_pages=30, recheck_interval_minutes=60,
+                       pages_total=100, total_results=5000)
+    db.add(row)
+    db.commit()
+
+    from app.services import crawler
+
+    class BrokenProvider:
+        def search(self, query):
+            raise ProviderError("Blocked shop: circuit open for 300s")
+
+    original = crawler.get_provider
+    crawler.get_provider = lambda _id: BrokenProvider()
+    try:
+        outcome = crawler.run_once(db)
+    finally:
+        crawler.get_provider = original
+
+    db.expire_all()
+    # Whichever slice actually took the turn: run_once creates the missing
+    # default slices first, and any of them may be picked.
+    row = db.query(CatalogCrawl).filter_by(scope=outcome.scope).one()
+    check("the run ends rather than crashing", outcome.stopped_because == "upstream error",
+          outcome.stopped_because)
+    check("the slice records what happened", bool(row.last_error), row.last_error)
+    check("and counts it, so the backoff can start",
+          (row.consecutive_errors or 0) >= 1, row.consecutive_errors)
+    check("the slice is not left marked running",
+          row.state != CrawlState.running, row.state)
+
+    db.query(CatalogCrawl).delete()
+    db.commit()
+    db.close()
+
+
+def test_a_failed_look_does_not_retire_a_product() -> None:
+    print("\n== A refused request is not a look at the product ==")
+    from app.db import SessionLocal, init_db
+    from app.models import Condition, Item
+    from app.providers import ProviderError
+    from app.services import shelfwatch
+
+    init_db()
+    db = SessionLocal()
+    db.query(Item).delete()
+    db.commit()
+
+    now = datetime.now(timezone.utc)
+    for n in range(6):
+        db.add(Item(provider="amiami", code=f"E-{n}", name=f"Figure {n}",
+                    condition=Condition.preowned, currency="JPY",
+                    order_closed=False, shelf_due_at=now - timedelta(hours=1),
+                    last_detail_fetch_at=now - timedelta(days=1)))
+    db.commit()
+
+    class RefusingProvider:
+        def get_item(self, code):
+            raise ProviderError("upstream returned 503")
+
+    class NoWait:
+        """The pacer's job is to look human, which a test has no time for."""
+
+        def sleep(self):
+            return None
+
+        def stats(self):
+            return {}
+
+    original = shelfwatch.get_provider
+    original_pacer = shelfwatch._pacer
+    shelfwatch.get_provider = lambda _id: RefusingProvider()
+    shelfwatch._pacer = lambda: NoWait()
+    try:
+        run = shelfwatch.run_once(db, budget_seconds=30)
+    finally:
+        shelfwatch.get_provider = original
+        shelfwatch._pacer = original_pacer
+
+    db.expire_all()
+    # A look that failed is not a look. Pushing the due date out before the
+    # fetch meant one refused request retired a product for its whole
+    # interval - days, for a cold one - so a bad patch upstream quietly
+    # emptied the rotation of everything it touched.
+    tried = [i for i in db.query(Item).all() if i.shelf_due_at]
+    soon = [i for i in tried if i.shelf_due_at <= now + timedelta(minutes=30)]
+    check("products it failed on come back soon", len(soon) == len(tried),
+          [(i.code, str(i.shelf_due_at)) for i in tried])
+    check("the run gave up after a streak, not a tally",
+          run.stopped_because == "too many upstream errors in a row",
+          run.stopped_because)
+    check("having tried the streak length", run.errors == shelfwatch.ERRORS_BEFORE_GIVING_UP,
+          run.errors)
+
+    db.query(Item).delete()
+    db.commit()
+    db.close()
+
+
+def test_the_linker_queue_is_ordered_not_just_sorted() -> None:
+    print("\n== A wishlisted item reaches the front of the linking queue ==")
+    from app.db import SessionLocal, init_db
+    from app.models import CollectionEntry, Condition, Item, User, UserRole
+    from app.services import enrich
+
+    init_db()
+    db = SessionLocal()
+    db.query(CollectionEntry).delete()
+    db.query(Item).delete()
+    db.query(User).filter(User.username == "linkq").delete()
+    db.commit()
+
+    user = User(username="linkq", email="lq@example.com", password_hash="x",
+                role=UserRole.user)
+    db.add(user)
+    db.flush()
+
+    now = datetime.now(timezone.utc)
+    # A large backlog, all unlinked, seen recently - and one wishlisted item
+    # that was seen long ago so it sits far down any recency ordering.
+    for n in range(500):
+        db.add(Item(provider="amiami", code=f"U-{n}", name=f"Unlinked {n}",
+                    condition=Condition.preowned, currency="JPY",
+                    last_seen_at=now - timedelta(minutes=n)))
+    wanted = Item(provider="amiami", code="WANTED", name="On the wishlist",
+                  condition=Condition.preowned, currency="JPY",
+                  last_seen_at=now - timedelta(days=40))
+    db.add(wanted)
+    db.flush()
+    db.add(CollectionEntry(user_id=user.id, item_id=wanted.id))
+    db.commit()
+
+    # The old version took the forty most recently seen and then sorted those
+    # so wishlisted ones came first - which sorts a window, not a queue. Out
+    # of a backlog this size the wishlisted item was never in the window, so
+    # the promise it made was never kept.
+    queue = enrich.pending_items(db, limit=10)
+    check("the wishlisted item is first", queue and queue[0].code == "WANTED",
+          [i.code for i in queue[:3]])
+    check("and the queue is the length asked for", len(queue) == 10, len(queue))
+
+    # Least-tried first inside a band, so a lookup that keeps failing does not
+    # hold a turn a never-tried item has been waiting for.
+    for item in db.query(Item).filter(Item.code.like("U-%")).limit(400).all():
+        item.mfc_attempts = 1
+    db.commit()
+    queue = enrich.pending_items(db, limit=5)
+    check("untried items come before retried ones",
+          all((i.mfc_attempts or 0) == 0 for i in queue[1:]),
+          [(i.code, i.mfc_attempts) for i in queue])
+
+    db.query(CollectionEntry).delete()
+    db.query(Item).delete()
+    db.query(User).filter(User.username == "linkq").delete()
+    db.commit()
+    db.close()
+
+
+def test_panel_totals_measure_their_own_population() -> None:
+    print("\n== Every bar is drawn against something it can reach ==")
+    from app.db import SessionLocal, init_db
+    from app.models import CatalogCrawl, Condition, Item
+    from app.services import crawler, shelfwatch
+
+    init_db()
+    db = SessionLocal()
+    db.query(CatalogCrawl).delete()
+    db.query(Item).delete()
+    db.commit()
+
+    # Half the pre-owned catalogue is records of listings the shop has taken
+    # down. Keeping them is the point of the application - and the shop does
+    # not count them, so neither can any ratio against what the shop lists.
+    for n in range(300):
+        db.add(Item(provider="amiami", code=f"LIVE-{n}", name=f"On sale {n}",
+                    condition=Condition.preowned, currency="JPY", order_closed=False))
+    for n in range(300):
+        db.add(Item(provider="amiami", code=f"GONE-{n}", name=f"Removed {n}",
+                    condition=Condition.preowned, currency="JPY", order_closed=True))
+    db.add(CatalogCrawl(provider="amiami", scope="figures_preowned",
+                        label="Pre-owned", query={"category_id": 1, "sort": "updated"},
+                        head_pages=30, recheck_interval_minutes=60,
+                        pages_total=12, total_results=600))
+    db.commit()
+
+    held = crawler.local_count(db, "figures_preowned", "amiami")
+    live = crawler.local_count(db, "figures_preowned", "amiami", live_only=True)
+    check("everything held is counted as held", held == 600, held)
+    check("and only the live ones as live", live == 300, live)
+
+    # The shop lists 600. We hold 300 of them, so coverage is half - not the
+    # 100% the old count reported by including records of what has gone.
+    slice_ = crawler.progress(db)["slices"][0]
+    check("coverage is measured against what is comparable",
+          slice_["coverage_percent"] == 50.0, slice_["coverage_percent"])
+    check("the removed records are reported separately",
+          slice_["removed_local"] == 300, slice_["removed_local"])
+    check("and nothing is called stale that is not",
+          slice_["stale_local"] == 0, slice_["stale_local"])
+
+    # The sampler never selects a closed product, so counting one in its
+    # denominator made the bar unreachable by construction.
+    cover = shelfwatch.coverage(db)
+    check("the sampler's target is what it can work on",
+          cover["preowned_total"] == 300, cover["preowned_total"])
+    check("with the rest reported beside it",
+          cover["preowned_closed"] == 300, cover["preowned_closed"])
+
+    db.query(CatalogCrawl).delete()
+    db.query(Item).delete()
+    db.commit()
+    db.close()
+
+
 def test_the_sampler_can_actually_spend_its_budget() -> None:
     print("\n== The shelf sampler is not starved by its own arithmetic ==")
     from app.config import settings
@@ -6214,6 +6508,10 @@ def main() -> int:
     test_the_panel_says_which_ordering_a_slice_reads()
     test_the_gallery_is_shown_but_not_kept()
     test_the_photo_panel_cannot_report_more_than_all_of_them()
+    test_a_tripped_breaker_is_reported_not_thrown()
+    test_a_failed_look_does_not_retire_a_product()
+    test_the_linker_queue_is_ordered_not_just_sorted()
+    test_panel_totals_measure_their_own_population()
     test_settings()
 
     print(f"\n{'=' * 46}\n  {PASS} passed, {FAIL} failed\n{'=' * 46}")

@@ -453,7 +453,13 @@ def download_rate(db: Session, hours: int = 24) -> float:
     since = utcnow() - timedelta(hours=hours)
     done = int(
         db.execute(
-            select(func.count(CachedImage.id)).where(CachedImage.fetched_at >= since)
+            select(func.count(CachedImage.id)).where(
+                CachedImage.fetched_at >= since,
+                # Over the same photos the queue holds, or the wait quoted
+                # from the two together is a rate for one population divided
+                # into a backlog of another.
+                CachedImage.kind != "gallery",
+            )
         ).scalar_one()
     )
     if not done:

@@ -335,19 +335,26 @@ function Slice({
             listing is deleted when it sells and this is the only place it
             still exists. Elsewhere it means a status nothing has rechecked
             yet, which the next sweep corrects. */}
+        {/* Two different things, and they used to be one number. Records the
+            shop has taken down are the point of keeping a catalogue at all;
+            rows whose status is merely out of date are work the next sweep
+            will do. Counting them together meant the second was invisible
+            behind the first, which on a mature install is far larger. */}
+        {slice.removed_local > 0 && (
+          <span
+            className="text-positive"
+            title="The shop no longer sells these. A used listing is deleted the moment it sells, so this is the record it left behind — prices and photos included."
+          >
+            {slice.removed_local.toLocaleString('en-GB')} the shop has removed, kept here
+          </span>
+        )}
         {slice.stale_local > 0 && slice.total_results > 0 && (
-          slice.scope === 'figures_preowned' ? (
-            <span
-              className="text-positive"
-              title="A used listing is deleted the moment it sells. These are kept here with their prices and photos."
-            >
-              {slice.stale_local.toLocaleString('en-GB')} the shop has removed, kept here
-            </span>
-          ) : (
-            <span className="text-warning" title="The next sweep corrects these.">
-              {slice.stale_local.toLocaleString('en-GB')} awaiting a re-check
-            </span>
-          )
+          <span
+            className="text-warning"
+            title="We still have these down as on sale, but the shop does not list them. The next sweep corrects it."
+          >
+            {slice.stale_local.toLocaleString('en-GB')} awaiting a re-check
+          </span>
         )}
 
         <span className="ml-auto flex items-center gap-2">
@@ -702,6 +709,8 @@ function ShelfLifePanel() {
     | {
         enabled: boolean
         preowned_total: number
+        preowned_closed: number
+        listings_sold: number
         counter_seen: number
         with_estimate: number
         due_now: number
@@ -750,7 +759,14 @@ function ShelfLifePanel() {
         <div>
           <div className="mb-1 flex justify-between text-xs">
             <span className="text-muted">Products opened at least once</span>
-            <span className="tabular-nums">
+            <span
+              className="tabular-nums"
+              title={
+                d.preowned_closed
+                  ? `Out of the ${d.preowned_total.toLocaleString('en-GB')} still on sale. A further ${d.preowned_closed.toLocaleString('en-GB')} are records of listings the shop has removed — nothing looks at those again, so they are not part of the target.`
+                  : undefined
+              }
+            >
               {d.counter_seen.toLocaleString('en-GB')} of{' '}
               {d.preowned_total.toLocaleString('en-GB')}
             </span>
@@ -776,8 +792,20 @@ function ShelfLifePanel() {
           <p className="font-mono tabular-nums">{d.listings_live.toLocaleString('en-GB')}</p>
         </div>
         <div>
-          <p className="text-faint">Seen to sell</p>
-          <p className="font-mono tabular-nums">{d.listings_departed.toLocaleString('en-GB')}</p>
+          {/* Departures we can attribute to a sale, rather than every copy
+              no longer on the shelf. The rest are batch disappearances we
+              record as the weaker claim, and copies closed by a repair
+              without anyone watching them go. */}
+          <p className="text-faint" title="Copies that went while their product stayed on sale, plus products AmiAmi deleted outright. Batch disappearances are not counted here.">
+            Seen to sell
+          </p>
+          <p className="font-mono tabular-nums">{d.listings_sold.toLocaleString('en-GB')}</p>
+          {d.listings_departed > d.listings_sold && (
+            <p className="text-[10px] text-faint">
+              {(d.listings_departed - d.listings_sold).toLocaleString('en-GB')} gone, cause
+              unclear
+            </p>
+          )}
         </div>
         <div>
           <p className="text-faint">Waiting for a look</p>
