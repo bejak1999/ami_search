@@ -516,6 +516,26 @@ def resting_after_errors(crawl: CatalogCrawl) -> bool:
     return error_rest_seconds(crawl) > 0
 
 
+def wants_a_turn(crawl: CatalogCrawl) -> bool:
+    """Is this slice asking for the budget at all?
+
+    Past its own interval, or part way through a pass it has not finished.
+    Anything else is simply resting until its interval elapses, and is not
+    waiting in any queue.
+    """
+    return _overdue_seconds(crawl) >= 0 or (crawl.cursor_page or 1) > 1
+
+
+def selection_rank(crawl: CatalogCrawl) -> tuple:
+    """The order slices are picked in. Due beats not due; among the due, the
+    one waiting longest; among those, the one already under way; then the
+    configured priority.
+    """
+    overdue = _overdue_seconds(crawl)
+    mid_sweep = (crawl.cursor_page or 1) > 1
+    return (0 if overdue >= 0 else 1, -overdue, 0 if mid_sweep else 1, crawl.priority or 0)
+
+
 def _select_crawl(db: Session, provider: str) -> CatalogCrawl | None:
     """Which slice gets the next few minutes of crawling.
 
@@ -547,21 +567,10 @@ def _select_crawl(db: Session, provider: str) -> CatalogCrawl | None:
         if not resting_after_errors(crawl)
     ]
 
-    def rank(crawl: CatalogCrawl) -> tuple:
-        overdue = _overdue_seconds(crawl)
-        mid_sweep = (crawl.cursor_page or 1) > 1
-        # Due beats not due; among the due, the one waiting longest; among
-        # those, the one already under way; then the configured priority.
-        return (0 if overdue >= 0 else 1, -overdue, 0 if mid_sweep else 1, crawl.priority or 0)
-
-    eligible = [
-        crawl
-        for crawl in candidates
-        if _overdue_seconds(crawl) >= 0 or (crawl.cursor_page or 1) > 1
-    ]
+    eligible = [crawl for crawl in candidates if wants_a_turn(crawl)]
     if not eligible:
         return None
-    return sorted(eligible, key=rank)[0]
+    return sorted(eligible, key=selection_rank)[0]
 
 
 def start_pass(db: Session, crawl: CatalogCrawl, full: bool) -> None:
@@ -1219,16 +1228,25 @@ def progress(db: Session, provider_id: str = "amiami") -> dict:
         .all()
     )
 
-    # Who would be picked next, by the same rule the scheduler uses, so the
-    # view can say "waiting, third in line" instead of leaving someone to
-    # wonder why a slice has not moved for an hour.
+    # Who would be picked next, by the rule the scheduler actually uses.
+    #
+    # It said as much before and did something else: it ranked every enabled
+    # slice by how long since it last ran, due or not. So with everything
+    # resting it named whichever had been idle longest - the fortnightly
+    # catch-all, four days quiet - as "up next", while the hourly pre-owned
+    # slice, genuinely minutes away, was listed fourth. It announced sweeps
+    # that were not coming.
+    #
+    # A slice that is not asking for the budget is not in the queue at all.
+    # It is resting until its interval elapses, and the line beside it
+    # already says how long that is.
     waiting = sorted(
-        (c for c in crawls if c.enabled and not resting_after_errors(c)),
-        key=lambda c: (
-            _cooldown_remaining(c) > 0,
-            c.last_run_at or datetime.min.replace(tzinfo=timezone.utc),
-            c.priority or 0,
+        (
+            c
+            for c in crawls
+            if c.enabled and not resting_after_errors(c) and wants_a_turn(c)
         ),
+        key=selection_rank,
     )
     queue = {c.scope: index for index, c in enumerate(waiting)}
 

@@ -1438,10 +1438,29 @@ def test_slices_take_turns() -> None:
 
     detail = crawler.progress(db, "amiami")
     positions = {s["scope"]: s["queue_position"] for s in detail["slices"]}
+    # A position means "asking for the budget", not merely "switched on". The
+    # two slices resting until their interval elapses are not in any queue,
+    # and saying they were is how a fortnightly sweep came to be announced as
+    # up next while it was ten days away.
+    asking = {scope for scope, place in positions.items() if place is not None}
     check(
-        "the view can say who is in line",
-        all(p is not None for p in positions.values()),
+        "the ones asking for a turn are in line",
+        asking == {"figures_preorder", "figures_all"},
         positions,
+    )
+    check(
+        "the never-finished slice is at the front",
+        positions["figures_preorder"] == 0,
+        positions,
+    )
+    check(
+        "with the half-read sweep behind it",
+        positions["figures_all"] == 1,
+        positions,
+    )
+    check(
+        "and the queue agrees with what would be picked",
+        crawler._select_crawl(db, "amiami").scope == "figures_preorder",
     )
 
     db.query(CatalogCrawl).delete()
@@ -6925,6 +6944,90 @@ def test_a_slice_with_no_head_reads_all_of_itself() -> None:
     db.close()
 
 
+def test_the_queue_names_the_slice_that_is_actually_next() -> None:
+    print("\n== The panel's queue is the scheduler's queue ==")
+    from app.db import SessionLocal, init_db
+    from app.models import CatalogCrawl
+    from app.services import crawler
+
+    init_db()
+    db = SessionLocal()
+    db.query(CatalogCrawl).delete()
+    db.commit()
+    crawler.ensure_scopes(db)
+
+    now = datetime.now(timezone.utc)
+    # Everything resting: the fortnightly catch-all idle longest, the hourly
+    # pre-owned slice minutes from falling due.
+    state = {
+        "figures_preowned": (now - timedelta(minutes=48), 60),
+        "figures_in_stock": (now - timedelta(hours=14), 1440),
+        "figures_preorder": (now - timedelta(hours=14), 1440),
+        "figures_all": (now - timedelta(days=4), 20160),
+    }
+    for scope, (finished, interval) in state.items():
+        row = db.query(CatalogCrawl).filter_by(scope=scope).one()
+        row.finished_at = finished
+        row.last_run_at = finished
+        row.recheck_interval_minutes = interval
+        row.cycles_completed = 2
+        row.cursor_page = 1
+        row.pages_total = 1390 if scope == "figures_all" else 200
+    db.commit()
+
+    def positions() -> dict:
+        return {
+            s["scope"]: s["queue_position"] for s in crawler.progress(db)["slices"]
+        }
+
+    # The queue used to rank every enabled slice by how long since it last
+    # ran, due or not - so with everything resting it announced the catch-all
+    # as "up next" while the hourly slice was listed fourth. It named sweeps
+    # that were not coming, and a fortnightly sweep looked like it had
+    # started ten days early.
+    check("nothing is due, so nothing is in the queue",
+          set(positions().values()) == {None}, positions())
+    check("and the scheduler agrees there is nothing to pick",
+          crawler._select_crawl(db, "amiami") is None)
+
+    # Wind the hourly slice past its interval.
+    row = db.query(CatalogCrawl).filter_by(scope="figures_preowned").one()
+    row.finished_at = now - timedelta(minutes=75)
+    db.commit()
+
+    at_front = [s for s, p in positions().items() if p == 0]
+    picked = crawler._select_crawl(db, "amiami")
+    check("the one that falls due is at the front", at_front == ["figures_preowned"],
+          at_front)
+    check("which is what the scheduler picks",
+          picked is not None and picked.scope == "figures_preowned",
+          picked.scope if picked else None)
+    check("and the ones still resting stay out of it",
+          positions()["figures_all"] is None, positions())
+
+    # A pass part way through is asking for the budget whatever its interval
+    # says, because abandoning it half read would be worse than finishing it.
+    row = db.query(CatalogCrawl).filter_by(scope="figures_all").one()
+    row.cursor_page = 400
+    db.commit()
+    check("a half-read sweep is in the queue", positions()["figures_all"] is not None,
+          positions())
+    check("but behind the slice that is genuinely due",
+          positions()["figures_all"] > positions()["figures_preowned"], positions())
+
+    # And the two rankings are one function now, so they cannot drift apart.
+    ordered = sorted(
+        (c for c in db.query(CatalogCrawl).all() if crawler.wants_a_turn(c)),
+        key=crawler.selection_rank,
+    )
+    check("the panel order is the selection order",
+          [c.scope for c in ordered][0] == crawler._select_crawl(db, "amiami").scope)
+
+    db.query(CatalogCrawl).delete()
+    db.commit()
+    db.close()
+
+
 def test_the_sampler_can_actually_spend_its_budget() -> None:
     print("\n== The shelf sampler is not starved by its own arithmetic ==")
     from app.config import settings
@@ -7102,6 +7205,7 @@ def main() -> int:
     test_a_pass_started_by_hand_is_the_kind_that_was_asked_for()
     test_only_the_preowned_slice_offers_a_head_sweep()
     test_a_slice_with_no_head_reads_all_of_itself()
+    test_the_queue_names_the_slice_that_is_actually_next()
     test_the_survival_curve_keeps_the_slow_copies_in()
     test_the_bargain_is_only_counted_where_there_was_a_choice()
     test_the_shelf_panel_adds_up()
