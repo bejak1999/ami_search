@@ -6456,6 +6456,154 @@ def test_watches_draw_from_the_pool_at_the_front_of_the_queue() -> None:
           budget.WEIGHTS["manual"] > budget.WEIGHTS["catalogue"])
 
 
+def test_a_pass_started_by_hand_is_the_kind_that_was_asked_for() -> None:
+    print("\n== The buttons start the pass they say they start ==")
+    from app.db import SessionLocal, init_db
+    from app.models import CatalogCrawl, CrawlState
+    from app.services import crawler
+
+    init_db()
+    db = SessionLocal()
+    db.query(CatalogCrawl).delete()
+    db.commit()
+
+    now = datetime.now(timezone.utc)
+
+    def slice_row(**over) -> CatalogCrawl:
+        db.query(CatalogCrawl).delete()
+        row = CatalogCrawl(
+            provider="amiami", scope="figures_preowned", label="Pre-owned",
+            query={"category_id": 1, "condition": "preowned", "sort": "updated"},
+            head_pages=30, recheck_interval_minutes=60,
+            full_sweep_interval_minutes=1440,
+            pages_total=204, total_results=10_200,
+            cycles_completed=3, finished_at=now - timedelta(minutes=5),
+            last_full_sweep_at=now - timedelta(hours=2),
+        )
+        for key, value in over.items():
+            setattr(row, key, value)
+        db.add(row)
+        db.commit()
+        return row
+
+    # A full sweep is owed, and a head pass is asked for anyway. The schedule
+    # used to answer at page 1 - the flag was only consulted once the cursor
+    # had moved - so the short pass turned into a 204-page sweep at the moment
+    # it started, which is the one thing the button must not do.
+    row = slice_row(last_full_sweep_at=now - timedelta(days=3))
+    check("a full sweep is due", crawler.full_sweep_due(row))
+    crawler.start_pass(db, row, full=False)
+    check("but the head pass reads its head", crawler._page_limit(row) == 30,
+          crawler._page_limit(row))
+    check("and says so", row.sweeping_all is False)
+    check("from page one", row.cursor_page == 1, row.cursor_page)
+
+    # And the full sweep is still owed afterwards: asking for a short pass
+    # must not postpone one that was already due.
+    check("the full sweep is still owed", crawler.full_sweep_due(row))
+
+    # The other way round: no full sweep due, one asked for.
+    row = slice_row()
+    check("no full sweep is due", not crawler.full_sweep_due(row))
+    crawler.start_pass(db, row, full=True)
+    check("the full sweep reads everything", crawler._page_limit(row) == 204,
+          crawler._page_limit(row))
+
+    # Whatever was running is abandoned - that is what a fresh pass means -
+    # and the slice goes to the front of the queue rather than waiting out
+    # the interval it was part way through.
+    row = slice_row(cursor_page=57, state=CrawlState.paused,
+                    consecutive_errors=4, last_error="upstream said no")
+    crawler.start_pass(db, row, full=True)
+    check("the cursor goes back to the start", row.cursor_page == 1, row.cursor_page)
+    check("errors are cleared so a resting slice can be kicked",
+          row.consecutive_errors == 0 and row.last_error is None)
+    check("and it is due immediately", crawler._cooldown_remaining(row) == 0,
+          crawler._cooldown_remaining(row))
+    picked = crawler._select_crawl(db, "amiami")
+    check("so it is what runs next", picked is not None and picked.id == row.id)
+
+    # The timers move when a pass finishes, not when the button is pressed:
+    # an abandoned pass must not leave the schedule believing it ran.
+    row = slice_row()
+    before_full = row.last_full_sweep_at
+    before_finished = row.finished_at
+    crawler.start_pass(db, row, full=True)
+    check("pressing it does not touch the full-sweep timer",
+          row.last_full_sweep_at == before_full)
+    check("nor claim the pass has finished",
+          row.finished_at is None and before_finished is not None)
+
+    row.cursor_page = 205
+    crawler._complete_cycle(db, row)
+    check("finishing a full sweep restarts its timer",
+          row.last_full_sweep_at is not None
+          and row.last_full_sweep_at > before_full, row.last_full_sweep_at)
+    check("and the recheck interval starts again", row.finished_at is not None)
+    check("with nothing left marked in progress", not row.current_pass, row.current_pass)
+
+    # A pass that fetched nothing still has to release the marker, or the
+    # slice looks like one running for ever afterwards.
+    row = slice_row()
+    crawler.start_pass(db, row, full=False)
+    crawler._record_pass(row, "nothing to do")
+    check("an empty pass is closed too", not row.current_pass, row.current_pass)
+    check("so the schedule decides the next one again",
+          crawler._page_limit(row) == 30 or crawler._page_limit(row) == 204)
+
+    db.query(CatalogCrawl).delete()
+    db.commit()
+    db.close()
+
+
+def test_only_the_preowned_slice_offers_a_head_sweep() -> None:
+    print("\n== A slice with no front has one button, not two ==")
+    from app.db import SessionLocal, init_db
+    from app.models import CatalogCrawl, User, UserRole
+    from app.services import crawler
+
+    init_db()
+    db = SessionLocal()
+    db.query(CatalogCrawl).delete()
+    db.commit()
+    crawler.ensure_scopes(db)
+
+    # The panel decides which buttons to draw from head_supported, and that is
+    # keyed on what the slice contains rather than on its sort key - an
+    # installation whose query held something else used to lose the controls
+    # from the one slice they belong to.
+    by_scope = {s["scope"]: s for s in crawler.progress(db)["slices"]}
+    check("the pre-owned slice offers a short pass",
+          by_scope["figures_preowned"]["head_supported"] is True)
+    for scope in ("figures_in_stock", "figures_preorder", "figures_all"):
+        check(f"{scope} does not", by_scope[scope]["head_supported"] is False)
+        row = db.query(CatalogCrawl).filter_by(scope=scope).one()
+        check(f"and reads all of itself every pass: {scope}",
+              crawler._page_limit(row) == (row.pages_total or 10_000))
+
+    # Asking for one anyway is refused rather than quietly doing something
+    # else - there is no head to read, so a "head sweep" would be a full one
+    # under another name.
+    from app.api import system as system_api
+    from fastapi import HTTPException
+
+    admin = User(username="sweepadmin", email="sa@example.com", password_hash="x",
+                 role=UserRole.admin)
+    try:
+        system_api.start_catalog_sweep(
+            scope="figures_all", kind="head", seconds=5, db=db, _admin=admin
+        )
+    except HTTPException as exc:
+        check("a head sweep on a slice without one is refused", exc.status_code == 400,
+              exc.status_code)
+    else:
+        check("a head sweep on a slice without one is refused", False)
+
+    db.query(CatalogCrawl).delete()
+    db.commit()
+    db.close()
+
+
 def test_the_sampler_can_actually_spend_its_budget() -> None:
     print("\n== The shelf sampler is not starved by its own arithmetic ==")
     from app.config import settings
@@ -6630,6 +6778,8 @@ def main() -> int:
     test_the_linker_queue_is_ordered_not_just_sorted()
     test_panel_totals_measure_their_own_population()
     test_watches_draw_from_the_pool_at_the_front_of_the_queue()
+    test_a_pass_started_by_hand_is_the_kind_that_was_asked_for()
+    test_only_the_preowned_slice_offers_a_head_sweep()
     test_settings()
 
     print(f"\n{'=' * 46}\n  {PASS} passed, {FAIL} failed\n{'=' * 46}")

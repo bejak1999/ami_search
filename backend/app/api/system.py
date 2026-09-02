@@ -282,6 +282,52 @@ def run_catalog_crawl(
     )
 
 
+@admin.post("/catalog/{scope}/sweep", response_model=MessageResponse)
+def start_catalog_sweep(
+    scope: str,
+    kind: str = Query(default="full", pattern="^(full|head)$"),
+    seconds: int = Query(default=20, ge=5, le=120),
+    provider: str = "amiami",
+    db: Session = Depends(get_db),
+    _admin: User = Depends(admin_user),
+) -> MessageResponse:
+    """Start a pass over one slice now, of the kind asked for.
+
+    "full" reads the slice end to end; "head" re-reads only its newest pages,
+    which is meaningful on the pre-owned slice and on no other - the rest have
+    no front worth revisiting, so every pass of theirs reads everything.
+
+    A few seconds of it run here rather than only being queued, so pressing
+    the button visibly does something. The scheduler carries on from there.
+    """
+    from ..models import CatalogCrawl
+    from ..services import crawler
+
+    crawl = db.execute(
+        select(CatalogCrawl).where(
+            CatalogCrawl.provider == provider, CatalogCrawl.scope == scope
+        )
+    ).scalar_one_or_none()
+    if crawl is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Unknown slice")
+    if kind == "head" and not (crawl.head_pages or 0):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="This slice has no short pass: every pass reads all of it.",
+        )
+
+    crawler.start_pass(db, crawl, full=kind == "full")
+    outcome = crawler.run_once(db, provider, budget_seconds=seconds, scope=scope)
+    label = "Full sweep" if kind == "full" else "Head pass"
+    return MessageResponse(
+        message=(
+            f"{label} started: {outcome.pages} page(s), {outcome.items} item(s), "
+            f"{outcome.new_items} new so far"
+        ),
+        detail=outcome.as_dict(),
+    )
+
+
 @admin.get("/recap", response_model=MessageResponse)
 def preowned_recap(
     days: int = Query(default=14, ge=2, le=90),

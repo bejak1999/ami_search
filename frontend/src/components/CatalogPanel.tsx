@@ -214,11 +214,15 @@ function MfcSession() {
 function Slice({
   slice,
   onToggle,
-  onRestart,
+  onSweep,
+  starting,
 }: {
   slice: any
   onToggle: (enabled: boolean) => void
-  onRestart: () => void
+  onSweep: (kind: 'full' | 'head') => void
+  /** Which kind is being started on this slice right now, if any. Named apart
+   *  from the local `sweeping`, which means the pass already under way. */
+  starting: 'full' | 'head' | null
 }) {
   const toast = useToast()
   const queryClient = useQueryClient()
@@ -361,8 +365,31 @@ function Slice({
           <button onClick={() => setOpen((v) => !v)} className="hover:text-ink">
             settings
           </button>
-          <button onClick={onRestart} className="hover:text-ink" title="Rewind to page 1">
-            rewind
+          {/* Start a pass now, of the kind asked for. Only the pre-owned
+              slice has a short pass to offer: the other three have no front
+              worth revisiting, so every pass of theirs reads everything and
+              there is only one thing to ask for. */}
+          {slice.head_supported && (
+            <button
+              onClick={() => onSweep('head')}
+              disabled={starting !== null || !slice.head_pages}
+              className="hover:text-ink disabled:opacity-50"
+              title={
+                slice.head_pages
+                  ? `Read the newest ${slice.head_pages} pages now. The full sweep stays owed if it is due.`
+                  : 'This slice has no short pass configured.'
+              }
+            >
+              {starting === 'head' ? 'starting…' : 'head sweep'}
+            </button>
+          )}
+          <button
+            onClick={() => onSweep('full')}
+            disabled={starting !== null}
+            className="hover:text-ink disabled:opacity-50"
+            title="Read this slice end to end, starting now. The next scheduled full sweep is a full interval after this one finishes."
+          >
+            {starting === 'full' ? 'starting…' : 'full sweep'}
           </button>
           <Toggle checked={slice.enabled} onChange={onToggle} label={slice.enabled ? 'on' : 'off'} />
         </span>
@@ -913,12 +940,17 @@ export function CatalogPanel() {
     onSuccess: () => void queryClient.invalidateQueries({ queryKey: ['admin', 'catalog'] }),
   })
 
-  const restart = useMutation({
-    mutationFn: (scope: string) => api.admin.updateCatalogSlice(scope, { restart: true }),
-    onSuccess: () => {
-      toast.success('Slice rewound to page 1')
+  // Starting a pass by hand, of the kind asked for. "Rewind" only moved the
+  // cursor and left the schedule to decide what kind of pass came next, so
+  // there was no way to ask for one or the other.
+  const sweep = useMutation({
+    mutationFn: ({ scope, kind }: { scope: string; kind: 'full' | 'head' }) =>
+      api.admin.startCatalogSweep(scope, kind),
+    onSuccess: (result) => {
+      toast.success(result.message)
       void queryClient.invalidateQueries({ queryKey: ['admin', 'catalog'] })
     },
+    onError: (error) => toast.error('Could not start it', (error as Error).message),
   })
 
   const data = catalog.data?.detail
@@ -981,7 +1013,12 @@ export function CatalogPanel() {
                   key={slice.scope}
                   slice={slice}
                   onToggle={(enabled) => toggleSlice.mutate({ scope: slice.scope, enabled })}
-                  onRestart={() => restart.mutate(slice.scope)}
+                  onSweep={(kind) => sweep.mutate({ scope: slice.scope, kind })}
+                  starting={
+                    sweep.isPending && sweep.variables?.scope === slice.scope
+                      ? sweep.variables.kind
+                      : null
+                  }
                 />
               ))}
             </div>

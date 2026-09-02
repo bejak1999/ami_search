@@ -371,7 +371,19 @@ def _page_limit(crawl: CatalogCrawl) -> int:
     # the schedule answers and the view can say how long the next pass will
     # be. Once a pass is under way the flag answers, because the cursor alone
     # cannot tell a finished short pass from a sweep at the same page.
-    sweeping = crawl.sweeping_all if (crawl.cursor_page or 1) > 1 else full_sweep_due(crawl)
+    #
+    # Keyed on whether a pass is under way. Either signal says so: the
+    # accumulator, written when a pass begins and cleared when it ends, and a
+    # cursor that has left page one.
+    #
+    # The cursor alone was standing in for this and cannot cover the start of
+    # a pass: at page 1 a pass has begun but the cursor has not moved, so the
+    # schedule answered instead of the flag - and a pass started by hand
+    # could not choose its own kind, because asking for a short one while a
+    # full sweep was due produced a full one anyway. The accumulator alone
+    # would not cover a pass that began under a build that did not keep one.
+    in_progress = bool(crawl.current_pass) or (crawl.cursor_page or 1) > 1
+    sweeping = crawl.sweeping_all if in_progress else full_sweep_due(crawl)
     return total if sweeping else min(total, head)
 
 
@@ -527,15 +539,71 @@ def _select_crawl(db: Session, provider: str) -> CatalogCrawl | None:
     return sorted(eligible, key=rank)[0]
 
 
-def run_once(db: Session, provider_id: str = "amiami", budget_seconds: int | None = None) -> CrawlRun:
-    """Crawl for a while, then stop and leave the cursor where it is."""
+def start_pass(db: Session, crawl: CatalogCrawl, full: bool) -> None:
+    """Begin a pass of the given kind on this slice, now.
+
+    For the buttons in the admin view. Whatever was in progress is abandoned -
+    that is what asking for a fresh pass means - and the kind is settled here
+    rather than left to the schedule, so asking for a short pass while a full
+    sweep happens to be due gets a short pass.
+
+    The timers are not touched. They are reset when a pass *finishes*, by
+    _complete_cycle, and that distinction matters: a short pass started by
+    hand must not postpone a full sweep that is already owed, and a pass that
+    is abandoned half way should not leave the schedule believing it ran.
+    """
+    crawl.cursor_page = 1
+    crawl.sweeping_all = full
+    crawl.state = CrawlState.idle
+    crawl.consecutive_errors = 0
+    crawl.last_error = None
+    crawl.last_error_at = None
+    # Declaring the pass here is what makes the kind stick: _page_limit reads
+    # the flag for as long as this is set, and the crawler leaves an already
+    # declared pass alone rather than asking the schedule again.
+    crawl.current_pass = {
+        "started_at": utcnow().isoformat(),
+        "pages": 0,
+        "items": 0,
+        "new": 0,
+        "changed": 0,
+        "errors": 0,
+        "slots": 0,
+        "working_seconds": 0.0,
+        "interruptions": 0,
+    }
+    # Nothing to wait for: an unfinished slice is always the first claim, so
+    # this jumps the queue rather than sitting behind whatever is due.
+    crawl.finished_at = None
+    db.commit()
+
+
+def run_once(
+    db: Session,
+    provider_id: str = "amiami",
+    budget_seconds: int | None = None,
+    scope: str | None = None,
+) -> CrawlRun:
+    """Crawl for a while, then stop and leave the cursor where it is.
+
+    ``scope`` names one slice instead of letting the usual ranking choose,
+    which is what the admin view's buttons need: "sweep this one now" cannot
+    be expressed by asking whoever is next in line.
+    """
     run = CrawlRun()
     if not settings.crawler_enabled:
         run.stopped_because = "disabled"
         return run
 
     ensure_scopes(db, provider_id)
-    crawl = _select_crawl(db, provider_id)
+    if scope is not None:
+        crawl = db.execute(
+            select(CatalogCrawl).where(
+                CatalogCrawl.provider == provider_id, CatalogCrawl.scope == scope
+            )
+        ).scalar_one_or_none()
+    else:
+        crawl = _select_crawl(db, provider_id)
     if crawl is None:
         run.stopped_because = "no slice available"
         return run
@@ -566,11 +634,15 @@ def _crawl_slice(
 
     if crawl.started_at is None:
         crawl.started_at = utcnow()
-    if (crawl.cursor_page or 1) <= 1:
+    if (crawl.cursor_page or 1) <= 1 and not crawl.current_pass:
         # A pass begins here, and what kind it is has to be settled now: the
         # cursor cannot tell them apart later, and a pass that changed its
         # mind half way would either stop a sweep short or turn a short pass
         # into a sweep.
+        #
+        # Unless one has already been declared - a sweep started by hand says
+        # which kind it is when the button is pressed, and the schedule must
+        # not overrule the person who asked.
         crawl.sweeping_all = full_sweep_due(crawl)
         crawl.current_pass = {
             "started_at": utcnow().isoformat(),
@@ -764,6 +836,11 @@ def _record_pass(crawl: CatalogCrawl, ended_because: str) -> None:
     """
     state = dict(crawl.current_pass or {})
     if not state or not state.get("pages"):
+        # Nothing worth a log entry, but the accumulator still has to be
+        # cleared: it is what says a pass is under way, and a pass that
+        # fetched nothing and left its marker behind would look like one
+        # still running for ever after.
+        crawl.current_pass = {}
         return
 
     started = state.get("started_at")

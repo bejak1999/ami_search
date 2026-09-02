@@ -301,6 +301,10 @@ export const api = {
       post<MessageResponse>(`/admin/catalog/run${qs({ seconds })}`),
     updateCatalogSlice: (scope: string, body: Record<string, unknown>) =>
       patch<MessageResponse>(`/admin/catalog/${encodeURIComponent(scope)}`, body),
+    startCatalogSweep: (scope: string, kind: 'full' | 'head') =>
+      post<MessageResponse>(
+        `/admin/catalog/${encodeURIComponent(scope)}/sweep${qs({ kind })}`,
+      ),
     mfcSession: () => get<MessageResponse>('/admin/mfc/session'),
     setMfcSession: (cookie: string) => request<MessageResponse>('/admin/mfc/session', {
       method: 'PUT',

@@ -159,7 +159,7 @@ def collect_issues(db: Session) -> list[Issue]:
                 key="crawler:stalled",
                 title=f"{len(stalled)} catalogue slice(s) stalled",
                 detail=", ".join(f"{c.label or c.scope}: {c.last_error or 'unknown'}"[:90] for c in stalled[:3]),
-                hint="The catalogue stops growing until this clears. Rewind the slice in Administration to retry.",
+                hint="The catalogue stops growing until this clears. Start a full sweep on the slice in Administration to retry.",
             )
         )
 
