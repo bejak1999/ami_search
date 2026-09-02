@@ -86,6 +86,29 @@ app = FastAPI(
 
 app.add_middleware(GZipMiddleware, minimum_size=800)
 
+
+@app.middleware("http")
+async def _attribute_to_the_person_waiting(request, call_next):
+    """Anything arriving over HTTP is somebody sitting there waiting for it.
+
+    Background jobs declare what they are - a sweep, a watch poll, a sampler
+    run - and are paced against their share of the shop's allowance. Requests
+    made while serving a page had no such label, so they fell through to the
+    smallest share going: opening an item and pressing refresh, resolving a
+    pasted code, asking the collection what has got cheaper. That last one can
+    ask about two hundred figures from one click, and at the unlabelled rate
+    it would have taken twenty-five minutes.
+
+    Labelled here rather than at each endpoint, because the thing that makes
+    it true is the arrival, not which handler catches it - and an endpoint
+    added later would otherwise quietly inherit the wrong pace.
+    """
+    from .services import reqlog
+
+    with reqlog.purpose("manual"):
+        return await call_next(request)
+
+
 _origins = [o.strip() for o in os.getenv("CORS_ORIGINS", "").split(",") if o.strip()]
 if _origins:
     app.add_middleware(

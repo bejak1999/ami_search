@@ -296,6 +296,7 @@ def is_copy_code(code: str) -> bool:
 
 
 class AmiAmiProvider(ShopProvider):
+    shares_budget = True
     id = "amiami"
     name = "AmiAmi"
     home_url = SITE_ROOT

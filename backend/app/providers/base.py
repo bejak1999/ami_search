@@ -140,6 +140,11 @@ class ShopProvider(ABC):
     #: Python ClientHello with a 403 before any header is even inspected, so
     #: this is not optional for AmiAmi.
     impersonate: str = "chrome"
+    #: Whether this shop's requests are drawn from the shared allowance, and
+    #: so paced against whatever else is talking to it. MyFigureCollection
+    #: keeps its own; product photos come from a static image host and are
+    #: not throttled against the API at all.
+    shares_budget: bool = False
 
     def __init__(self) -> None:
         self.bucket = TokenBucket(rate_per_minute=settings.provider_requests_per_minute)
@@ -200,7 +205,7 @@ class ShopProvider(ABC):
         """
         import time
 
-        from ..services import reqlog
+        from ..services import budget, reqlog
 
         # Both of these are provider errors as far as anything upstream of
         # here is concerned, and every caller already handles that. Raised
@@ -211,6 +216,16 @@ class ShopProvider(ABC):
         # no stated reason. The scheduler logged it and went quiet.
         try:
             self.breaker.check()
+            if self.shares_budget:
+                # The pool, before the provider's own ceiling. Every job that
+                # talks to this shop waits here for its share, including the
+                # ones with no pacer of their own - which was all of watch
+                # polling, sixteen threads deep and held only by a ceiling
+                # well above the pool the panel said was being divided up.
+                #
+                # The weight still decides who gets what: a watch takes the
+                # largest share, and the whole pool when it is alone.
+                budget.wait_for_turn(reqlog.current())
             self.bucket.acquire()
         except (CircuitOpen, RateLimitExceeded) as exc:
             raise ProviderError(f"{self.name}: {exc}") from exc

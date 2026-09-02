@@ -6339,6 +6339,123 @@ def test_panel_totals_measure_their_own_population() -> None:
     db.close()
 
 
+def test_watches_draw_from_the_pool_at_the_front_of_the_queue() -> None:
+    print("\n== Watch polling is in the pool, and first in it ==")
+    import threading
+    import time as _time
+
+    from app.providers.amiami import AmiAmiProvider
+    from app.providers.base import ShopProvider
+    from app.services import budget
+
+    check("AmiAmi draws from the shared allowance", AmiAmiProvider.shares_budget)
+    check("and nothing else does by default", ShopProvider.shares_budget is False)
+
+    # Run against a deliberately fast pool so the arithmetic shows in seconds.
+    # The mechanism is the same at twenty-four a minute; only the wait is.
+    original_total = budget.total_per_minute
+    budget.total_per_minute = lambda: 600.0
+
+    def measure(purpose: str, threads: int, each: int) -> float:
+        budget._gates.clear()
+        for _ in range(budget.GATE_BURST):
+            budget.wait_for_turn(purpose, timeout=30)
+        barrier = threading.Barrier(threads)
+        started = [0.0]
+
+        def worker(index: int) -> None:
+            barrier.wait()
+            if index == 0:
+                started[0] = _time.monotonic()
+            for _ in range(each):
+                budget.wait_for_turn(purpose, timeout=60)
+
+        workers = [
+            threading.Thread(target=worker, args=(n,), daemon=True)
+            for n in range(threads)
+        ]
+        for w in workers:
+            w.start()
+        for w in workers:
+            w.join()
+        return threads * each / max(1e-6, _time.monotonic() - started[0]) * 60
+
+    try:
+        # The whole point: sixteen watch threads used to be held only by the
+        # provider's own ceiling, well above the pool the panel said was
+        # being divided up. They share one allowance now.
+        with budget.claim("watch"):
+            alone = measure("watch", 16, 4)
+        check(
+            "sixteen threads get one share between them",
+            alone < 600 * 1.15,
+            f"{alone:.0f}/min against a 600 pool",
+        )
+        check("and they do use it", alone > 600 * 0.75, f"{alone:.0f}/min")
+
+        # Higher priority still means higher priority.
+        with budget.claim("watch"), budget.claim("catalogue"), budget.claim("shelf"):
+            crowded = measure("watch", 16, 3)
+            sampler = measure("shelf", 2, 4)
+        check(
+            "with everything running a watch keeps the largest share",
+            250 < crowded < 350,
+            f"{crowded:.0f}/min, expecting about 300",
+        )
+        check(
+            "and the sampler the smallest",
+            90 < sampler < 150,
+            f"{sampler:.0f}/min, expecting about 120",
+        )
+        check("largest is larger", crowded > sampler, (crowded, sampler))
+
+        # A job that already paces itself must not be slowed by the gate as
+        # well: its pacer aims at the same share, so the gate should never be
+        # the thing holding it.
+        with budget.claim("catalogue"):
+            sweep = measure("catalogue", 1, 20)
+        check("a lone sweep still gets the whole pool", sweep > 600 * 0.75,
+              f"{sweep:.0f}/min")
+    finally:
+        budget.total_per_minute = original_total
+        budget._gates.clear()
+
+    # Somebody sitting there waiting is not background work, and must not be
+    # paced as though it were. The label is applied on arrival rather than at
+    # each endpoint - and it has to survive the hop into the threadpool a
+    # synchronous handler runs in, which is exactly the sort of thing that
+    # fails silently and leaves every click on the smallest share going.
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    from app.main import app as real_app
+    from app.services import reqlog
+
+    probe = FastAPI()
+    for middleware in real_app.user_middleware:
+        if getattr(middleware.cls, "__name__", "") == "BaseHTTPMiddleware":
+            probe.user_middleware.append(middleware)
+    probe.middleware_stack = None
+
+    @probe.get("/sync")
+    def _sync():  # noqa: ANN202 - a fixture, not an interface
+        return {"purpose": reqlog.current()}
+
+    @probe.get("/async")
+    async def _async():  # noqa: ANN202
+        return {"purpose": reqlog.current()}
+
+    client = TestClient(probe)
+    for route in ("/sync", "/async"):
+        got = client.get(route).json()["purpose"]
+        check(f"a {route.lstrip('/')} endpoint is attributed to the person waiting",
+              got == "manual", got)
+    check("and the label does not leak outside a request",
+          reqlog.current() == "other", reqlog.current())
+    check("a person waiting outranks the sweeps",
+          budget.WEIGHTS["manual"] > budget.WEIGHTS["catalogue"])
+
+
 def test_the_sampler_can_actually_spend_its_budget() -> None:
     print("\n== The shelf sampler is not starved by its own arithmetic ==")
     from app.config import settings
@@ -6512,6 +6629,7 @@ def main() -> int:
     test_a_failed_look_does_not_retire_a_product()
     test_the_linker_queue_is_ordered_not_just_sorted()
     test_panel_totals_measure_their_own_population()
+    test_watches_draw_from_the_pool_at_the_front_of_the_queue()
     test_settings()
 
     print(f"\n{'=' * 46}\n  {PASS} passed, {FAIL} failed\n{'=' * 46}")

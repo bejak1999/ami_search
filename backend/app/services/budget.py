@@ -15,8 +15,15 @@ a watch or a sweep wants it, without anybody choosing numbers in advance.
 The order is the order things matter in:
 
     watch       an alert is the point of the application
+    manual      somebody is sitting there waiting for it
     catalogue   the sweeps that keep the catalogue honest
     shelf       following individual copies, which can wait
+
+"manual" is anything a person set off by clicking: opening an item and
+refreshing it, resolving a pasted code, asking the collection what has got
+cheaper. It carries a watch's weight because a person waiting is at least as
+urgent as an alert, and like everything else it takes nothing at all when
+nobody is clicking.
 
 Photos are not in here. They come from img.amiami.com, a static image host,
 and throttling them against the API would slow them down for nothing.
@@ -34,11 +41,13 @@ from contextlib import contextmanager
 from typing import Iterator
 
 from ..config import settings
+from ..providers.ratelimit import TokenBucket
 
 #: How much of the pool each job pulls when several are running at once.
 #: Ratios, not rates - what they mean in requests depends on who else is up.
 WEIGHTS: dict[str, int] = {
     "watch": 5,
+    "manual": 5,
     "catalogue": 3,
     "shelf": 2,
 }
@@ -80,6 +89,51 @@ def rate_for(purpose: str) -> float:
         share = weight / sum(running.values())
 
     return max(MINIMUM_PER_MINUTE, total_per_minute() * share)
+
+
+#: One gate per purpose, so the share is enforced across threads rather than
+#: per thread. The pacers already space out the jobs that have one; this is
+#: what holds the jobs that do not.
+_gates: dict[str, TokenBucket] = {}
+
+#: Enough to let a short burst through without waiting - a watch poll is a
+#: search and sometimes a detail read, and making the second wait behind the
+#: metronome would add seconds to every alert for nothing.
+GATE_BURST = 5
+
+#: How long a request may wait for its turn before giving up. Long, because
+#: this is cooperative spacing and not a fault: twenty-five watches falling
+#: due at once should be spread out, not failed. Past this something is
+#: genuinely wrong and the caller's error handling is the right answer.
+GATE_TIMEOUT_SECONDS = 180.0
+
+
+def wait_for_turn(purpose: str, timeout: float = GATE_TIMEOUT_SECONDS) -> None:
+    """Block until this job's share of the pool allows another request.
+
+    The weights alone only ever slowed down the jobs that consult them. Watch
+    polling never did: it runs up to sixteen at a time with no pacer, so the
+    only thing holding it was the provider's own ceiling, well above the pool
+    everything else was being shared out of. The panel said twenty-four a
+    minute was being divided up while one job was free to ignore it.
+
+    Higher priority still means higher priority - watches carry the largest
+    weight and so the largest share, and take the whole pool when nothing
+    else is running. What changes is that the share is now a limit as well as
+    an allocation.
+    """
+    rate = max(MINIMUM_PER_MINUTE, rate_for(purpose))
+    with _lock:
+        gate = _gates.get(purpose)
+        if gate is None:
+            gate = _gates[purpose] = TokenBucket(
+                rate_per_minute=int(rate), burst=GATE_BURST
+            )
+    # Reassigned outside the lock and read by the bucket's own: the pool
+    # moves as jobs start and stop, so the gate follows it rather than
+    # holding whatever the rate was when it was first built.
+    gate.rate_per_minute = rate
+    gate.acquire(timeout=timeout)
 
 
 @contextmanager
