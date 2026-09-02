@@ -278,6 +278,31 @@ def _build_query(crawl: CatalogCrawl, page: int) -> SearchQuery:
     )
 
 
+def head_pages_in_effect(crawl: CatalogCrawl) -> int:
+    """How deep a short pass goes here, and zero where there is no short pass.
+
+    The one authority on the question, because there used to be two and they
+    disagreed. The interface offers the setting only on the pre-owned slice -
+    it is the only ordering with anything useful at its front - but the
+    crawler read the stored column whatever the slice, so a value the panel
+    would not show still took effect.
+
+    The first release of this application shipped a head on all four slices:
+    twenty, fifteen, ten and thirty. The upgrade that removed the idea reset
+    only the twenty, so the other three kept theirs, invisibly. "All figures"
+    has been reading thirty of its fourteen hundred pages on most passes ever
+    since, while the settings box beneath it said every pass reads the whole
+    slice. Its coverage sat at a quarter and no number on the page explained
+    why.
+
+    Keyed on what the slice contains rather than on its sort key, matching
+    what the panel does, so the two cannot drift apart again.
+    """
+    if SCOPE_FILTERS.get(crawl.scope) != "preowned":
+        return 0
+    return max(0, crawl.head_pages or 0)
+
+
 def _page_limit(crawl: CatalogCrawl) -> int:
     """How deep this cycle should go. Always: all the way.
 
@@ -364,7 +389,7 @@ def _page_limit(crawl: CatalogCrawl) -> int:
     row that has not been flushed yet still carries None.
     """
     total = crawl.pages_total or 10_000  # unknown until the first response
-    head = crawl.head_pages or 0
+    head = head_pages_in_effect(crawl)
     if head <= 0:
         return total
     # Between passes there is nothing in progress to confuse a sweep with, so
@@ -413,7 +438,7 @@ def full_sweep_due(crawl: CatalogCrawl) -> bool:
     so every short pass flipped into a full one at its own boundary and read
     all 213 pages. The saving the short pass exists for was silently undone.
     """
-    if not (crawl.head_pages or 0):
+    if not head_pages_in_effect(crawl):
         return True
     last = crawl.last_full_sweep_at
     if last is None:
@@ -1004,7 +1029,7 @@ def _first_looks(
 def _complete_cycle(db: Session, crawl: CatalogCrawl) -> None:
     """Wrap a finished pass and arm the next one."""
     # What kind of pass this was, as decided when it started.
-    was_full = bool(crawl.sweeping_all) or not (crawl.head_pages or 0)
+    was_full = bool(crawl.sweeping_all) or not head_pages_in_effect(crawl)
     _record_pass(crawl, "read to the end")
     crawl.cycles_completed = (crawl.cycles_completed or 0) + 1
     crawl.cursor_page = 1
@@ -1273,7 +1298,11 @@ def progress(db: Session, provider_id: str = "amiami") -> dict:
                 "recent_runs": list(crawl.recent_runs or []),
                 "next_run_in_seconds": _cooldown_remaining(crawl),
                 "recheck_minutes": crawl.recheck_interval_minutes,
-                "head_pages": crawl.head_pages,
+                # What is actually in force, not what the column happens to
+                # hold: a slice with no head reads all of itself, and saying
+                # otherwise is how "page 1 of 30" came to sit under a slice
+                # of fourteen hundred pages.
+                "head_pages": head_pages_in_effect(crawl),
                 # Which ordering this slice actually reads. Shown because the
                 # short pass only pays on one of them, so a head depth set
                 # against the wrong ordering is effort spent on nothing - and
@@ -1290,7 +1319,9 @@ def progress(db: Session, provider_id: str = "amiami") -> dict:
                 # Which kind of pass this slice is on right now, so the view
                 # can say "reading the newest 30" rather than showing a bar
                 # that means two different things on alternate runs.
-                "sweeping_all": bool(crawl.sweeping_all) or not (crawl.head_pages or 0),
+                "sweeping_all": (
+                    bool(crawl.sweeping_all) or not head_pages_in_effect(crawl)
+                ),
                 "resting_seconds": round(error_rest_seconds(crawl)),
                 "consecutive_errors": crawl.consecutive_errors or 0,
                 "pages_this_pass": _page_limit(crawl),

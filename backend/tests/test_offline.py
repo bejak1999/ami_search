@@ -2406,10 +2406,10 @@ def test_crawler_cycles() -> None:
     from app.models import CatalogCrawl
     from app.services.crawler import _eta_seconds, _page_limit
 
-    fresh = CatalogCrawl(provider="amiami", scope="s", pages_total=0)
+    fresh = CatalogCrawl(provider="amiami", scope="figures_preowned", pages_total=0)
     check("an unmeasured slice is unbounded", _page_limit(fresh) > 1000)
 
-    first = CatalogCrawl(provider="amiami", scope="s", pages_total=200, cycles_completed=0)
+    first = CatalogCrawl(provider="amiami", scope="figures_preowned", pages_total=200, cycles_completed=0)
     check("the first pass reads everything", _page_limit(first) == 200)
 
     # A short pass re-reads the front, but only where the front is worth
@@ -2418,7 +2418,7 @@ def test_crawler_cycles() -> None:
     # arrivals, under "regtimed" nine of 594.
     later = CatalogCrawl(
         provider="amiami",
-        scope="s",
+        scope="figures_preowned",
         pages_total=200,
         cycles_completed=1,
         head_pages=20,
@@ -2435,7 +2435,7 @@ def test_crawler_cycles() -> None:
     # useful at the front, and it is what the other three carry.
     no_head = CatalogCrawl(
         provider="amiami",
-        scope="s",
+        scope="figures_preowned",
         pages_total=200,
         cycles_completed=1,
         head_pages=0,
@@ -2454,7 +2454,7 @@ def test_crawler_cycles() -> None:
     # identical from the outside.
     mid_sweep = CatalogCrawl(
         provider="amiami",
-        scope="s",
+        scope="figures_preowned",
         pages_total=200,
         cycles_completed=1,
         head_pages=20,
@@ -2470,14 +2470,14 @@ def test_crawler_cycles() -> None:
     )
 
     short = CatalogCrawl(
-        provider="amiami", scope="s", pages_total=8, cycles_completed=1, head_pages=20,
+        provider="amiami", scope="figures_preowned", pages_total=8, cycles_completed=1, head_pages=20,
         full_sweep_interval_minutes=1440, last_full_sweep_at=datetime.now(timezone.utc),
     )
     check("a slice shorter than its front is not padded out", _page_limit(short) == 8)
 
     stale = CatalogCrawl(
         provider="amiami",
-        scope="s",
+        scope="figures_preowned",
         pages_total=200,
         cycles_completed=5,
         head_pages=20,
@@ -3501,19 +3501,19 @@ def test_head_slice_reads_only_its_front() -> None:
 
     swept = datetime.now(timezone.utc)
     full = CatalogCrawl(
-        provider="amiami", scope="s", pages_total=213, head_pages=0,
+        provider="amiami", scope="figures_preowned", pages_total=213, head_pages=0,
         last_full_sweep_at=swept,
     )
     check("no short pass means the whole slice", _page_limit(full) == 213)
 
     head = CatalogCrawl(
-        provider="amiami", scope="s", pages_total=213, head_pages=30,
+        provider="amiami", scope="figures_preowned", pages_total=213, head_pages=30,
         full_sweep_interval_minutes=1440, last_full_sweep_at=swept,
     )
     check("a short pass stops at the front", _page_limit(head) == 30)
 
     due = CatalogCrawl(
-        provider="amiami", scope="s", pages_total=213, head_pages=30,
+        provider="amiami", scope="figures_preowned", pages_total=213, head_pages=30,
         full_sweep_interval_minutes=1440,
         last_full_sweep_at=swept - timedelta(days=2),
     )
@@ -4480,7 +4480,7 @@ def test_a_short_pass_stops_at_its_own_edge() -> None:
 
     def slice_at(cursor: int, sweeping: bool) -> CatalogCrawl:
         return CatalogCrawl(
-            provider="amiami", scope="s", pages_total=213, head_pages=30,
+            provider="amiami", scope="figures_preowned", pages_total=213, head_pages=30,
             cursor_page=cursor, sweeping_all=sweeping,
             full_sweep_interval_minutes=1440, last_full_sweep_at=now,
         )
@@ -4502,19 +4502,19 @@ def test_a_short_pass_stops_at_its_own_edge() -> None:
     check("all the way to the end", _page_limit(slice_at(213, True)) == 213)
 
     # A slice with no front reads everything, whatever the flag says.
-    plain = CatalogCrawl(provider="amiami", scope="s", pages_total=59, head_pages=0,
+    plain = CatalogCrawl(provider="amiami", scope="figures_preowned", pages_total=59, head_pages=0,
                          cursor_page=40, sweeping_all=False)
     check("a slice with no front is always sweeping", _page_limit(plain) == 59)
 
     # Due-ness is now about the schedule alone, not about where the cursor is.
     stale = CatalogCrawl(
-        provider="amiami", scope="s", pages_total=213, head_pages=30, cursor_page=1,
+        provider="amiami", scope="figures_preowned", pages_total=213, head_pages=30, cursor_page=1,
         full_sweep_interval_minutes=1440,
         last_full_sweep_at=now - timedelta(days=2),
     )
     check("an overdue slice owes a sweep", full_sweep_due(stale))
     fresh = CatalogCrawl(
-        provider="amiami", scope="s", pages_total=213, head_pages=30, cursor_page=99,
+        provider="amiami", scope="figures_preowned", pages_total=213, head_pages=30, cursor_page=99,
         full_sweep_interval_minutes=1440, last_full_sweep_at=now,
     )
     check(
@@ -4522,7 +4522,7 @@ def test_a_short_pass_stops_at_its_own_edge() -> None:
         not full_sweep_due(fresh),
     )
     check("a slice that has never swept owes one", full_sweep_due(
-        CatalogCrawl(provider="amiami", scope="s", head_pages=30, cursor_page=1)
+        CatalogCrawl(provider="amiami", scope="figures_preowned", head_pages=30, cursor_page=1)
     ))
 
     # Finishing a short pass must not count as having swept, or the sweep
@@ -4534,7 +4534,7 @@ def test_a_short_pass_stops_at_its_own_edge() -> None:
     db = SessionLocal()
     db.query(Row).delete()
     db.commit()
-    row = Row(provider="amiami", scope="s", pages_total=213, head_pages=30,
+    row = Row(provider="amiami", scope="figures_preowned", pages_total=213, head_pages=30,
               cursor_page=31, sweeping_all=False, full_sweep_interval_minutes=1440,
               last_full_sweep_at=now - timedelta(hours=2))
     db.add(row)
@@ -6834,6 +6834,97 @@ def test_the_shelf_panel_adds_up() -> None:
     db.close()
 
 
+def test_a_slice_with_no_head_reads_all_of_itself() -> None:
+    print("\n== A setting the interface will not show cannot take effect ==")
+    from app.db import SessionLocal, adopt_intake_ordering, init_db
+    from app.models import CatalogCrawl
+    from app.services import crawler
+
+    init_db()
+    db = SessionLocal()
+    db.query(CatalogCrawl).delete()
+    db.commit()
+    crawler.ensure_scopes(db)
+
+    now = datetime.now(timezone.utc)
+    # What the first release wrote: a head on every slice, a different depth
+    # for each. Plus the state a long-running install is in - a full sweep
+    # already behind it, which is when the head takes over.
+    ORIGINAL = {"figures_preowned": 20, "figures_in_stock": 15,
+                "figures_preorder": 10, "figures_all": 30}
+    TOTALS = {"figures_preowned": 211, "figures_in_stock": 58,
+              "figures_preorder": 41, "figures_all": 1390}
+    for scope, head in ORIGINAL.items():
+        row = db.query(CatalogCrawl).filter_by(scope=scope).one()
+        row.head_pages = head
+        row.pages_total = TOTALS[scope]
+        row.cycles_completed = 2
+        row.last_full_sweep_at = now - timedelta(days=4)
+    db.commit()
+
+    # Before: three slices reading a fraction of themselves, under a panel
+    # that says every pass reads the whole thing. "All figures" was the worst
+    # of them - thirty pages of fourteen hundred - and its coverage sat at a
+    # quarter with nothing on the page to explain it.
+    for scope, expected in (("figures_in_stock", 15), ("figures_preorder", 10),
+                            ("figures_all", 30)):
+        row = db.query(CatalogCrawl).filter_by(scope=scope).one()
+        # The stored value is still there, but it must not be what is read.
+        check(f"{scope} still holds its shipped head", row.head_pages == expected)
+        check(f"and it no longer decides: {scope}",
+              crawler._page_limit(row) == TOTALS[scope], crawler._page_limit(row))
+        check(f"because the panel offers no head there: {scope}",
+              crawler.head_pages_in_effect(row) == 0)
+
+    # The one slice that does have a front keeps it - given a full sweep is
+    # not due, which at four days behind a daily interval it plainly was.
+    preowned = db.query(CatalogCrawl).filter_by(scope="figures_preowned").one()
+    preowned.last_full_sweep_at = now - timedelta(hours=1)
+    db.commit()
+    check("the pre-owned slice keeps its short pass",
+          crawler._page_limit(preowned) == 20, crawler._page_limit(preowned))
+
+    # And the upgrade clears the stored values too, so the panel stops
+    # reporting a page count nothing uses.
+    db.close()
+    adopt_intake_ordering()
+    db = SessionLocal()
+    for scope in ("figures_in_stock", "figures_preorder", "figures_all"):
+        row = db.query(CatalogCrawl).filter_by(scope=scope).one()
+        check(f"the upgrade clears it: {scope}", row.head_pages == 0, row.head_pages)
+
+    # A depth nobody shipped was chosen by someone, so it is left alone - and
+    # still has no effect, because the guard is about the slice and not about
+    # the number.
+    row = db.query(CatalogCrawl).filter_by(scope="figures_all").one()
+    row.head_pages = 7
+    db.commit()
+    db.close()
+    adopt_intake_ordering()
+    db = SessionLocal()
+    row = db.query(CatalogCrawl).filter_by(scope="figures_all").one()
+    check("a hand-set depth survives the upgrade", row.head_pages == 7, row.head_pages)
+    check("and still reads the whole slice",
+          crawler._page_limit(row) == 1390, crawler._page_limit(row))
+
+    # What the panel is told is what is in force, not what the column holds.
+    reported = {s["scope"]: s for s in crawler.progress(db)["slices"]}
+    check("the panel is told nothing is in force",
+          reported["figures_all"]["head_pages"] == 0,
+          reported["figures_all"]["head_pages"])
+    check("and that every pass of it is a full one",
+          reported["figures_all"]["sweeping_all"] is True)
+    # The upgrade moves this one onto the depth that was measured, so thirty
+    # rather than the twenty the first release shipped.
+    check("while the pre-owned slice reports its real head",
+          reported["figures_preowned"]["head_pages"] == 30,
+          reported["figures_preowned"]["head_pages"])
+
+    db.query(CatalogCrawl).delete()
+    db.commit()
+    db.close()
+
+
 def test_the_sampler_can_actually_spend_its_budget() -> None:
     print("\n== The shelf sampler is not starved by its own arithmetic ==")
     from app.config import settings
@@ -7010,6 +7101,7 @@ def main() -> int:
     test_watches_draw_from_the_pool_at_the_front_of_the_queue()
     test_a_pass_started_by_hand_is_the_kind_that_was_asked_for()
     test_only_the_preowned_slice_offers_a_head_sweep()
+    test_a_slice_with_no_head_reads_all_of_itself()
     test_the_survival_curve_keeps_the_slow_copies_in()
     test_the_bargain_is_only_counted_where_there_was_a_choice()
     test_the_shelf_panel_adds_up()

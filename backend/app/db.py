@@ -726,16 +726,25 @@ def adopt_intake_ordering() -> int:
         # rather than sold one copy at a time, and a pre-order sits for months
         # once announced, so a day of latency on either costs nothing. The
         # catch-all is a backstop and gets a fortnight.
+        #
+        # The head depths are per slice because the first release shipped a
+        # different one for each: twenty on pre-owned, fifteen, ten and
+        # thirty on these. Only the twenty was ever cleared, so the other
+        # three kept theirs - and "All figures" has been reading thirty of
+        # fourteen hundred pages on most passes ever since, under a settings
+        # box promising that every pass reads the whole slice. Nothing on the
+        # page could show it: the interface does not offer this control for
+        # these slices, so the value was invisible as well as wrong.
         quiet = {
-            "figures_in_stock": (1440, {30, 60}),
-            "figures_preorder": (1440, {30, 180}),
-            "figures_all": (20160, {1440, 10080}),
+            "figures_in_stock": (1440, {30, 60}, {15, 20}),
+            "figures_preorder": (1440, {30, 180}, {10, 20}),
+            "figures_all": (20160, {1440, 10080}, {30, 20}),
         }
-        for scope, (wanted, shipped) in quiet.items():
+        for scope, (wanted, shipped, shipped_heads) in quiet.items():
             row = by_scope.get(scope)
             if row is None:
                 continue
-            if row.head_pages == 20:  # an old shipped default, never chosen
+            if row.head_pages in shipped_heads:  # shipped, never chosen
                 row.head_pages = 0
                 changed += 1
             if row.recheck_interval_minutes in shipped:
