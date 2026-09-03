@@ -7028,6 +7028,127 @@ def test_the_queue_names_the_slice_that_is_actually_next() -> None:
     db.close()
 
 
+def test_the_catch_all_is_measured_against_what_the_shop_counts() -> None:
+    print("\n== Coverage compares the same population the shop does ==")
+    from app.db import SessionLocal, init_db
+    from app.models import CatalogCrawl, Condition, Item
+    from app.services import crawler
+
+    init_db()
+    db = SessionLocal()
+    db.query(CatalogCrawl).delete()
+    db.query(Item).delete()
+    db.commit()
+    crawler.ensure_scopes(db)
+
+    # The shape of a mature install: mostly records of listings that can no
+    # longer be bought. The catch-all asks the shop for everything and the
+    # shop answers with everything, sold-out listings included - only used
+    # copies are deleted when they sell - so those rows are in its count as
+    # well as ours.
+    LIVE, CLOSED, SHOP = 161, 565, 695
+    batch = []
+    for n in range(LIVE):
+        batch.append(Item(provider="amiami", code=f"L-{n}", name="live",
+                          condition=Condition.new, currency="JPY",
+                          in_stock=True, order_closed=False))
+    for n in range(CLOSED):
+        batch.append(Item(provider="amiami", code=f"S-{n}", name="sold out",
+                          condition=Condition.new, currency="JPY",
+                          order_closed=True))
+    db.add_all(batch)
+    row = db.query(CatalogCrawl).filter_by(scope="figures_all").one()
+    row.total_results = SHOP
+    row.pages_total = -(-SHOP // 50)
+    row.cursor_page = 1
+    row.cycles_completed = 2
+    db.commit()
+
+    # Leaving our closed rows out compared a hundred and sixty-one live rows
+    # against a list of six hundred and ninety-five that contains five
+    # hundred and sixty-five sold-out ones. On the real catalogue that read
+    # as 23% coverage of a shop we hold in full.
+    by_scope = {s["scope"]: s for s in crawler.progress(db)["slices"]}
+    catch_all = by_scope["figures_all"]
+    check("the catch-all is measured against everything the shop counts",
+          catch_all["coverage_percent"] == 100.0, catch_all["coverage_percent"])
+    check("so a sold-out record is not counted as removed",
+          catch_all["removed_local"] == LIVE + CLOSED - SHOP,
+          catch_all["removed_local"])
+    check("and nothing on it is called stale, which it cannot tell apart",
+          catch_all["stale_local"] == 0, catch_all["stale_local"])
+
+    # The narrow slices are the other way round: they ask a question with
+    # availability in it, so the answer holds nothing sold out and neither
+    # may our side of the comparison.
+    stock = db.query(CatalogCrawl).filter_by(scope="figures_in_stock").one()
+    stock.total_results = LIVE
+    stock.pages_total = 4
+    stock.cycles_completed = 1
+    db.commit()
+    by_scope = {s["scope"]: s for s in crawler.progress(db)["slices"]}
+    check("a filtered slice still leaves its closed rows out",
+          by_scope["figures_in_stock"]["coverage_percent"] == 100.0,
+          by_scope["figures_in_stock"]["coverage_percent"])
+
+    db.query(CatalogCrawl).delete()
+    db.query(Item).delete()
+    db.commit()
+    db.close()
+
+
+def test_a_slice_between_passes_is_not_paused_in_one() -> None:
+    print("\n== A sweep that has not begun does not report a position in one ==")
+    from app.db import SessionLocal, init_db
+    from app.models import CatalogCrawl
+    from app.services import crawler
+
+    init_db()
+    db = SessionLocal()
+    db.query(CatalogCrawl).delete()
+    db.commit()
+    crawler.ensure_scopes(db)
+
+    row = db.query(CatalogCrawl).filter_by(scope="figures_all").one()
+    row.pages_total = 1390
+    row.total_results = 69_472
+    row.cycles_completed = 2
+    row.cursor_page = 1
+    row.current_pass = {}
+    db.commit()
+
+    def state() -> dict:
+        return {s["scope"]: s for s in crawler.progress(db)["slices"]}["figures_all"]
+
+    # The view said "paused at page 1 of 1,390" for this, which reads as a
+    # sweep begun and then stalled - so a fortnightly sweep nine days away
+    # looked like one that had started on its own. It is between passes: the
+    # honest thing to report is what the next one will read.
+    check("a resting slice is not part way through anything",
+          state()["pass_in_progress"] is False, state()["pass_in_progress"])
+    check("though it still says how long the next pass is",
+          state()["pages_this_cycle"] == 1390, state()["pages_this_cycle"])
+
+    # A pass declared but not yet advanced counts, or the first page of every
+    # sweep would report itself as no sweep at all.
+    crawler.start_pass(db, row, full=True)
+    check("a pass declared at page one is under way",
+          state()["pass_in_progress"] is True)
+
+    db.close()
+    db = SessionLocal()
+    row = db.query(CatalogCrawl).filter_by(scope="figures_all").one()
+    row.current_pass = {}
+    row.cursor_page = 400
+    db.commit()
+    check("and so is a cursor that has moved",
+          state()["pass_in_progress"] is True)
+
+    db.query(CatalogCrawl).delete()
+    db.commit()
+    db.close()
+
+
 def test_the_sampler_can_actually_spend_its_budget() -> None:
     print("\n== The shelf sampler is not starved by its own arithmetic ==")
     from app.config import settings
@@ -7206,6 +7327,8 @@ def main() -> int:
     test_only_the_preowned_slice_offers_a_head_sweep()
     test_a_slice_with_no_head_reads_all_of_itself()
     test_the_queue_names_the_slice_that_is_actually_next()
+    test_the_catch_all_is_measured_against_what_the_shop_counts()
+    test_a_slice_between_passes_is_not_paused_in_one()
     test_the_survival_curve_keeps_the_slow_copies_in()
     test_the_bargain_is_only_counted_where_there_was_a_choice()
     test_the_shelf_panel_adds_up()

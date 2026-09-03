@@ -46,6 +46,21 @@ log = logging.getLogger(__name__)
 #: shuffle. Anything not in here reads all of itself, every pass.
 HEAD_WORTH_READING = frozenset({"updated", "preowned"})
 
+#: Slices whose upstream list still contains listings that cannot be bought.
+#:
+#: The catch-all asks the shop for everything and gets everything. A sold-out
+#: first-hand listing keeps its page - only used copies are deleted when they
+#: sell - so the rows we hold as closed are counted in the shop's total too.
+#: Leaving ours out compares two different populations: sixteen thousand live
+#: rows against a list of sixty-nine thousand that includes fifty-three
+#: thousand sold-out ones, which reads as 23% coverage of a catalogue we
+#: actually hold in full.
+#:
+#: The narrow slices are the other way round. They ask the shop a question
+#: with availability in it, so the answer contains nothing sold out, and our
+#: closed rows must be left out to match.
+LISTS_SOLD_OUT = frozenset({"all"})
+
 SCOPE_FILTERS: dict[str, str] = {
     "figures_preowned": "preowned",
     # Left over from the version that split the head into its own slice. Kept
@@ -1088,13 +1103,15 @@ def local_count(
         stmt = stmt.where(
             Item.is_preorder.is_(True), Item.condition != Condition.preowned
         )
-    if live_only:
+    if live_only and kind not in LISTS_SOLD_OUT:
         # Only what the shop could still be listing. Keeping the record of a
         # sold-out listing is the point of the application, but it is not
         # something the shop counts, so including it in the comparison made
         # coverage meaningless: once the kept records outnumbered the live
         # ones the ratio pinned itself at 100% and stayed there, whether we
         # held everything currently on sale or half of it.
+        #
+        # Except where the shop counts them itself - see LISTS_SOLD_OUT.
         stmt = stmt.where(Item.order_closed.is_(False))
     return int(db.execute(stmt).scalar_one() or 0)
 
@@ -1256,6 +1273,7 @@ def progress(db: Session, provider_id: str = "amiami") -> dict:
         done = min((crawl.cursor_page or 1) - 1, limit) if limit else 0
         local = local_count(db, crawl.scope, provider_id)
         live = local_count(db, crawl.scope, provider_id, live_only=True)
+        lists_sold_out = SCOPE_FILTERS.get(crawl.scope) in LISTS_SOLD_OUT
         upstream = crawl.total_results or 0
         slices.append(
             {
@@ -1270,10 +1288,23 @@ def progress(db: Session, provider_id: str = "amiami") -> dict:
                 # Records of listings the shop has taken down. Not a fault -
                 # keeping them is why this exists - and counted separately
                 # from rows whose status simply has not been rechecked.
-                "removed_local": max(0, local - live),
+                #
+                # Where the shop lists its sold-out stock itself, "closed" is
+                # not "removed": those rows are in its count as well as ours,
+                # and what is genuinely gone is whatever we hold beyond what
+                # it still has a page for.
+                "removed_local": (
+                    (max(0, local - upstream) if upstream else 0)
+                    if lists_sold_out
+                    else max(0, local - live)
+                ),
                 # Rows we still believe are on sale that the shop does not
-                # list. These are the ones a sweep corrects.
-                "stale_local": max(0, live - upstream) if upstream else 0,
+                # list. These are the ones a sweep corrects - and they cannot
+                # be told apart from the removed ones on a slice whose list
+                # holds both, so that slice reports none.
+                "stale_local": (
+                    0 if lists_sold_out else (max(0, live - upstream) if upstream else 0)
+                ),
                 # Where it sits in the queue, and what the scheduler is doing.
                 "queue_position": queue.get(crawl.scope),
                 "resting": _cooldown_remaining(crawl) > 0,
@@ -1293,6 +1324,13 @@ def progress(db: Session, provider_id: str = "amiami") -> dict:
                 "cursor_page": crawl.cursor_page,
                 "pages_total": crawl.pages_total,
                 "pages_this_cycle": limit,
+                # Whether there is a pass to be part way through at all.
+                # Without this the view called every resting slice "paused at
+                # page 1 of 1,390", which reads as a sweep under way and
+                # stalled - so a fortnightly sweep that had not started, and
+                # was not due for another nine days, looked like one that had
+                # begun and then stopped.
+                "pass_in_progress": bool(crawl.current_pass) or (crawl.cursor_page or 1) > 1,
                 # Two different things, kept apart because conflating them is
                 # what produced the nonsense ratio: how far through the
                 # current pass we are, and how much of the slice we hold.

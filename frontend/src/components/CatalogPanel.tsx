@@ -260,7 +260,7 @@ function Slice({
   // Mid-pass means the cursor has left page one, whatever the state says: a
   // slice that ran out of time reads "paused" but is still part way through,
   // and its bar should show that rather than jumping back to coverage.
-  const sweeping = !resting && slice.cursor_page > 1
+  const sweeping = !resting && slice.pass_in_progress
 
   return (
     <div>
@@ -328,12 +328,23 @@ function Slice({
         {sweeping && (
           <span>{slice.coverage_percent}% of the shop held</span>
         )}
+        {/* A slice between passes is not paused in one. Saying "paused at
+            page 1 of 1,390" for a sweep that has not begun - and is not due
+            for another nine days - is what made it look like a sweep had
+            started on its own. */}
         {slice.pages_this_cycle ? (
-          <span>
-            {slice.state === 'running' ? 'reading' : 'paused at'} page{' '}
-            {slice.cursor_page.toLocaleString('en-GB')} of{' '}
-            {slice.pages_this_cycle.toLocaleString('en-GB')} ({slice.pass_percent}%)
-          </span>
+          slice.pass_in_progress ? (
+            <span>
+              {slice.state === 'running' ? 'reading' : 'paused at'} page{' '}
+              {slice.cursor_page.toLocaleString('en-GB')} of{' '}
+              {slice.pages_this_cycle.toLocaleString('en-GB')} ({slice.pass_percent}%)
+            </span>
+          ) : (
+            <span className="text-faint">
+              next pass reads {slice.pages_this_cycle.toLocaleString('en-GB')} page
+              {slice.pages_this_cycle === 1 ? '' : 's'}
+            </span>
+          )
         ) : null}
         {slice.items_changed > 0 && (
           <span>{slice.items_changed.toLocaleString('en-GB')} price changes seen</span>
