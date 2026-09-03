@@ -40,6 +40,7 @@ from ..models import (
     utcnow,
 )
 from ..providers import ItemNotFound, ProviderError, get_provider
+from .catalog import counterpart_code
 from . import catalog
 from .pacing import HumanPacer
 
@@ -115,7 +116,12 @@ def _watched_codes(db: Session) -> set[str]:
     # the item already carries the product code and cannot be expanded back.
     from .shelflife import product_code_of
 
-    return {product_code_of(code) for code in codes if code}
+    products = {product_code_of(code) for code in codes if code}
+    # And both listings of the figure. Somebody watching the new listing of a
+    # figure with no used copies yet is waiting for precisely the copy this
+    # job follows; leaving that product cold means checking the shelf they
+    # care about every three days instead of every two hours.
+    return products | {counterpart_code(code) for code in products}
 
 
 def tier_for(db: Session, item: Item, watched: set[str] | None = None) -> str:
@@ -125,8 +131,18 @@ def tier_for(db: Session, item: Item, watched: set[str] | None = None) -> str:
     if (item.code or "") in watched:
         return HOT
 
+    # Either listing of the figure counts. Somebody who saved the new listing
+    # of a figure that has no used copies yet is waiting for exactly the copy
+    # this job would be following, and leaving it cold is how the shelf they
+    # care about is the one checked least often.
     on_a_list = db.execute(
-        select(CollectionEntry.id).where(CollectionEntry.item_id == item.id).limit(1)
+        select(CollectionEntry.id)
+        .join(Item, Item.id == CollectionEntry.item_id)
+        .where(
+            Item.provider == item.provider,
+            Item.code.in_([item.code, counterpart_code(item.code)]),
+        )
+        .limit(1)
     ).first()
     if on_a_list:
         return HOT

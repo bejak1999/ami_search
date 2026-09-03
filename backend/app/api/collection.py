@@ -66,7 +66,19 @@ def _serialize(
 ) -> CollectionOut:
     return CollectionOut(
         **{name: getattr(entry, name) for name in _ENTRY_FIELDS},
-        item=item_out(db, entry.item, user=user, profile=profile, with_context=True),
+        # With the counterpart, because a wishlist entry is about the figure
+        # and not about the listing it was saved from. Most of a wishlist is
+        # built from sold-out new listings - there is no used copy to save
+        # when you first want a figure - so without this the entry says "out
+        # of stock" on the day the used copy someone was waiting for arrives.
+        item=item_out(
+            db,
+            entry.item,
+            user=user,
+            profile=profile,
+            with_context=True,
+            with_counterpart=True,
+        ),
         price_change=change,
     )
 

@@ -7149,6 +7149,217 @@ def test_a_slice_between_passes_is_not_paused_in_one() -> None:
     db.close()
 
 
+def test_a_wishlist_is_about_the_figure_not_the_listing() -> None:
+    print("\n== Saving a sold-out new listing still finds the used copy ==")
+    from app.api import collection as collection_api
+    from app.db import SessionLocal, init_db
+    from app.models import (
+        CollectionEntry,
+        CollectionStatus,
+        Condition,
+        Item,
+        User,
+        UserRole,
+        Watch,
+        WatchKind,
+    )
+    from app.services import catalog, dealradar, landed_cost, shelfwatch
+
+    init_db()
+    db = SessionLocal()
+    db.query(CollectionEntry).delete()
+    db.query(Watch).delete()
+    db.query(Item).delete()
+    db.query(User).filter(User.username == "figure").delete()
+    db.commit()
+
+    user = User(username="figure", email="fig@example.com", password_hash="x",
+                role=UserRole.user)
+    db.add(user)
+    db.flush()
+
+    # The ordinary way a wishlist gets built: the figure is out of stock as a
+    # new listing and there is no used copy to save, because nobody has sold
+    # one back yet. So the sold-out new listing is the only thing there is to
+    # save, and it is what gets saved.
+    new = Item(provider="amiami", code="FIGURE-900001", name="Wanted figure",
+               condition=Condition.new, currency="JPY", current_price=12000,
+               in_stock=False, order_closed=True)
+    db.add(new)
+    db.flush()
+    db.add(CollectionEntry(user_id=user.id, item_id=new.id,
+                           status=CollectionStatus.wishlist))
+    db.commit()
+
+    profile = landed_cost.default_profile(user.id)
+    db.add(profile)
+    db.commit()
+
+    def buyable() -> list:
+        rows = collection_api.list_entries(
+            status_filter=None, tag=None, db=db, user=user, profile=profile
+        )
+        # What the "in stock only" filter asks of each row.
+        return [
+            r for r in rows
+            if r.item.in_stock or (r.item.counterpart and r.item.counterpart["in_stock"])
+        ]
+
+    check("nothing is buyable while only the sold-out listing exists",
+          buyable() == [], buyable())
+
+    # Months later a used copy appears. It is a separate listing under the
+    # same code with an -R suffix, and it is the thing the wishlist was for.
+    used = Item(provider="amiami", code="FIGURE-900001-R", name="Wanted figure",
+                condition=Condition.preowned, currency="JPY", current_price=7800,
+                in_stock=True, order_closed=False)
+    db.add(used)
+    db.commit()
+
+    # Asking only about the saved listing hid the entry on the one day it
+    # mattered - the row said "out of stock" while the copy someone had been
+    # waiting months for was on sale.
+    found = buyable()
+    check("the entry appears once the used copy is listed", len(found) == 1, found)
+    check("and says which listing is the buyable one",
+          found and found[0].item.counterpart["condition"] == "preowned",
+          found[0].item.counterpart if found else None)
+    check("with its price, since that is the one to act on",
+          found and found[0].item.counterpart["price"] == 7800,
+          found[0].item.counterpart if found else None)
+
+    # The same blindness stopped the deal radar ever pricing it: the radar
+    # scanned the code that was saved, which is the one that cannot be bought.
+    candidates = dealradar._candidate_item_ids(db, user, include_watched=False)
+    check("the radar prices the figure, not the saved listing",
+          {new.id, used.id} <= candidates, candidates)
+
+    # And the copy-following job treated it as cold - a three-day interval on
+    # the one shelf this person is waiting on.
+    check("the used listing is followed closely",
+          shelfwatch.tier_for(db, used) == shelfwatch.HOT,
+          shelfwatch.tier_for(db, used))
+
+    # A watch on the new code has to heat the used one too, for the same
+    # reason: the copy it is waiting for arrives under the other code.
+    db.query(CollectionEntry).delete()
+    db.commit()
+    check("without the wishlist entry it is cold again",
+          shelfwatch.tier_for(db, used) == shelfwatch.COLD,
+          shelfwatch.tier_for(db, used))
+    db.add(Watch(user_id=user.id, kind=WatchKind.item, item_code="FIGURE-900001",
+                 label="the new listing", enabled=True))
+    db.commit()
+    check("a watch on the new code heats the used listing",
+          shelfwatch.tier_for(db, used) == shelfwatch.HOT,
+          shelfwatch.tier_for(db, used))
+
+    # The helper the three of them share.
+    check("the expansion finds both listings",
+          catalog.with_counterparts(db, [new.id]) == {new.id, used.id})
+    check("and is harmless when there is no counterpart",
+          catalog.with_counterparts(db, []) == set())
+
+    db.query(CollectionEntry).delete()
+    db.query(Watch).delete()
+    db.query(Item).delete()
+    db.query(User).filter(User.username == "figure").delete()
+    db.commit()
+    db.close()
+
+
+def test_an_item_watch_polls_both_listings_of_its_figure() -> None:
+    print("\n== A watch on one code is told when the other one arrives ==")
+    from app.db import SessionLocal, init_db
+    from app.models import Condition, Item, User, UserRole, Watch, WatchKind
+    from app.providers.base import NormalizedItem
+    from app.services import catalog, matcher
+
+    init_db()
+    db = SessionLocal()
+    db.query(Watch).delete()
+    db.query(Item).delete()
+    db.query(User).filter(User.username == "bothcodes").delete()
+    db.commit()
+
+    user = User(username="bothcodes", email="bc@example.com", password_hash="x",
+                role=UserRole.user)
+    db.add(user)
+    db.flush()
+
+    def listing(code, price, in_stock, condition):
+        return NormalizedItem(
+            provider="amiami", code=code, name="Wanted figure",
+            url=f"https://www.amiami.com/eng/detail/?gcode={code}",
+            currency="JPY", price=price, condition=condition,
+            in_stock=in_stock, order_closed=not in_stock, detail_loaded=True,
+        )
+
+    shop = {
+        "FIGURE-900002": listing("FIGURE-900002", 12000, False, "new"),
+        "FIGURE-900002-R": listing("FIGURE-900002-R", 7800, True, "preowned"),
+    }
+
+    class FakeProvider:
+        name = "AmiAmi"
+
+        def get_item(self, code):
+            from app.providers import ItemNotFound
+
+            if code not in shop:
+                raise ItemNotFound(code)
+            return shop[code]
+
+    for normalized in shop.values():
+        catalog.upsert_item(db, normalized)
+    db.commit()
+
+    watch = Watch(user_id=user.id, kind=WatchKind.item, item_code="FIGURE-900002",
+                  label="the new listing", enabled=True)
+    db.add(watch)
+    db.commit()
+
+    original = matcher.get_provider
+    matcher.get_provider = lambda _id: FakeProvider()
+    try:
+        items, _shop_name = matcher._collect_items(db, watch)
+    finally:
+        matcher.get_provider = original
+
+    codes = sorted(i.code for i in items)
+    # Watching the sold-out new listing and never being told a used copy
+    # arrived is the whole reason somebody sets one of these.
+    check("the poll returns both listings", codes == ["FIGURE-900002", "FIGURE-900002-R"],
+          codes)
+    check("including the one that can actually be bought",
+          any(i.in_stock for i in items), [(i.code, i.in_stock) for i in items])
+
+    # A figure with no counterpart at the shop must not cost a request per
+    # poll to be told so again.
+    db.query(Item).filter(Item.code == "FIGURE-900002-R").delete()
+    db.commit()
+    asked: list[str] = []
+
+    class CountingProvider(FakeProvider):
+        def get_item(self, code):
+            asked.append(code)
+            return FakeProvider.get_item(self, code)
+
+    matcher.get_provider = lambda _id: CountingProvider()
+    try:
+        matcher._collect_items(db, watch)
+    finally:
+        matcher.get_provider = original
+    check("a counterpart we have never seen is not asked for",
+          asked == ["FIGURE-900002"], asked)
+
+    db.query(Watch).delete()
+    db.query(Item).delete()
+    db.query(User).filter(User.username == "bothcodes").delete()
+    db.commit()
+    db.close()
+
+
 def test_the_sampler_can_actually_spend_its_budget() -> None:
     print("\n== The shelf sampler is not starved by its own arithmetic ==")
     from app.config import settings
@@ -7329,6 +7540,8 @@ def main() -> int:
     test_the_queue_names_the_slice_that_is_actually_next()
     test_the_catch_all_is_measured_against_what_the_shop_counts()
     test_a_slice_between_passes_is_not_paused_in_one()
+    test_a_wishlist_is_about_the_figure_not_the_listing()
+    test_an_item_watch_polls_both_listings_of_its_figure()
     test_the_survival_curve_keeps_the_slow_copies_in()
     test_the_bargain_is_only_counted_where_there_was_a_choice()
     test_the_shelf_panel_adds_up()

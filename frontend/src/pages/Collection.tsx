@@ -74,10 +74,17 @@ export function CollectionPage() {
 
   // Filtered here rather than by the server: a collection is small enough that
   // a round trip per toggle buys nothing, and the entries are already loaded.
+  //
+  // "Buyable" means the figure, not the listing it was saved from. AmiAmi
+  // sells the same figure under two codes, and most of a wishlist is built
+  // from sold-out new listings, because when you first want a figure there is
+  // usually no used copy to save. Asking only about the saved listing hid
+  // every entry on the day the used copy someone was waiting for arrived —
+  // which is the one day it mattered.
   const shown = useMemo(() => {
     const all = entries.data ?? []
     if (!inStockOnly) return all
-    return all.filter((entry) => entry.item.in_stock)
+    return all.filter((entry) => entry.item.in_stock || entry.item.counterpart?.in_stock)
   }, [entries.data, inStockOnly])
 
   // Counted from what is on screen, so the line agrees with what is under it.
@@ -185,7 +192,24 @@ export function CollectionPage() {
               exactly what is on screen, so the wait is predictable. */}
           {inStockOnly && shown.length > 0 && (
             <button
-              onClick={() => recheck.mutate(shown.map((e) => e.item.id!).filter(Boolean))}
+              onClick={() =>
+                recheck.mutate(
+                  // The counterpart too, where that is the listing actually
+                  // on sale: asking the shop about a sold-out listing on a
+                  // row that is only here because its used copy appeared
+                  // would refresh the one number nobody is waiting on.
+                  Array.from(
+                    new Set(
+                      shown.flatMap((e) =>
+                        [
+                          e.item.id,
+                          e.item.counterpart?.in_stock ? e.item.counterpart.id : null,
+                        ].filter((id): id is number => Boolean(id)),
+                      ),
+                    ),
+                  ),
+                )
+              }
               disabled={recheck.isPending}
               className="btn-ghost text-xs"
               title="Ask the shop about each of these again and show what has moved since your last check"
@@ -273,6 +297,33 @@ export function CollectionPage() {
                   </Badge>
                   {entry.priority === 1 && <Badge tone="warning">Grail</Badge>}
                   {entry.item.in_stock && <Badge tone="positive">In stock now</Badge>}
+                  {/* The figure is buyable, just not under the listing this
+                      entry was saved from. Said plainly, with a way to get
+                      there, because otherwise the row looks unavailable while
+                      the thing you wanted is on sale. */}
+                  {!entry.item.in_stock && entry.item.counterpart?.in_stock && (
+                    <button
+                      onClick={() =>
+                        entry.item.counterpart &&
+                        navigate(`/item/${entry.item.counterpart.id}`)
+                      }
+                      title={`Not available as ${entry.item.condition}, but the ${entry.item.counterpart.condition} listing is in stock`}
+                    >
+                      <Badge tone="positive">
+                        {entry.item.counterpart.condition === 'preowned'
+                          ? 'Used copy in stock'
+                          : 'New listing in stock'}
+                        {entry.item.counterpart.price !== null && (
+                          <span className="ml-1 tabular-nums">
+                            {money(
+                              entry.item.counterpart.price,
+                              entry.item.counterpart.currency,
+                            )}
+                          </span>
+                        )}
+                      </Badge>
+                    </button>
+                  )}
                   {entry.quantity > 1 && <Badge>×{entry.quantity}</Badge>}
                 </div>
 

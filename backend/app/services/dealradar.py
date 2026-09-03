@@ -26,7 +26,7 @@ from ..models import (
     WatchSeenItem,
     utcnow,
 )
-from . import matcher, notify
+from . import catalog, matcher, notify
 
 log = logging.getLogger(__name__)
 
@@ -68,7 +68,11 @@ def _candidate_item_ids(db: Session, user: User, include_watched: bool) -> set[i
             .scalars()
             .all()
         )
-    return ids
+    # Both listings of every figure. Saving the new one because no used copy
+    # existed yet - which is how most of a wishlist gets built - otherwise
+    # meant the radar never looked at the used copy when it finally appeared,
+    # and a used copy is where the bargains are.
+    return catalog.with_counterparts(db, ids)
 
 
 def _baseline(db: Session, item_id: int) -> tuple[float | None, int]:

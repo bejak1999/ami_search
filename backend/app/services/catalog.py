@@ -37,6 +37,53 @@ def counterpart_code(code: str) -> str:
     return code[:-2] if code.endswith("-R") else code + "-R"
 
 
+def with_counterparts(db: Session, item_ids) -> set[int]:
+    """These items, plus the other listing of each figure where we have one.
+
+    Anything that stands for "the figure I want" has to be widened this way.
+    A figure is sold under two codes - the used one carries an ``-R`` suffix -
+    and which of them you happened to save, or watch, is an accident of what
+    was listed that day. Most used listings appear long after the new one,
+    and a great many figures can only be saved from a sold-out new listing
+    because no used copy has ever existed.
+
+    Answering only for the code that was saved is how a wishlisted figure
+    could come back into stock second-hand without appearing under "in stock
+    only", without the deal radar ever pricing it, and without an item watch
+    on it firing once.
+    """
+    ids = {int(i) for i in item_ids if i}
+    if not ids:
+        return set()
+
+    codes = db.execute(
+        select(Item.provider, Item.code).where(Item.id.in_(ids))
+    ).all()
+    wanted: dict[str, set[str]] = {}
+    for provider, code in codes:
+        wanted.setdefault(provider, set()).add(counterpart_code(code))
+    if not wanted:
+        return ids
+
+    for provider, others in wanted.items():
+        ids |= {
+            int(row)
+            for row in db.execute(
+                select(Item.id).where(Item.provider == provider, Item.code.in_(others))
+            ).scalars()
+        }
+    return ids
+
+
+def counterpart_of(db: Session, item: Item) -> Item | None:
+    """The other listing of this figure, if the shop has one and we know it."""
+    return db.execute(
+        select(Item).where(
+            Item.provider == item.provider, Item.code == counterpart_code(item.code)
+        )
+    ).scalar_one_or_none()
+
+
 def wishlist_available(db: Session, user_id: int, limit: int = 6) -> list[Item]:
     """Wishlisted figures that can actually be bought right now.
 

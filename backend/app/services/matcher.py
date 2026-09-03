@@ -611,6 +611,28 @@ def _collect_items(db: Session, watch: Watch) -> tuple[list[Item], str]:
     if watch.kind == WatchKind.item:
         code = watch.item_code or ""
         existing = catalog.get_item(db, watch.provider, code)
+        # A watch is about the figure, not about the listing whose code was
+        # pasted into it. The same figure is sold under two codes - the used
+        # one carries an -R suffix - and the used listing usually appears long
+        # after the new one, which is when the watch matters most. Watching
+        # the new code and never being told a used copy arrived is the whole
+        # reason someone sets one of these.
+        #
+        # Only a counterpart we already hold is fetched. One we have never
+        # seen does not exist at the shop either, and asking for it on every
+        # poll would spend a request per watch to be told so again.
+        others = []
+        sibling = catalog.counterpart_of(db, existing) if existing else None
+        if sibling is not None:
+            try:
+                fresh, _ = catalog.upsert_item(db, provider.get_item(sibling.code))
+                others.append(fresh)
+            except ItemNotFound:
+                catalog.mark_unavailable(db, sibling)
+                others.append(sibling)
+            except ProviderError:
+                # The figure's own listing still has to be polled.
+                others.append(sibling)
         try:
             normalized = provider.get_item(code)
         except ItemNotFound:
@@ -618,7 +640,7 @@ def _collect_items(db: Session, watch: Watch) -> tuple[list[Item], str]:
             # the shop telling us the item is gone, not a failure.
             if existing is not None:
                 catalog.mark_unavailable(db, existing)
-                return [existing], provider.name
+                return [existing, *others], provider.name
             # Nothing stored either. For a used figure that is the ordinary
             # state of the world - there is no listing because nobody has sold
             # one back yet - and it is exactly what the watch is waiting for.
@@ -629,9 +651,9 @@ def _collect_items(db: Session, watch: Watch) -> tuple[list[Item], str]:
             # still reported: see health.check, which now asks whether the
             # watch has ever found anything rather than whether it failed.
             log.debug("Watch %s: %s is not listed at the moment", watch.id, code)
-            return [], provider.name
+            return others, provider.name
         item, _ = catalog.upsert_item(db, normalized)
-        return [item], provider.name
+        return [item, *others], provider.name
 
     result = provider.search(build_query(watch))
     items: list[Item] = []
