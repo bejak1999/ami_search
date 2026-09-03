@@ -84,6 +84,34 @@ def counterpart_of(db: Session, item: Item) -> Item | None:
     ).scalar_one_or_none()
 
 
+def cheapest_buyable(db: Session, item: Item) -> tuple[float | None, Item | None]:
+    """The least a figure can actually be bought for, and which listing that is.
+
+    Across both codes, because the figure is what someone wants and the two
+    listings are an accident of how the shop files it. ``current_price`` is
+    already the cheapest buyable copy within a listing, so the graded copies
+    of a used product are covered by asking it.
+
+    Only listings that can be bought count. A sold-out one has a price on
+    record and it is not a price anybody can pay.
+    """
+    best: float | None = None
+    where: Item | None = None
+    for candidate in (item, counterpart_of(db, item)):
+        if candidate is None or candidate.current_price is None:
+            continue
+        if not candidate.in_stock or candidate.order_closed:
+            continue
+        # Comparing across currencies would need a rate and would compare two
+        # numbers that moved for different reasons. The shop prices both
+        # listings the same way, so this only guards against a future one.
+        if candidate.currency != item.currency:
+            continue
+        if best is None or candidate.current_price < best:
+            best, where = candidate.current_price, candidate
+    return best, where
+
+
 def wishlist_available(db: Session, user_id: int, limit: int = 6) -> list[Item]:
     """Wishlisted figures that can actually be bought right now.
 

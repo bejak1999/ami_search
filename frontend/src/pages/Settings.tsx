@@ -526,6 +526,7 @@ function AccountTab() {
 
   const digest = (user?.prefs?.digest ?? {}) as Record<string, any>
   const radar = (user?.prefs?.deal_radar ?? {}) as Record<string, any>
+  const drop = (user?.prefs?.price_drop ?? {}) as Record<string, any>
 
   return (
     <div className="space-y-6">
@@ -625,6 +626,54 @@ function AccountTab() {
           <Icon name="fire" />
           Scan now
         </button>
+      </div>
+
+      <div className="space-y-3 border-t border-line pt-5">
+        <h4 className="text-sm font-semibold">Sharp price drops</h4>
+        <p className="text-sm text-muted">
+          Tells you when something on your wishlist becomes markedly cheaper than it was
+          &mdash; most often because a used copy has appeared under a new listing you could
+          not buy. Measured against what the figure last cost across both listings, so a
+          figure that has simply always had a wide spread between its grades says nothing.
+        </p>
+        <Toggle
+          checked={drop.enabled ?? false}
+          onChange={(enabled) => save.mutate({ prefs: { price_drop: { ...drop, enabled } } })}
+          label="Tell me about sharp drops"
+        />
+        {/* Only once it is switched on: a threshold for an alert you are not
+            receiving is a control that does nothing. */}
+        {(drop.enabled ?? false) && (
+          <>
+            <Field label="Tell me when it falls at least this far">
+              <div className="relative max-w-[10rem]">
+                <input
+                  type="number"
+                  min={5}
+                  max={90}
+                  defaultValue={Math.round((drop.percent ?? 0.25) * 100)}
+                  onBlur={(e) =>
+                    save.mutate({
+                      prefs: {
+                        price_drop: { ...drop, percent: Number(e.target.value) / 100 },
+                      },
+                    })
+                  }
+                  className="field pr-7 tabular-nums"
+                />
+                <span className="pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 text-sm text-faint">
+                  %
+                </span>
+              </div>
+            </Field>
+            <p className="text-xs leading-relaxed text-faint">
+              Checked every six hours, so &ldquo;before&rdquo; means up to six hours ago. A
+              slide of a few per cent a day will not add up to a message &mdash; each step
+              stays under the threshold. The first check after switching this on only records
+              today&rsquo;s prices; alerts start from the one after.
+            </p>
+          </>
+        )}
       </div>
 
       <div className="space-y-3 border-t border-line pt-5">

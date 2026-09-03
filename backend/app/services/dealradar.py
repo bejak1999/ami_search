@@ -18,6 +18,7 @@ from ..models import (
     Alert,
     CollectionEntry,
     CollectionStatus,
+    Condition,
     Item,
     PricePoint,
     TriggerType,
@@ -34,6 +35,10 @@ DEFAULT_DISCOUNT = 0.25
 MIN_HISTORY_POINTS = 4
 RECHECK_HOURS = 48
 
+#: How far a wishlisted figure has to fall against its own previous price
+#: before it is worth interrupting somebody for.
+DEFAULT_DROP = 0.25
+
 
 def _settings_for(user: User) -> dict:
     prefs = (user.prefs or {}).get("deal_radar") or {}
@@ -42,6 +47,20 @@ def _settings_for(user: User) -> dict:
         "discount": float(prefs.get("discount", DEFAULT_DISCOUNT)),
         "include_watched": bool(prefs.get("include_watched", True)),
         "in_stock_only": bool(prefs.get("in_stock_only", True)),
+    }
+
+
+def _drop_settings(user: User) -> dict:
+    """Whether to report a wishlisted figure falling sharply, and how sharply.
+
+    Off unless asked for. This one interrupts you about a figure you already
+    said you want, which is exactly the alert nobody wants arriving by
+    surprise on the day they installed the application.
+    """
+    prefs = (user.prefs or {}).get("price_drop") or {}
+    return {
+        "enabled": bool(prefs.get("enabled", False)),
+        "percent": max(0.01, min(0.95, float(prefs.get("percent", DEFAULT_DROP)))),
     }
 
 
@@ -99,14 +118,19 @@ def _baseline(db: Session, item_id: int) -> tuple[float | None, int]:
     return (float(prices[middle - 1]) + float(prices[middle])) / 2.0, len(prices)
 
 
-def _recently_alerted(db: Session, user_id: int, item_id: int) -> bool:
+def _recently_alerted(
+    db: Session,
+    user_id: int,
+    item_id: int,
+    trigger: TriggerType = TriggerType.deal_radar,
+) -> bool:
     cutoff = datetime.now(timezone.utc) - timedelta(hours=RECHECK_HOURS)
     return (
         db.execute(
             select(Alert.id).where(
                 Alert.user_id == user_id,
                 Alert.item_id == item_id,
-                Alert.trigger == TriggerType.deal_radar,
+                Alert.trigger == trigger,
                 Alert.created_at >= cutoff,
             )
         ).first()
@@ -124,6 +148,11 @@ def scan(db: Session, user_id: int | None = None) -> int:
     raised = 0
 
     for user in filter(None, users):
+        # Two independent questions, two switches. "Cheap against its own
+        # history" and "cheaper than it was this morning" are different
+        # things, and having either on must not require the other.
+        raised += _scan_price_drops(db, user)
+
         config = _settings_for(user)
         if not config["enabled"]:
             continue
@@ -151,6 +180,110 @@ def scan(db: Session, user_id: int | None = None) -> int:
             raised += _raise_alert(db, user, item, baseline, discount, samples)
 
     return raised
+
+
+def _scan_price_drops(db: Session, user: User) -> int:
+    """Report a wishlisted figure that has fallen sharply since the last look.
+
+    Measured against what the figure last cost, not against its tracked
+    history: a used copy undercutting a sold-out new listing has no history
+    of its own to be cheap against, and that is precisely the case worth
+    hearing about. The comparison spans both listings, because someone who
+    saved the new one is waiting for whichever of them becomes buyable.
+
+    Only a change reports. The reference moves every scan, so a figure that
+    has sat with a wide grade spread for weeks says nothing - there is no
+    news in a gap that has always been there - while a copy arriving below
+    what the figure cost this morning does.
+    """
+    config = _drop_settings(user)
+    if not config["enabled"]:
+        return 0
+
+    entries = list(
+        db.execute(
+            select(CollectionEntry).where(
+                CollectionEntry.user_id == user.id,
+                CollectionEntry.status == CollectionStatus.wishlist,
+            )
+        )
+        .scalars()
+        .all()
+    )
+    raised = 0
+    for entry in entries:
+        item = entry.item
+        if item is None:
+            continue
+        price, where = catalog.cheapest_buyable(db, item)
+        if price is None or where is None:
+            # Nothing to buy. The reference is left where it is, so a copy
+            # coming back at the price it always had is not read as a drop.
+            continue
+
+        reference = entry.drop_reference_price
+        entry.drop_reference_at = utcnow()
+        entry.drop_reference_price = price
+        if not reference or reference <= 0:
+            # First look at this figure. It sets the fixed point and reports
+            # nothing, because "cheaper than the first price we ever saw" is
+            # not a fact about the shop.
+            continue
+
+        drop = 1.0 - (price / reference)
+        if drop < config["percent"]:
+            continue
+        if _recently_alerted(db, user.id, where.id, TriggerType.price_drop):
+            continue
+        raised += _raise_drop_alert(db, user, where, reference, price, drop)
+
+    db.commit()
+    return raised
+
+
+def _raise_drop_alert(
+    db: Session, user: User, item: Item, reference: float, price: float, drop: float
+) -> int:
+    valuation = matcher.value_item(
+        db,
+        item,
+        Watch(
+            user_id=user.id,
+            target_currency=user.display_currency or "EUR",
+            provider=item.provider,
+        ),
+        user,
+    )
+    used = item.condition == Condition.preowned
+    alert = Alert(
+        user_id=user.id,
+        item_id=item.id,
+        trigger=TriggerType.price_drop,
+        title=f"{drop * 100:.0f}% cheaper than before: {item.name[:80]}",
+        body=(
+            f"On your wishlist. Was {notify.format_money(reference, item.currency)}, "
+            f"now {notify.format_money(price, item.currency)}"
+            + (" as a used copy." if used else " as a new listing.")
+        ),
+        price=price,
+        currency=item.currency,
+        landed_price=valuation.landed_total,
+        landed_currency=valuation.landed_currency,
+        previous_price=reference,
+        url=item.product_url,
+        image_url=item.image_url,
+        extra={
+            "item_name": item.name,
+            "shop": item.provider,
+            "previous": reference,
+            "drop_pct": round(drop * 100, 1),
+            "condition": item.condition.value,
+        },
+    )
+    db.add(alert)
+    db.commit()
+    notify.deliver(db, alert, user, watch=None, shop_name=item.provider)
+    return 1
 
 
 def _raise_alert(

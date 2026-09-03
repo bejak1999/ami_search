@@ -7360,6 +7360,198 @@ def test_an_item_watch_polls_both_listings_of_its_figure() -> None:
     db.close()
 
 
+def test_a_wishlisted_figure_falling_sharply_is_reported() -> None:
+    print("\n== A used copy undercutting a sold-out listing gets a message ==")
+    from app.db import SessionLocal, init_db
+    from app.models import (
+        Alert,
+        CollectionEntry,
+        CollectionStatus,
+        Condition,
+        Item,
+        TriggerType,
+        User,
+        UserRole,
+    )
+    from app.services import dealradar
+
+    init_db()
+    db = SessionLocal()
+    for model in (Alert, CollectionEntry, Item):
+        db.query(model).delete()
+    db.query(User).filter(User.username == "drops").delete()
+    db.commit()
+
+    user = User(username="drops", email="d@example.com", password_hash="x",
+                role=UserRole.user, prefs={"price_drop": {"enabled": True,
+                                                          "percent": 0.25}})
+    db.add(user)
+    db.flush()
+
+    # The case that prompted this: the new listing is what could be saved,
+    # because no used copy existed. It is on sale, so there is a price.
+    new = Item(provider="amiami", code="DROP-1", name="Wanted figure",
+               condition=Condition.new, currency="JPY", current_price=12_000,
+               in_stock=True, order_closed=False,
+               product_url="https://www.amiami.com/eng/detail/?gcode=DROP-1")
+    db.add(new)
+    db.flush()
+    db.add(CollectionEntry(user_id=user.id, item_id=new.id,
+                           status=CollectionStatus.wishlist))
+    db.commit()
+
+    sent: list = []
+    from app.services import notify
+
+    original_deliver = notify.deliver
+    notify.deliver = lambda db, alert, user, watch=None, shop_name=None: sent.append(alert)
+    try:
+        # The first scan only writes down what things cost. "Cheaper than the
+        # first price we ever saw" is not a fact about the shop.
+        check("the first scan reports nothing", dealradar.scan(db, user.id) == 0)
+        entry = db.query(CollectionEntry).one()
+        check("but it records the reference", entry.drop_reference_price == 12_000,
+              entry.drop_reference_price)
+
+        # Nothing moves.
+        check("a scan with no change reports nothing", dealradar.scan(db, user.id) == 0)
+
+        # A used copy appears at 7,800 - 35% under what the figure last cost.
+        used = Item(provider="amiami", code="DROP-1-R", name="Wanted figure",
+                    condition=Condition.preowned, currency="JPY", current_price=7_800,
+                    in_stock=True, order_closed=False,
+                    product_url="https://www.amiami.com/eng/detail/?gcode=DROP-1-R")
+        db.add(used)
+        db.commit()
+
+        check("the drop is reported", dealradar.scan(db, user.id) == 1)
+        check("as a message", len(sent) == 1, len(sent))
+        alert = sent[0]
+        check("about the listing that is actually cheap",
+              alert.item_id == used.id, alert.item_id)
+        check("with the new price", alert.price == 7_800, alert.price)
+        check("and what it was before", alert.previous_price == 12_000,
+              alert.previous_price)
+        check("filed as a price drop", alert.trigger == TriggerType.price_drop,
+              alert.trigger)
+        check("the percentage is in the title", "35%" in alert.title, alert.title)
+
+        # The reference has moved, so the same price is not news twice.
+        sent.clear()
+        check("the same price is not reported again",
+              dealradar.scan(db, user.id) == 0, sent)
+
+        # A gap that has always been there is not a change. The figure below
+        # has a wide spread between its grades from the moment it is seen,
+        # which is ordinary and permanent - reporting it would mean a message
+        # about every such figure, for ever.
+        spread = Item(provider="amiami", code="DROP-2-R", name="Wide spread",
+                      condition=Condition.preowned, currency="JPY",
+                      current_price=3_000, price_max=8_000,
+                      in_stock=True, order_closed=False)
+        db.add(spread)
+        db.flush()
+        db.add(CollectionEntry(user_id=user.id, item_id=spread.id,
+                               status=CollectionStatus.wishlist))
+        db.commit()
+        dealradar.scan(db, user.id)
+        sent.clear()
+        check("a standing spread reports nothing",
+              dealradar.scan(db, user.id) == 0, sent)
+
+        # Switched off means silent, however far something falls.
+        user.prefs = {"price_drop": {"enabled": False, "percent": 0.25}}
+        db.commit()
+        used.current_price = 2_000
+        db.commit()
+        check("nothing is reported while it is switched off",
+              dealradar.scan(db, user.id) == 0)
+
+        # And the threshold is the one that was set.
+        user.prefs = {"price_drop": {"enabled": True, "percent": 0.80}}
+        db.commit()
+        dealradar.scan(db, user.id)  # re-anchor at 2,000
+        sent.clear()
+        used.current_price = 1_800  # 10% under, well below an 80% threshold
+        db.commit()
+        check("a drop under the threshold is not reported",
+              dealradar.scan(db, user.id) == 0, sent)
+    finally:
+        notify.deliver = original_deliver
+
+    for model in (Alert, CollectionEntry, Item):
+        db.query(model).delete()
+    db.query(User).filter(User.username == "drops").delete()
+    db.commit()
+    db.close()
+
+
+def test_a_sold_out_figure_does_not_read_as_a_bargain() -> None:
+    print("\n== A figure nobody can buy sets no new reference ==")
+    from app.db import SessionLocal, init_db
+    from app.models import (
+        Alert, CollectionEntry, CollectionStatus, Condition, Item, User, UserRole,
+    )
+    from app.services import catalog, dealradar, notify
+
+    init_db()
+    db = SessionLocal()
+    for model in (Alert, CollectionEntry, Item):
+        db.query(model).delete()
+    db.query(User).filter(User.username == "soldout").delete()
+    db.commit()
+
+    user = User(username="soldout", email="so@example.com", password_hash="x",
+                role=UserRole.user,
+                prefs={"price_drop": {"enabled": True, "percent": 0.25}})
+    db.add(user)
+    db.flush()
+
+    item = Item(provider="amiami", code="SO-9", name="Comes and goes",
+                condition=Condition.preowned, currency="JPY", current_price=9_000,
+                in_stock=True, order_closed=False)
+    db.add(item)
+    db.flush()
+    db.add(CollectionEntry(user_id=user.id, item_id=item.id,
+                           status=CollectionStatus.wishlist))
+    db.commit()
+
+    original_deliver = notify.deliver
+    notify.deliver = lambda *a, **k: None
+    try:
+        dealradar.scan(db, user.id)
+        entry = db.query(CollectionEntry).one()
+        check("the reference is what it cost", entry.drop_reference_price == 9_000)
+
+        # It sells out. A sold-out listing has a price on record and it is not
+        # a price anybody can pay, so it must not become the reference.
+        item.in_stock = False
+        item.order_closed = True
+        db.commit()
+        price, where = catalog.cheapest_buyable(db, item)
+        check("nothing is buyable", price is None and where is None, (price, where))
+        dealradar.scan(db, user.id)
+        db.expire_all()
+        entry = db.query(CollectionEntry).one()
+        check("so the reference is left alone", entry.drop_reference_price == 9_000,
+              entry.drop_reference_price)
+
+        # It comes back at the price it always had. That is not a drop.
+        item.in_stock = True
+        item.order_closed = False
+        db.commit()
+        check("and its return at the same price is not a drop",
+              dealradar.scan(db, user.id) == 0)
+    finally:
+        notify.deliver = original_deliver
+
+    for model in (Alert, CollectionEntry, Item):
+        db.query(model).delete()
+    db.query(User).filter(User.username == "soldout").delete()
+    db.commit()
+    db.close()
+
+
 def test_the_sampler_can_actually_spend_its_budget() -> None:
     print("\n== The shelf sampler is not starved by its own arithmetic ==")
     from app.config import settings
@@ -7542,6 +7734,8 @@ def main() -> int:
     test_a_slice_between_passes_is_not_paused_in_one()
     test_a_wishlist_is_about_the_figure_not_the_listing()
     test_an_item_watch_polls_both_listings_of_its_figure()
+    test_a_wishlisted_figure_falling_sharply_is_reported()
+    test_a_sold_out_figure_does_not_read_as_a_bargain()
     test_the_survival_curve_keeps_the_slow_copies_in()
     test_the_bargain_is_only_counted_where_there_was_a_choice()
     test_the_shelf_panel_adds_up()

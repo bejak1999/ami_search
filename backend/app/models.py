@@ -728,6 +728,17 @@ class CollectionEntry(Base):
     purchased_at: Mapped[datetime | None] = mapped_column(UTCDateTime)
     quantity: Mapped[int] = mapped_column(Integer, default=1)
     mfc_url: Mapped[str | None] = mapped_column(Text)
+
+    #: What the figure could last be bought for, and when that was looked at.
+    #: The reference the sharp-drop alert measures against.
+    #:
+    #: Kept here rather than in ``price_checks`` on purpose. That table is the
+    #: fixed point for the "what has moved since I last looked" button, which
+    #: only moves when a person presses it; a background scan writing to it
+    #: would quietly reset the comparison somebody was relying on.
+    drop_reference_price: Mapped[float | None] = mapped_column(Float)
+    drop_reference_at: Mapped[datetime | None] = mapped_column(UTCDateTime)
+
     created_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(
         UTCDateTime, default=utcnow, onupdate=utcnow
