@@ -589,64 +589,36 @@ function AccountTab() {
         </button>
       </div>
 
-      <div className="space-y-3 border-t border-line pt-5">
-        <h4 className="text-sm font-semibold">Deal radar</h4>
-        <p className="text-sm text-muted">
-          Independently of your watches, this flags anything on your wishlist that is unusually
-          cheap compared with its own tracked history.
-        </p>
-        <Toggle
-          checked={radar.enabled ?? true}
-          onChange={(enabled) => save.mutate({ prefs: { deal_radar: { ...radar, enabled } } })}
-          label="Enable the deal radar"
-        />
-        <Field label="Flag when at least this far below the usual price">
-          <div className="relative max-w-[10rem]">
-            <input
-              type="number"
-              min={5}
-              max={90}
-              defaultValue={Math.round((radar.discount ?? 0.25) * 100)}
-              onBlur={(e) =>
-                save.mutate({
-                  prefs: { deal_radar: { ...radar, discount: Number(e.target.value) / 100 } },
-                })
-              }
-              className="field pr-7 tabular-nums"
-            />
-            <span className="pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 text-sm text-faint">
-              %
-            </span>
-          </div>
-        </Field>
-        <button
-          onClick={() => void api.scanDeals().then((r) => toast.success(r.message))}
-          className="btn-ghost text-sm"
-        >
-          <Icon name="fire" />
-          Scan now
-        </button>
-      </div>
+      {/* One section, because from outside these looked like the same
+          feature listed twice: both about a wishlisted figure, both with a
+          percentage, both saying 25. They answer different questions, and
+          the only way to see that is to put them side by side and name the
+          question each one asks. */}
+      <div className="space-y-4 border-t border-line pt-5">
+        <div>
+          <h4 className="text-sm font-semibold">Bargains on your wishlist</h4>
+          <p className="mt-1 text-sm text-muted">
+            Two different questions, each with its own switch. Which channels these reach, and
+            how steep a fall each channel bothers you about, is set on the channel itself.
+          </p>
+        </div>
 
-      <div className="space-y-3 border-t border-line pt-5">
-        <h4 className="text-sm font-semibold">Sharp price drops</h4>
-        <p className="text-sm text-muted">
-          Tells you when something on your wishlist becomes markedly cheaper than it was
-          &mdash; most often because a used copy has appeared under a new listing you could
-          not buy. Measured against what the figure last cost across both listings, so a
-          figure that has simply always had a wide spread between its grades says nothing.
-        </p>
-        <Toggle
-          checked={drop.enabled ?? false}
-          onChange={(enabled) => save.mutate({ prefs: { price_drop: { ...drop, enabled } } })}
-          label="Tell me about sharp drops"
-        />
-        {/* Only once it is switched on: a threshold for an alert you are not
-            receiving is a control that does nothing. */}
-        {(drop.enabled ?? false) && (
-          <>
-            <Field label="Tell me when it falls at least this far">
-              <div className="relative max-w-[10rem]">
+        <div className="space-y-3 rounded-control border border-line bg-raised p-3">
+          <Toggle
+            checked={drop.enabled ?? false}
+            onChange={(enabled) => save.mutate({ prefs: { price_drop: { ...drop, enabled } } })}
+            label="Cheaper than it was"
+          />
+          <p className="text-xs leading-relaxed text-muted">
+            Compares against what the figure last cost, across both its listings. This is what
+            catches a used copy appearing under a new listing you could not buy &mdash; the
+            usual way a wishlist gets built, since when you first want a figure there is
+            rarely a used one to save. Checked every six hours, so a slide of a few per cent a
+            day will not add up to a message.
+          </p>
+          {(drop.enabled ?? false) && (
+            <Field label="From at least">
+              <div className="relative max-w-[8rem]">
                 <input
                   type="number"
                   min={5}
@@ -666,14 +638,51 @@ function AccountTab() {
                 </span>
               </div>
             </Field>
-            <p className="text-xs leading-relaxed text-faint">
-              Checked every six hours, so &ldquo;before&rdquo; means up to six hours ago. A
-              slide of a few per cent a day will not add up to a message &mdash; each step
-              stays under the threshold. The first check after switching this on only records
-              today&rsquo;s prices; alerts start from the one after.
-            </p>
-          </>
-        )}
+          )}
+        </div>
+
+        <div className="space-y-3 rounded-control border border-line bg-raised p-3">
+          <Toggle
+            checked={radar.enabled ?? true}
+            onChange={(enabled) => save.mutate({ prefs: { deal_radar: { ...radar, enabled } } })}
+            label="Cheap for this figure"
+          />
+          <p className="text-xs leading-relaxed text-muted">
+            Compares against the figure&rsquo;s own tracked price history rather than against
+            yesterday. It needs a few recorded prices before it can say anything, so it stays
+            quiet on figures that have only just appeared &mdash; which is exactly where the
+            other one speaks up.
+          </p>
+          {(radar.enabled ?? true) && (
+            <Field label="From at least">
+              <div className="relative max-w-[8rem]">
+                <input
+                  type="number"
+                  min={5}
+                  max={90}
+                  defaultValue={Math.round((radar.discount ?? 0.25) * 100)}
+                  onBlur={(e) =>
+                    save.mutate({
+                      prefs: { deal_radar: { ...radar, discount: Number(e.target.value) / 100 } },
+                    })
+                  }
+                  className="field pr-7 tabular-nums"
+                />
+                <span className="pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 text-sm text-faint">
+                  %
+                </span>
+              </div>
+            </Field>
+          )}
+        </div>
+
+        <button
+          onClick={() => void api.scanDeals().then((r) => toast.success(r.message))}
+          className="btn-ghost text-sm"
+        >
+          <Icon name="fire" />
+          Check both now
+        </button>
       </div>
 
       <div className="space-y-3 border-t border-line pt-5">

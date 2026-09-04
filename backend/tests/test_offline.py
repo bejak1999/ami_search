@@ -6090,7 +6090,29 @@ def test_the_photo_panel_cannot_report_more_than_all_of_them() -> None:
     # would size the projection for a cache that holds none of them.
     check("the projection is sized on what is kept",
           stats["average_bytes"] == 40_000, stats["average_bytes"])
-    check("nothing was deleted", db.query(CachedImage).count() == 800,
+
+    # A photo on a path we cannot derive a partner from is one row, not two:
+    # urls_for_item falls back to the same address for both sizes and it is
+    # recorded once. Counting two for it put thousands into the target that
+    # nothing would ever register, and the bar could not reach the end
+    # however complete the cache was.
+    odd = Item(provider="amiami", code="ODD-1", name="Unusual path",
+               condition=Condition.preowned, currency="JPY",
+               image_url="https://img.amiami.com/images/product/other/1/F-x.jpg")
+    db.add(odd)
+    db.flush()
+    only = images.urls_for_item(odd)
+    check("such an item yields one photo", len(only) == 1, only)
+    images.register(db, only, item_id=odd.id)
+    db.commit()
+
+    stats = images.stats(db)
+    check("and the target counts one for it",
+          stats["expected_images"] == 201, stats["expected_images"])
+    check("so a complete cache reads as complete",
+          stats["known_percent"] == 100.0, stats["known_percent"])
+    # 800 from the loops above, plus the one odd-path photo added since.
+    check("nothing was deleted", db.query(CachedImage).count() == 801,
           db.query(CachedImage).count())
     check("and a second run re-files nothing", reclassify_gallery_photos() == 0)
 
@@ -7552,6 +7574,106 @@ def test_a_sold_out_figure_does_not_read_as_a_bargain() -> None:
     db.close()
 
 
+def test_each_channel_takes_the_alerts_it_asked_for() -> None:
+    print("\n== A channel sets its own bar, and the scan clears the lowest ==")
+    from app.db import SessionLocal, init_db
+    from app.models import (
+        Alert,
+        ChannelType,
+        DeliveryStatus,
+        NotificationChannel,
+        TriggerType,
+        User,
+        UserRole,
+    )
+    from app.services import dealradar, notify
+
+    init_db()
+    db = SessionLocal()
+    db.query(Alert).delete()
+    db.query(NotificationChannel).delete()
+    db.query(User).filter(User.username == "routing").delete()
+    db.commit()
+
+    user = User(username="routing", email="r@example.com", password_hash="x",
+                role=UserRole.user)
+    db.add(user)
+    db.flush()
+
+    def alert(trigger: TriggerType, percent: float) -> Alert:
+        key = notify.PERCENTAGE_ALERTS.get(trigger.value)
+        return Alert(user_id=user.id, trigger=trigger, title="x",
+                     extra={key: percent} if key else {})
+
+    # Takes everything, as a channel configured before any of this existed
+    # does - an absent list must not start meaning "nothing".
+    plain = NotificationChannel(user_id=user.id, type=ChannelType.telegram,
+                                name="phone", config={"bot_token": "t", "chat_id": "1"},
+                                enabled=True, is_default=True)
+    # Wants only the sharp drops, and only steep ones.
+    picky = NotificationChannel(
+        user_id=user.id, type=ChannelType.telegram, name="mailbox",
+        config={"bot_token": "t", "chat_id": "2",
+                "triggers": ["price_drop"], "thresholds": {"price_drop": 0.5}},
+        enabled=True, is_default=True)
+    db.add_all([plain, picky])
+    db.commit()
+
+    check("a channel with no list takes anything",
+          notify.channel_declines(plain, alert(TriggerType.new_match, 0)) is None)
+    check("one with a list turns away what is not on it",
+          notify.channel_declines(picky, alert(TriggerType.new_match, 0)) is not None)
+    check("a drop under its own bar is turned away",
+          notify.channel_declines(picky, alert(TriggerType.price_drop, 30.0)) is not None)
+    check("and one over it is taken",
+          notify.channel_declines(picky, alert(TriggerType.price_drop, 60.0)) is None)
+    check("while the plain channel takes both",
+          notify.channel_declines(plain, alert(TriggerType.price_drop, 30.0)) is None)
+
+    # The alert has to exist before any channel can be offered it, so the scan
+    # runs at whichever bar is lowest. Scanning at the user's own figure would
+    # mean a channel asking for ten per cent never hearing about a fifteen per
+    # cent drop, because nothing was ever raised for it to receive.
+    picky.config = {**picky.config, "thresholds": {"price_drop": 0.10}}
+    db.commit()
+    lowest = dealradar.lowest_threshold(db, user, TriggerType.price_drop, 0.25)
+    check("the scan clears the most generous bar", abs(lowest - 0.10) < 1e-9, lowest)
+
+    picky.enabled = False
+    db.commit()
+    lowest = dealradar.lowest_threshold(db, user, TriggerType.price_drop, 0.25)
+    check("a switched-off channel does not lower it", abs(lowest - 0.25) < 1e-9, lowest)
+
+    # End to end: one alert, two channels, one delivery and one refusal.
+    picky.enabled = True
+    picky.config = {**picky.config, "thresholds": {"price_drop": 0.5}}
+    db.commit()
+    raised = alert(TriggerType.price_drop, 30.0)
+    raised.body = ""
+    db.add(raised)
+    db.commit()
+
+    sent: list = []
+    original_send = notify.send
+    notify.send = lambda kind, config, notification: sent.append(config.get("chat_id"))
+    try:
+        deliveries = notify.deliver(db, raised, user)
+    finally:
+        notify.send = original_send
+
+    check("it went to the channel that wanted it", sent == ["1"], sent)
+    skipped = [d for d in deliveries if d.status == DeliveryStatus.skipped]
+    check("and the other was recorded as skipped", len(skipped) == 1, len(skipped))
+    check("with the reason on it",
+          skipped and "threshold" in (skipped[0].error or ""), skipped[0].error if skipped else None)
+
+    db.query(Alert).delete()
+    db.query(NotificationChannel).delete()
+    db.query(User).filter(User.username == "routing").delete()
+    db.commit()
+    db.close()
+
+
 def test_the_sampler_can_actually_spend_its_budget() -> None:
     print("\n== The shelf sampler is not starved by its own arithmetic ==")
     from app.config import settings
@@ -7736,6 +7858,7 @@ def main() -> int:
     test_an_item_watch_polls_both_listings_of_its_figure()
     test_a_wishlisted_figure_falling_sharply_is_reported()
     test_a_sold_out_figure_does_not_read_as_a_bargain()
+    test_each_channel_takes_the_alerts_it_asked_for()
     test_the_survival_curve_keeps_the_slow_copies_in()
     test_the_bargain_is_only_counted_where_there_was_a_choice()
     test_the_shelf_panel_adds_up()

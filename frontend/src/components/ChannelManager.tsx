@@ -7,6 +7,14 @@ import { useToast } from '@/lib/toast'
 import { relativeTime } from '@/lib/format'
 import { Icon, type IconName } from './Icon'
 import { Badge, Card, EmptyState, Field, Modal, Spinner, Toggle } from './ui'
+import { TRIGGER_OPTIONS } from '@/lib/triggers'
+import type { TriggerType } from '@/api/types'
+
+const ALL_TRIGGERS = TRIGGER_OPTIONS.map((option) => option.value)
+
+//: The two alerts that come with a percentage attached, and so the two a
+//: channel can set its own bar for.
+const THRESHOLD_TRIGGERS: TriggerType[] = ['price_drop', 'deal_radar']
 import clsx from 'clsx'
 
 const CHANNEL_ICON: Record<ChannelType, IconName> = {
@@ -80,6 +88,34 @@ function ChannelForm({
   })
   const [isDefault, setIsDefault] = useState(channel?.is_default ?? true)
   const [sendDigest, setSendDigest] = useState(channel?.send_digest ?? false)
+  // Which kinds this channel takes, and its own bar for the ones that carry a
+  // percentage. Absent means "everything", so a channel set up before these
+  // existed keeps behaving the way it did.
+  const stored = channel?.config_preview ?? {}
+  const [triggers, setTriggers] = useState<TriggerType[]>(
+    Array.isArray(stored.triggers) && stored.triggers.length
+      ? (stored.triggers as TriggerType[])
+      : ALL_TRIGGERS,
+  )
+  const [thresholds, setThresholds] = useState<Record<string, number>>(
+    (stored.thresholds as Record<string, number>) ?? {},
+  )
+
+  function toggleTrigger(kind: TriggerType, on: boolean) {
+    setTriggers((current) =>
+      on ? [...new Set([...current, kind])] : current.filter((k) => k !== kind),
+    )
+  }
+
+  /** Everything the channel needs stored, secrets and routing together. */
+  const fullConfig = () => ({
+    ...config,
+    // Written out in full rather than omitted when everything is ticked: an
+    // absent list would silently start meaning "all" again the next time a
+    // new kind of alert is added.
+    triggers,
+    thresholds,
+  })
   const [detecting, setDetecting] = useState(false)
   const [chats, setChats] = useState<{ chat_id: string; name: string }[]>([])
 
@@ -88,14 +124,14 @@ function ChannelForm({
       channel
         ? api.channels.update(channel.id, {
             name,
-            config,
+            config: fullConfig(),
             is_default: isDefault,
             send_digest: sendDigest,
           })
         : api.channels.create({
             type: spec.type,
             name,
-            config,
+            config: fullConfig(),
             is_default: isDefault,
             send_digest: sendDigest,
           }),
@@ -221,6 +257,68 @@ function ChannelForm({
             )}
           </div>
         )}
+
+        {/* What this channel is for. The same figure falling a fifth is worth
+            a message on your phone and not worth an e-mail, so each channel
+            takes the kinds it wants and sets its own bar on the two that
+            carry a percentage. */}
+        <div className="space-y-2 border-t border-line pt-4">
+          <p className="text-sm font-medium">Send here</p>
+          <div className="space-y-1.5">
+            {TRIGGER_OPTIONS.map((option) => {
+              const on = triggers.includes(option.value)
+              const scaled = THRESHOLD_TRIGGERS.includes(option.value)
+              return (
+                <div key={option.value} className="space-y-1">
+                  <Toggle
+                    checked={on}
+                    onChange={(next) => toggleTrigger(option.value, next)}
+                    label={option.label}
+                  />
+                  {on && scaled && (
+                    <div className="ml-8 flex items-center gap-2">
+                      <span className="text-xs text-muted">only from</span>
+                      <div className="relative w-20">
+                        <input
+                          type="number"
+                          min={1}
+                          max={95}
+                          placeholder="any"
+                          defaultValue={
+                            thresholds[option.value] !== undefined
+                              ? Math.round(thresholds[option.value] * 100)
+                              : ''
+                          }
+                          onBlur={(e) => {
+                            const raw = e.target.value.trim()
+                            setThresholds((current) => {
+                              const next = { ...current }
+                              if (!raw) delete next[option.value]
+                              else next[option.value] = Number(raw) / 100
+                              return next
+                            })
+                          }}
+                          className="field py-1 pr-6 text-xs tabular-nums"
+                        />
+                        <span className="pointer-events-none absolute right-2 top-1/2 -translate-y-1/2 text-xs text-faint">
+                          %
+                        </span>
+                      </div>
+                      <span className="text-xs text-faint">
+                        leave blank to take whatever your settings allow
+                      </span>
+                    </div>
+                  )}
+                </div>
+              )
+            })}
+          </div>
+          {triggers.length === 0 && (
+            <p className="text-xs text-warning">
+              Nothing selected, so this channel will receive no alerts at all.
+            </p>
+          )}
+        </div>
 
         <div className="space-y-3 border-t border-line pt-4">
           <Toggle

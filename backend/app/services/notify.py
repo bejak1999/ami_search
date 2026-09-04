@@ -127,6 +127,61 @@ def channels_for(db: Session, watch: Watch | None, user: User) -> list[Notificat
     return channels
 
 
+#: Alerts that carry a percentage, and where each keeps it. A channel can set
+#: its own bar for these - the phone from a quarter off, the mailbox only for
+#: something drastic - so the figure has to be readable back off the alert.
+PERCENTAGE_ALERTS: dict[str, str] = {
+    TriggerType.price_drop.value: "drop_pct",
+    TriggerType.deal_radar.value: "discount_pct",
+}
+
+
+def alert_percent(alert: Alert) -> float | None:
+    """How far this alert says the price fell, where it says anything."""
+    key = PERCENTAGE_ALERTS.get(
+        alert.trigger.value if hasattr(alert.trigger, "value") else str(alert.trigger)
+    )
+    if not key:
+        return None
+    value = (alert.extra or {}).get(key)
+    try:
+        return float(value) if value is not None else None
+    except (TypeError, ValueError):  # pragma: no cover - a hand-edited row
+        return None
+
+
+def channel_declines(channel: NotificationChannel, alert: Alert) -> str | None:
+    """Why this channel does not want this alert, or None if it does.
+
+    Two independent filters, both optional and both absent by default, so a
+    channel configured before either existed keeps receiving everything.
+
+    ``triggers`` names the kinds this channel accepts. ``thresholds`` sets its
+    own bar for the ones that carry a percentage, which is the point of having
+    it per channel: the same figure falling twenty per cent is worth a push
+    notification and not worth an e-mail.
+    """
+    config = channel.config or {}
+
+    trigger = alert.trigger.value if hasattr(alert.trigger, "value") else str(alert.trigger)
+    wanted = config.get("triggers")
+    if isinstance(wanted, list) and wanted and trigger not in wanted:
+        return "This channel does not take that kind of alert"
+
+    thresholds = config.get("thresholds")
+    if isinstance(thresholds, dict):
+        bar = thresholds.get(trigger)
+        percent = alert_percent(alert)
+        if bar is not None and percent is not None:
+            try:
+                needed = float(bar) * 100.0
+            except (TypeError, ValueError):  # pragma: no cover
+                return None
+            if percent < needed:
+                return f"Below this channel's {needed:.0f}% threshold"
+    return None
+
+
 def deliver(
     db: Session,
     alert: Alert,
@@ -150,9 +205,14 @@ def deliver(
         )
 
         digest_only = bool((channel.config or {}).get("digest_only"))
-        if suppress or digest_only:
+        declined = channel_declines(channel, alert)
+        if suppress or digest_only or declined:
             record.status = DeliveryStatus.skipped
-            record.error = "Quiet hours" if suppress else "Channel is digest-only"
+            record.error = (
+                "Quiet hours"
+                if suppress
+                else ("Channel is digest-only" if digest_only else declined)
+            )
             db.add(record)
             deliveries.append(record)
             continue

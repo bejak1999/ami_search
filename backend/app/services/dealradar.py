@@ -20,6 +20,7 @@ from ..models import (
     CollectionStatus,
     Condition,
     Item,
+    NotificationChannel,
     PricePoint,
     TriggerType,
     User,
@@ -48,6 +49,39 @@ def _settings_for(user: User) -> dict:
         "include_watched": bool(prefs.get("include_watched", True)),
         "in_stock_only": bool(prefs.get("in_stock_only", True)),
     }
+
+
+def lowest_threshold(db: Session, user: User, trigger: TriggerType, fallback: float) -> float:
+    """The most generous bar any enabled channel has set for this alert.
+
+    Channels may each set their own - the phone from a quarter off, the
+    mailbox only for something drastic - and the alert has to exist before
+    any of them can be offered it. So the scan runs at whichever bar is
+    lowest, and delivery is what turns the stricter channels away.
+
+    Scanning at the user's own figure alone would mean a channel asking for
+    ten per cent never hearing about a fifteen per cent drop, because nothing
+    was ever raised for it to receive.
+    """
+    bars = [fallback]
+    channels = db.execute(
+        select(NotificationChannel).where(
+            NotificationChannel.user_id == user.id,
+            NotificationChannel.enabled.is_(True),
+        )
+    ).scalars()
+    for channel in channels:
+        thresholds = (channel.config or {}).get("thresholds")
+        if not isinstance(thresholds, dict):
+            continue
+        bar = thresholds.get(trigger.value)
+        if bar is None:
+            continue
+        try:
+            bars.append(float(bar))
+        except (TypeError, ValueError):  # pragma: no cover - a hand-edited row
+            continue
+    return max(0.01, min(bars))
 
 
 def _drop_settings(user: User) -> dict:
@@ -157,6 +191,9 @@ def scan(db: Session, user_id: int | None = None) -> int:
         if not config["enabled"]:
             continue
 
+        radar_bar = lowest_threshold(
+            db, user, TriggerType.deal_radar, config["discount"]
+        )
         item_ids = _candidate_item_ids(db, user, config["include_watched"])
         if not item_ids:
             continue
@@ -174,7 +211,7 @@ def scan(db: Session, user_id: int | None = None) -> int:
                 continue
 
             discount = 1.0 - (item.current_price / baseline)
-            if discount < config["discount"]:
+            if discount < radar_bar:
                 continue
 
             raised += _raise_alert(db, user, item, baseline, discount, samples)
@@ -199,6 +236,9 @@ def _scan_price_drops(db: Session, user: User) -> int:
     config = _drop_settings(user)
     if not config["enabled"]:
         return 0
+    threshold = lowest_threshold(
+        db, user, TriggerType.price_drop, config["percent"]
+    )
 
     entries = list(
         db.execute(
@@ -231,7 +271,7 @@ def _scan_price_drops(db: Session, user: User) -> int:
             continue
 
         drop = 1.0 - (price / reference)
-        if drop < config["percent"]:
+        if drop < threshold:
             continue
         if _recently_alerted(db, user.id, where.id, TriggerType.price_drop):
             continue

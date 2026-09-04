@@ -635,6 +635,7 @@ def stats(db: Session) -> dict:
             )
         ).scalar_one()
     )
+
     budget = int(settings.image_cache_max_gb * 1024**3)
 
     # How many photos the current catalogue would need in total.
@@ -646,8 +647,29 @@ def stats(db: Session) -> dict:
             settings.image_cache_requests_per_minute * 60,
         )
     )
+    # How many photos those items would amount to, which is not simply two
+    # each. A pair is only kept where one size can be derived from the other:
+    # AmiAmi serves the same picture from /main/ and /thumb300/, and a URL on
+    # neither path yields one row rather than two - urls_for_item falls back
+    # to the same address twice and it is recorded once.
+    #
+    # Multiplying by two regardless put several thousand photos into the
+    # target that nothing would ever register, so the bar could not reach the
+    # end however complete the cache was: 131,470 of 145,876, for ever.
     per_item = 2 if settings.image_cache_full_images else 1
-    expected = items * per_item
+    has_photo = or_(Item.image_url.is_not(None), Item.images != [])
+    pairable = or_(
+        Item.image_url.contains("/main/"),
+        *[Item.image_url.contains(marker) for marker in THUMB_MARKERS],
+    )
+    pairs = int(
+        db.execute(
+            select(func.count(Item.id)).where(has_photo, pairable)
+        ).scalar_one()
+        or 0
+    )
+    singles = max(0, items - pairs)
+    expected = pairs * per_item + singles
 
     # Gallery shots are not kept, so they are no part of the target. Rows for
     # them exist from before that was decided; they are reported on their own
