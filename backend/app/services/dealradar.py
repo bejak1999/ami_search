@@ -259,6 +259,21 @@ def _scan_price_drops(db: Session, user: User) -> int:
         if price is None or where is None:
             # Nothing to buy. The reference is left where it is, so a copy
             # coming back at the price it always had is not read as a drop.
+            #
+            # Unless there is no reference at all. Most of a wishlist is
+            # figures saved from a new listing that was already sold out -
+            # there is no used one to save until somebody has sold one back -
+            # and such an entry would never acquire a reference at all. The
+            # used copy that eventually appears, which is the whole reason
+            # for saving the figure, was then swallowed as "first look".
+            #
+            # What it last cost is the honest starting point. That price may
+            # be months old, and it is still the only thing there is.
+            if not entry.drop_reference_price:
+                fallback = catalog.last_known_price(db, item)
+                if fallback:
+                    entry.drop_reference_price = fallback
+                    entry.drop_reference_at = utcnow()
             continue
 
         reference = entry.drop_reference_price
@@ -301,7 +316,8 @@ def _raise_drop_alert(
         trigger=TriggerType.price_drop,
         title=f"{drop * 100:.0f}% cheaper than before: {item.name[:80]}",
         body=(
-            f"On your wishlist. Was {notify.format_money(reference, item.currency)}, "
+            "On your wishlist. Last buyable at "
+            f"{notify.format_money(reference, item.currency)}, "
             f"now {notify.format_money(price, item.currency)}"
             + (" as a used copy." if used else " as a new listing.")
         ),

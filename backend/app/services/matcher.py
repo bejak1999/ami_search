@@ -91,7 +91,23 @@ def build_query(watch: Watch) -> SearchQuery:
 
 
 def _profile(db: Session, user: User) -> CostProfile:
+    """This user's landed-cost assumptions, creating them once if need be.
+
+    Looked up rather than trusted to the relationship. Sessions here do not
+    expire on commit, so a profile created moments earlier - by another alert
+    in the same radar run, say - is still cached as absent on the user
+    object. Adding a second one violates the one-per-user constraint, and the
+    error takes down whatever job raised the alert: the scheduler logs it and
+    the run simply stops, with no alert delivered and nothing on any panel to
+    say why.
+    """
     profile = user.cost_profile
+    if profile is not None:
+        return profile
+
+    profile = db.execute(
+        select(CostProfile).where(CostProfile.user_id == user.id)
+    ).scalar_one_or_none()
     if profile is None:
         profile = landed_cost.default_profile(user.id)
         db.add(profile)

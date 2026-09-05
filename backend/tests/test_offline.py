@@ -7463,6 +7463,45 @@ def test_a_wishlisted_figure_falling_sharply_is_reported() -> None:
         check("the same price is not reported again",
               dealradar.scan(db, user.id) == 0, sent)
 
+        # The commonest shape of a wishlist, and the one this exists for: the
+        # figure was saved from a new listing that was already sold out,
+        # because there was no used copy to save. Nothing is buyable for
+        # weeks, so nothing could set a reference - and the used copy that
+        # eventually appeared was swallowed as "first look", which is the one
+        # moment the whole feature is about.
+        gone = Item(provider="amiami", code="OOS-1", name="Sold out when saved",
+                    condition=Condition.new, currency="JPY", current_price=12_000,
+                    in_stock=False, order_closed=True)
+        db.add(gone)
+        db.flush()
+        db.add(CollectionEntry(user_id=user.id, item_id=gone.id,
+                               status=CollectionStatus.wishlist))
+        db.commit()
+
+        sent.clear()
+        check("a figure nobody can buy reports nothing",
+              dealradar.scan(db, user.id) == 0, sent)
+        saved = db.query(CollectionEntry).filter_by(item_id=gone.id).one()
+        check("but what it last cost becomes the starting point",
+              saved.drop_reference_price == 12_000, saved.drop_reference_price)
+
+        # The used copy turns up at 7,800 - 35% under what the figure last
+        # cost. This is the message that was being lost.
+        second_hand = Item(provider="amiami", code="OOS-1-R", name="Sold out when saved",
+                           condition=Condition.preowned, currency="JPY",
+                           current_price=7_800, in_stock=True, order_closed=False)
+        db.add(second_hand)
+        db.commit()
+
+        sent.clear()
+        check("the used copy appearing is reported",
+              dealradar.scan(db, user.id) == 1, sent)
+        check("about the used listing", sent and sent[0].item_id == second_hand.id,
+              sent[0].item_id if sent else None)
+        check("measured against the sold-out new price",
+              sent and sent[0].previous_price == 12_000,
+              sent[0].previous_price if sent else None)
+
         # A gap that has always been there is not a change. The figure below
         # has a wide spread between its grades from the moment it is seen,
         # which is ordinary and permanent - reporting it would mean a message
@@ -7570,6 +7609,51 @@ def test_a_sold_out_figure_does_not_read_as_a_bargain() -> None:
     for model in (Alert, CollectionEntry, Item):
         db.query(model).delete()
     db.query(User).filter(User.username == "soldout").delete()
+    db.commit()
+    db.close()
+
+
+def test_two_alerts_in_one_run_do_not_kill_the_run() -> None:
+    print("\n== A second alert for the same person does not take the job down ==")
+    from app.db import SessionLocal, init_db
+    from app.models import CostProfile, Item, User, UserRole, Watch
+    from app.models import Condition
+    from app.services import matcher
+
+    init_db()
+    db = SessionLocal()
+    db.query(CostProfile).delete()
+    db.query(User).filter(User.username == "twice").delete()
+    db.commit()
+
+    user = User(username="twice", email="tw@example.com", password_hash="x",
+                role=UserRole.user)
+    db.add(user)
+    db.flush()
+    item = Item(provider="amiami", code="TW-1", name="Figure",
+                condition=Condition.preowned, currency="JPY", current_price=5_000)
+    db.add(item)
+    db.commit()
+
+    watch = Watch(user_id=user.id, target_currency="EUR", provider="amiami")
+
+    # The session does not expire on commit, so a profile created by the
+    # first alert is still cached as absent on the user object. Creating a
+    # second one violates the one-per-user constraint - and that error takes
+    # down whichever job raised the alert, with the scheduler logging it and
+    # the run simply stopping. No alert delivered, nothing on any panel.
+    matcher.value_item(db, item, watch, user)
+    check("one profile after the first alert",
+          db.query(CostProfile).filter_by(user_id=user.id).count() == 1)
+
+    matcher.value_item(db, item, watch, user)
+    check("and still one after the second", 
+          db.query(CostProfile).filter_by(user_id=user.id).count() == 1,
+          db.query(CostProfile).filter_by(user_id=user.id).count())
+
+    db.query(CostProfile).delete()
+    db.query(Item).delete()
+    db.query(User).filter(User.username == "twice").delete()
     db.commit()
     db.close()
 
@@ -7858,6 +7942,7 @@ def main() -> int:
     test_an_item_watch_polls_both_listings_of_its_figure()
     test_a_wishlisted_figure_falling_sharply_is_reported()
     test_a_sold_out_figure_does_not_read_as_a_bargain()
+    test_two_alerts_in_one_run_do_not_kill_the_run()
     test_each_channel_takes_the_alerts_it_asked_for()
     test_the_survival_curve_keeps_the_slow_copies_in()
     test_the_bargain_is_only_counted_where_there_was_a_choice()

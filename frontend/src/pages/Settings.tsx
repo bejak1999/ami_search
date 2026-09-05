@@ -613,8 +613,10 @@ function AccountTab() {
             Compares against what the figure last cost, across both its listings. This is what
             catches a used copy appearing under a new listing you could not buy &mdash; the
             usual way a wishlist gets built, since when you first want a figure there is
-            rarely a used one to save. Checked every six hours, so a slide of a few per cent a
-            day will not add up to a message.
+            rarely a used one to save. For a figure that was already sold out when you saved
+            it, the comparison is against the price it last sold at, which may be months old.
+            Checked every six hours, so a slide of a few per cent a day will not add up to a
+            message.
           </p>
           {(drop.enabled ?? false) && (
             <Field label="From at least">

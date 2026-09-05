@@ -84,6 +84,24 @@ def counterpart_of(db: Session, item: Item) -> Item | None:
     ).scalar_one_or_none()
 
 
+def last_known_price(db: Session, item: Item) -> float | None:
+    """The least either listing of this figure was last seen costing.
+
+    Buyable or not. A sold-out listing keeps the price it had when it was
+    last on sale, and for a figure that has been out of stock ever since it
+    was saved, that is the only thing there is to measure a later offer
+    against. It may be months old, and the interface says so.
+    """
+    prices = [
+        candidate.current_price
+        for candidate in (item, counterpart_of(db, item))
+        if candidate is not None
+        and candidate.current_price is not None
+        and candidate.currency == item.currency
+    ]
+    return min(prices) if prices else None
+
+
 def cheapest_buyable(db: Session, item: Item) -> tuple[float | None, Item | None]:
     """The least a figure can actually be bought for, and which listing that is.
 
