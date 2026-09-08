@@ -148,7 +148,7 @@ export function CollectionPage() {
       </header>
 
       {detail && (
-        <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
+        <div className="grid grid-cols-2 gap-3 sm:gap-4 xl:grid-cols-4">
           <Stat
             label="Wishlist total"
             value={money(detail.wishlist_landed_total, detail.currency)}
@@ -261,7 +261,12 @@ export function CollectionPage() {
       ) : shown.length ? (
         <div className="space-y-2">
           {shown.map((entry) => (
-            <Card key={entry.id} hover className="flex items-start gap-4 p-3.5">
+            <Card
+              key={entry.id}
+              hover
+              className="flex flex-col gap-3 p-3.5 sm:flex-row sm:items-start sm:gap-4"
+            >
+              <div className="flex items-start gap-3 sm:contents">
               <button
                 onClick={() => entry.item.id && navigate(`/item/${entry.item.id}`)}
                 className="h-20 w-20 shrink-0 overflow-hidden rounded-lg bg-raised"
@@ -364,13 +369,20 @@ export function CollectionPage() {
                 )}
               </div>
 
-              <div className="flex shrink-0 flex-col gap-1.5">
+              </div>
+
+              {/* Under the content on a phone, beside it from there on. Two
+                  dropdowns and a Remove button took a hundred and ninety of
+                  three hundred and seventy-five pixels, which left the
+                  figure's name - the one thing the row is for - truncated
+                  after fifteen characters. */}
+              <div className="flex shrink-0 gap-1.5 sm:flex-col">
                 <select
                   value={entry.status}
                   onChange={(e) =>
                     update.mutate({ id: entry.id, body: { status: e.target.value } })
                   }
-                  className="field py-1 text-xs"
+                  className="field flex-1 py-1 text-xs sm:flex-none"
                 >
                   {STATUSES.map((s) => (
                     <option key={s.value} value={s.value}>
@@ -383,7 +395,7 @@ export function CollectionPage() {
                   onChange={(e) =>
                     update.mutate({ id: entry.id, body: { priority: Number(e.target.value) } })
                   }
-                  className="field py-1 text-xs"
+                  className="field flex-1 py-1 text-xs sm:flex-none"
                 >
                   {[1, 2, 3].map((value) => (
                     <option key={value} value={value}>
@@ -393,7 +405,9 @@ export function CollectionPage() {
                 </select>
                 <button
                   onClick={() => remove.mutate(entry.id)}
-                  className={clsx('btn-quiet justify-center py-1 text-xs text-danger')}
+                  className={clsx(
+                    'btn-quiet shrink-0 justify-center py-1 text-xs text-danger',
+                  )}
                 >
                   <Icon name="trash" className="h-3 w-3" />
                   Remove

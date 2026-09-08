@@ -242,9 +242,20 @@
     text-wrap: balance;
   }
 
+  /* Two figures across on a phone, matching the search grid beside it.
+     At a 216px minimum only one column fits a 375px screen, so a rail
+     showed one card per row at roughly 950px each - a whole screen of
+     scrolling for a single figure, and a different density from the
+     grid directly above it. */
   .grid-cards {
-    @apply grid gap-4;
-    grid-template-columns: repeat(auto-fill, minmax(min(100%, 216px), 1fr));
+    @apply grid gap-3 sm:gap-4;
+    grid-template-columns: repeat(auto-fill, minmax(min(100%, 150px), 1fr));
+  }
+
+  @media (min-width: 640px) {
+    .grid-cards {
+      grid-template-columns: repeat(auto-fill, minmax(min(100%, 216px), 1fr));
+    }
   }
 
   .hero-wash {

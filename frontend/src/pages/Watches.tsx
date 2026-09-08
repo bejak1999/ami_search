@@ -50,7 +50,7 @@ function WatchRow({
 
   return (
     <Card className={clsx('overflow-hidden', !watch.enabled && 'opacity-60')}>
-      <div className="flex flex-wrap items-start gap-4 p-4">
+      <div className="flex flex-col gap-3 p-4 sm:flex-row sm:flex-wrap sm:items-start sm:gap-4">
         <div className="min-w-0 flex-1">
           <div className="flex flex-wrap items-center gap-2">
             <Badge tone={watch.kind === 'item' ? 'info' : 'accent'}>
@@ -68,13 +68,13 @@ function WatchRow({
             )}
           </div>
 
-          <h3 className="mt-1.5 truncate text-[15px] font-semibold">
+          <h3 className="mt-1.5 line-clamp-2 text-[15px] font-semibold sm:truncate">
             {watch.label || watch.query || watch.item_code}
           </h3>
 
           <p className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-muted">
             {watch.target_price !== null && (
-              <span className="inline-flex items-center gap-1">
+              <span className="inline-flex items-center gap-1 whitespace-nowrap">
                 <Icon name="yen" className="h-3 w-3" />
                 Target {money(watch.target_price, watch.target_currency)}
                 <span className="text-faint">
@@ -82,16 +82,16 @@ function WatchRow({
                 </span>
               </span>
             )}
-            <span className="inline-flex items-center gap-1">
+            <span className="inline-flex items-center gap-1 whitespace-nowrap">
               <Icon name="clock" className="h-3 w-3" />
               Every {duration(watch.effective_interval_seconds)}
               {watch.adaptive && <span className="text-faint">· adaptive</span>}
             </span>
-            <span className="inline-flex items-center gap-1">
+            <span className="inline-flex items-center gap-1 whitespace-nowrap">
               <Icon name="bell" className="h-3 w-3" />
               {watch.alert_count} alerts
             </span>
-            <span className="inline-flex items-center gap-1">
+            <span className="inline-flex items-center gap-1 whitespace-nowrap">
               <Icon name="box" className="h-3 w-3" />
               {watch.match_count} tracked
             </span>
@@ -111,7 +111,9 @@ function WatchRow({
           )}
         </div>
 
-        <div className="flex shrink-0 gap-1.5">
+        {/* A row of its own on a phone, so the four of them stop competing
+            with the watch's name for a three-hundred-pixel line. */}
+        <div className="flex shrink-0 gap-1.5 border-t border-line pt-3 sm:border-0 sm:pt-0">
           <button onClick={runNow} disabled={busy} className="btn-ghost px-2.5" title="Check now">
             {busy ? <Spinner /> : <Icon name="play" />}
           </button>

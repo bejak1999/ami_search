@@ -259,17 +259,25 @@ export function Stat({
   tone?: 'neutral' | 'accent' | 'positive' | 'warning' | 'danger'
 }) {
   return (
-    <Card className="relative overflow-hidden p-4">
-      <div className="flex items-start justify-between gap-3">
+    // Two of these sit side by side on a phone, so the compact form is the
+    // base and the roomy one is what wider screens opt into. Four of them
+    // stacked full width took a thousand pixels to say four numbers, which
+    // is the whole first screen before anything can be pressed.
+    <Card className="relative overflow-hidden p-3 sm:p-4">
+      <div className="flex items-start justify-between gap-2 sm:gap-3">
         <div className="min-w-0">
-          <p className="text-xs font-medium uppercase tracking-wide text-muted">{label}</p>
-          <p className="mt-1.5 truncate text-2xl font-semibold tracking-tight">{value}</p>
-          {sub && <p className="mt-1 truncate text-xs text-faint">{sub}</p>}
+          <p className="text-[11px] font-medium uppercase tracking-wide text-muted sm:text-xs">
+            {label}
+          </p>
+          <p className="mt-1 truncate text-xl font-semibold tracking-tight sm:mt-1.5 sm:text-2xl">
+            {value}
+          </p>
+          {sub && <p className="mt-1 text-[11px] leading-snug text-faint sm:truncate sm:text-xs">{sub}</p>}
         </div>
         {icon && (
           <span
             className={clsx(
-              'grid h-9 w-9 shrink-0 place-items-center rounded-xl',
+              'grid h-8 w-8 shrink-0 place-items-center rounded-xl sm:h-9 sm:w-9',
               tone === 'neutral' && 'bg-raised text-muted',
               tone === 'accent' && 'bg-accent/15 text-accent',
               tone === 'positive' && 'bg-positive/15 text-positive',

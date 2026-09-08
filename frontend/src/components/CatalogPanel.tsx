@@ -1623,9 +1623,15 @@ function ImageCache() {
             </dd>
           </div>
         )}
-        <div className="flex justify-between gap-3">
-          <dt className="text-muted">Stored in</dt>
-          <dd className="truncate font-mono text-[11px]">{d.path}</dd>
+        {/* truncate needs a bounded box to truncate against. A flex item
+            is sized by its content unless told otherwise, so a long path
+            pushed this row out and the whole page picked up a horizontal
+            scrollbar - 970px of it on a 375px screen. */}
+        <div className="flex min-w-0 justify-between gap-3">
+          <dt className="shrink-0 text-muted">Stored in</dt>
+          <dd className="min-w-0 truncate font-mono text-[11px]" title={d.path}>
+            {d.path}
+          </dd>
         </div>
       </dl>
 

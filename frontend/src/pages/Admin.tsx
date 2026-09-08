@@ -168,7 +168,7 @@ export function AdminPage() {
         <BuildLine version={status.data?.version} build={status.data?.build} />
       </header>
 
-      <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
+      <div className="grid grid-cols-2 gap-3 sm:gap-4 xl:grid-cols-4">
         <Stat
           label="Scheduler"
           value={scheduler?.running ? 'Running' : 'Stopped'}
