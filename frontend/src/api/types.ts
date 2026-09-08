@@ -487,6 +487,15 @@ export interface MessageResponse<T = any> {
 
 export interface SystemStatus {
   version: string
+  /** Which build this actually is; the version number alone cannot say. */
+  build?: {
+    version: string
+    commit: string
+    short_commit: string
+    built_at: string | null
+    ref: string | null
+    identified: boolean
+  }
   scheduler: Record<string, any>
   providers: ProviderInfo[]
   fx: { base: string; rates: Record<string, number>; source: string | null; age_seconds: number | null; stale: boolean }

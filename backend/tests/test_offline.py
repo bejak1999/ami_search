@@ -7874,6 +7874,105 @@ def test_signing_in_over_plain_http_keeps_you_signed_in() -> None:
     db.close()
 
 
+def test_an_instance_can_say_which_build_it_is() -> None:
+    print("\n== Version, build, and whether a newer one exists ==")
+    from app.config import settings
+    from app.services import updates
+
+    saved = (settings.build_commit, settings.build_time, settings.build_ref,
+             settings.update_check_repo)
+    original_ask = updates._ask_github
+    original_behind = updates._behind_by
+    try:
+        # A local build records no commit. That is the honest answer for one,
+        # and it must not be dressed up as a version.
+        settings.build_commit = ""
+        updates._cached = None
+        here = updates.running()
+        check("a local build says it cannot be identified", here["identified"] is False)
+        result = updates.check(force=True)
+        check("so the check declines to compare", result["status"] == "unknown",
+              result["status"])
+        check("and says why", bool(result.get("reason")), result)
+
+        # A published image carries the commit it was built from.
+        settings.build_commit = "a" * 40
+        settings.build_time = "2026-09-08T10:00:00Z"
+        settings.build_ref = "main"
+        here = updates.running()
+        check("a published build is identified", here["identified"] is True)
+        check("and shows a short commit", here["short_commit"] == "a" * 7,
+              here["short_commit"])
+
+        updates._ask_github = lambda repo, branch: {
+            "commit": "a" * 40, "short_commit": "a" * 7,
+            "committed_at": "2026-09-08T10:00:00Z", "title": "Same build",
+        }
+        updates._cached = None
+        check("matching the newest commit reads as current",
+              updates.check(force=True)["status"] == "current")
+
+        updates._ask_github = lambda repo, branch: {
+            "commit": "b" * 40, "short_commit": "b" * 7,
+            "committed_at": "2026-09-09T10:00:00Z", "title": "Something newer",
+        }
+        updates._behind_by = lambda repo, base, head: 3
+        updates._cached = None
+        result = updates.check(force=True)
+        check("a different one reads as behind", result["status"] == "behind", result)
+        check("with the newest named", result["latest"]["title"] == "Something newer")
+        check("and by how much", result["behind_by"] == 3, result)
+
+        # Everything that can go wrong out there has to come back as "cannot
+        # say". An update check that breaks the page it sits on would be
+        # worse than not having one at all.
+        def explode(*args, **kwargs):
+            raise OSError("no route to host")
+
+        updates._ask_github = lambda repo, branch: None
+        updates._cached = None
+        offline = updates.check(force=True)
+        check("no network is not an error", offline["status"] == "unknown", offline)
+
+        updates._ask_github = lambda repo, branch: {
+            "commit": "b" * 40, "short_commit": "b" * 7, "committed_at": None, "title": "",
+        }
+        updates._behind_by = explode
+        updates._cached = None
+        partial = updates.check(force=True)
+        check("a failure part way through still returns an answer",
+              partial["status"] == "unknown", partial)
+
+        # Turning it off is a supported answer, not a broken one.
+        settings.update_check_repo = ""
+        updates._cached = None
+        check("switching it off says so",
+              updates.check(force=True)["status"] == "disabled")
+
+        # And the answer is cached, so a page that asks on every visit does
+        # not spend the hourly allowance in an afternoon.
+        settings.update_check_repo = "someone/something"
+        calls = {"n": 0}
+
+        def counted(repo, branch):
+            calls["n"] += 1
+            return {"commit": "a" * 40, "short_commit": "a" * 7,
+                    "committed_at": None, "title": ""}
+
+        updates._ask_github = counted
+        updates._cached = None
+        updates.check()
+        updates.check()
+        updates.check()
+        check("three asks make one request", calls["n"] == 1, calls["n"])
+    finally:
+        (settings.build_commit, settings.build_time, settings.build_ref,
+         settings.update_check_repo) = saved
+        updates._ask_github = original_ask
+        updates._behind_by = original_behind
+        updates._cached = None
+
+
 def test_the_sampler_can_actually_spend_its_budget() -> None:
     print("\n== The shelf sampler is not starved by its own arithmetic ==")
     from app.config import settings
@@ -8060,6 +8159,7 @@ def main() -> int:
     test_a_sold_out_figure_does_not_read_as_a_bargain()
     test_two_alerts_in_one_run_do_not_kill_the_run()
     test_signing_in_over_plain_http_keeps_you_signed_in()
+    test_an_instance_can_say_which_build_it_is()
     test_each_channel_takes_the_alerts_it_asked_for()
     test_the_survival_curve_keeps_the_slow_copies_in()
     test_the_bargain_is_only_counted_where_there_was_a_choice()

@@ -22,6 +22,91 @@ const TABS = [
   { value: 'instance', label: 'Instance' },
 ]
 
+/**
+ * Which build is running, and whether a newer one has been published.
+ *
+ * The version number alone could not answer either question: it read 1.0.0
+ * from the first commit onwards, so a deployed fix and an undeployed one
+ * looked exactly the same from here. That cost an evening of hunting a bug
+ * that had already been fixed but never pulled.
+ */
+function BuildLine({ version, build }: { version?: string; build?: any }) {
+  const [checking, setChecking] = useState(false)
+  const check = useQuery({
+    queryKey: ['admin', 'updateCheck'],
+    queryFn: () => api.admin.updateCheck(),
+    // Answered from a cache on the server for an hour, so asking on every
+    // visit costs nothing and the page never waits on GitHub twice.
+    staleTime: 10 * 60_000,
+    retry: false,
+  })
+  const d = check.data?.detail as
+    | {
+        status: 'current' | 'behind' | 'unknown' | 'disabled'
+        reason?: string
+        short_commit?: string
+        built_at?: string | null
+        ref?: string | null
+        behind_by?: number | null
+        latest?: { short_commit: string; committed_at?: string; title?: string }
+      }
+    | undefined
+
+  return (
+    <div className="mt-1 space-y-1">
+      <p className="text-sm text-muted">
+        Version {version ?? '—'}
+        {build?.short_commit && (
+          <>
+            {' · build '}
+            <span className="font-mono text-xs">{build.short_commit}</span>
+          </>
+        )}
+        {build?.ref && build.ref !== 'main' && <> on {build.ref}</>}
+        {build?.built_at && <> · built {relativeTime(build.built_at)}</>}
+        {build && !build.identified && (
+          <span className="text-faint"> · built outside the publish workflow</span>
+        )}
+      </p>
+
+      {d?.status === 'behind' && (
+        <p className="rounded-control border border-warning/40 bg-warning/10 px-3 py-2 text-xs leading-relaxed text-warning">
+          A newer build has been published
+          {typeof d.behind_by === 'number' && d.behind_by > 0 && (
+            <> &mdash; {d.behind_by} commit{d.behind_by === 1 ? '' : 's'} ahead of this one</>
+          )}
+          .{' '}
+          {d.latest?.title && <span className="text-muted">Latest: {d.latest.title}</span>}{' '}
+          <span className="text-muted">
+            Pull the image again to update; your data and settings are untouched.
+          </span>
+        </p>
+      )}
+      {d?.status === 'current' && (
+        <p className="text-xs text-positive">This is the newest published build.</p>
+      )}
+      {d?.status === 'unknown' && (
+        <p className="text-xs text-faint">
+          Cannot tell whether this is current. {d.reason}{' '}
+          <button
+            onClick={() => {
+              setChecking(true)
+              void api.admin
+                .updateCheck(true)
+                .then(() => check.refetch())
+                .finally(() => setChecking(false))
+            }}
+            disabled={checking}
+            className="underline decoration-dotted underline-offset-2 hover:text-ink"
+          >
+            {checking ? 'checking…' : 'try again'}
+          </button>
+        </p>
+      )}
+    </div>
+  )
+}
+
 export function AdminPage() {
   const { user } = useAuth()
   // Remembered, because an administrator who came here to watch the crawler
@@ -79,9 +164,8 @@ export function AdminPage() {
     <div className="space-y-8">
       <header>
         <h1 className="text-2xl font-semibold tracking-tight">Administration</h1>
-        <p className="mt-1 text-sm text-muted">
-          Instance health, upstream shops and accounts. Version {status.data?.version ?? '—'}.
-        </p>
+        <p className="mt-1 text-sm text-muted">Instance health, upstream shops and accounts.</p>
+        <BuildLine version={status.data?.version} build={status.data?.build} />
       </header>
 
       <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">

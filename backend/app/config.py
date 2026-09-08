@@ -22,6 +22,21 @@ class Settings(BaseSettings):
     base_url: str = "http://localhost:8080"
     """Public URL of this instance. Used in notification deep links."""
 
+    # ---- Build identity ---------------------------------------------------
+    #: Which build this is. Baked into the image by the publish workflow, so a
+    #: running instance can say what it is rather than reporting a version
+    #: number that has read 1.0.0 since the first commit. Empty in a build
+    #: made locally, which is the honest answer for one.
+    app_version: str = "1.0.0"
+    """Human-facing release number. The commit below is what identifies a build."""
+    build_commit: str = ""
+    build_time: str = ""
+    build_ref: str = ""
+    #: Where to ask whether a newer build exists. Turned off by setting it
+    #: empty: an instance on a network with no way out should not spend six
+    #: seconds a day discovering that.
+    update_check_repo: str = "bejak1999/ami_search"
+
     # ---- Database ---------------------------------------------------------
     database_url: str = ""
     """Leave empty to use SQLite inside DATA_DIR. Supports postgresql+psycopg://..."""

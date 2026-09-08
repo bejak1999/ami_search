@@ -731,6 +731,10 @@ class ProviderInfo(BaseModel):
 
 class SystemStatus(BaseModel):
     version: str
+    #: Which build this actually is. The version number alone cannot say -
+    #: it read 1.0.0 from the first commit onwards - so a deployed fix and an
+    #: undeployed one looked exactly alike from the screen.
+    build: dict = {}
     scheduler: dict
     providers: list[ProviderInfo]
     fx: dict

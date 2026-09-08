@@ -35,10 +35,22 @@ RUN pip wheel --wheel-dir /wheels -r requirements.txt
 # ---------------------------------------------------------------------------
 FROM python:3.12-slim AS runtime
 
+# Which build this is. Passed in by the workflow; empty in a local build,
+# which is itself the honest answer for one.
+ARG BUILD_COMMIT=""
+ARG BUILD_TIME=""
+ARG BUILD_REF=""
+
 LABEL org.opencontainers.image.title="AmiSearch" \
       org.opencontainers.image.description="Self-hosted price tracking and restock alerts for AmiAmi." \
       org.opencontainers.image.source="https://github.com/bejak1999/ami_search" \
-      org.opencontainers.image.licenses="MIT"
+      org.opencontainers.image.licenses="MIT" \
+      org.opencontainers.image.revision="${BUILD_COMMIT}" \
+      org.opencontainers.image.created="${BUILD_TIME}"
+
+ENV BUILD_COMMIT=${BUILD_COMMIT} \
+    BUILD_TIME=${BUILD_TIME} \
+    BUILD_REF=${BUILD_REF}
 
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \

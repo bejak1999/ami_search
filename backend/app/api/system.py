@@ -44,7 +44,9 @@ from .search import provider_info
 
 router = APIRouter(tags=["system"])
 
-VERSION = "1.0.0"
+#: Read from settings so a release number can be raised without editing code,
+#: and so the value on screen and the value in the image are the same thing.
+VERSION = settings.app_version
 
 
 #: Uploaded archives can be gigabytes, so they are spooled to disk in chunks
@@ -85,7 +87,9 @@ def public_config(db: Session = Depends(get_db)) -> PublicConfig:
 
 @router.get("/health")
 def health() -> dict:
-    return {"status": "ok", "version": VERSION}
+    from ..services import updates
+
+    return {"status": "ok", "version": VERSION, "build": updates.running()}
 
 
 @router.get("/status", response_model=SystemStatus)
@@ -97,8 +101,11 @@ def system_status(
     def count(model) -> int:
         return int(db.execute(select(func.count(model.id))).scalar_one() or 0)
 
+    from ..services import updates
+
     return SystemStatus(
         version=VERSION,
+        build=updates.running(),
         scheduler=engine.status(),
         providers=[provider_info(p) for p in all_providers()],
         fx=fx.snapshot(db),
@@ -448,6 +455,23 @@ def shelf_coverage(
     from ..services import shelfwatch
 
     return MessageResponse(message="ok", detail=shelfwatch.coverage(db, provider))
+
+
+@admin.get("/update-check", response_model=MessageResponse)
+def update_check(
+    force: bool = Query(default=False),
+    _admin: User = Depends(admin_user),
+) -> MessageResponse:
+    """Which build this is, and whether a newer one has been published.
+
+    Cached for an hour and never fails: every way of not knowing comes back
+    as "unknown" with a reason. An update check that breaks the page it sits
+    on would be worse than not having one.
+    """
+    from ..services import updates
+
+    detail = updates.check(force=force)
+    return MessageResponse(message=detail.get("status", "unknown"), detail=detail)
 
 
 @admin.get("/shelf-life/stats", response_model=MessageResponse)

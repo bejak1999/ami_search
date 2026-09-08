@@ -132,6 +132,12 @@ jobs:
           context: .
           platforms: linux/amd64,linux/arm64
           push: true
+          # So a running instance can say which build it is, and notice when
+          # it is no longer the newest one.
+          build-args: |
+            BUILD_COMMIT=${{ github.sha }}
+            BUILD_TIME=${{ github.event.repository.updated_at }}
+            BUILD_REF=${{ github.ref_name }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha

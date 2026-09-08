@@ -272,6 +272,8 @@ export const api = {
     settings: () => get<MessageResponse>('/admin/settings'),
     generateVapid: () => post<MessageResponse>('/admin/vapid/generate'),
     catalog: () => get<MessageResponse>('/admin/catalog'),
+    updateCheck: (force = false) =>
+      get<MessageResponse>(`/admin/update-check${qs({ force })}`),
     shelfLife: () => get<MessageResponse>('/admin/shelf-life'),
     shelfStats: () => get<MessageResponse>('/admin/shelf-life/stats'),
     shelfTier: (tier: string, page = 1) =>
