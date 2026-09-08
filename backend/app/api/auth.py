@@ -43,6 +43,32 @@ def _user_count(db: Session) -> int:
     return int(db.execute(select(func.count(User.id))).scalar_one() or 0)
 
 
+def arrived_securely(request: Request) -> bool:
+    """Whether the browser regards the connection this came in on as secure.
+
+    Read off the request rather than off the configured public URL, because
+    the browser decides by the address bar and not by our settings file. A
+    cookie marked Secure is discarded outright when the page was loaded over
+    plain http, so an instance told its public URL is https but reached over
+    http on the local network signed people in and then threw the cookie
+    away: every following request arrived with no token at all, and the
+    interface reported the session as expired.
+
+    Localhost is why that went unnoticed for so long. Browsers count it as a
+    secure context, so the machine running the server kept the cookie and
+    worked perfectly, while every phone on the same network failed at the
+    first request after signing in.
+
+    The forwarded header is consulted first so a reverse proxy terminating
+    TLS still yields a Secure cookie, whether or not the server was started
+    with proxy headers enabled.
+    """
+    forwarded = request.headers.get("x-forwarded-proto", "").split(",")[0].strip().lower()
+    if forwarded:
+        return forwarded == "https"
+    return request.url.scheme == "https"
+
+
 def _issue(db: Session, user: User, request: Request, response: Response, remember: bool) -> AuthResponse:
     ip, agent = client_fingerprint(request)
     token_id = new_token_id()
@@ -67,7 +93,7 @@ def _issue(db: Session, user: User, request: Request, response: Response, rememb
         max_age=int((expires_at - datetime.now(timezone.utc)).total_seconds()),
         httponly=True,
         samesite="lax",
-        secure=settings.base_url.startswith("https"),
+        secure=arrived_securely(request),
         path="/",
     )
     return AuthResponse(user=UserOut.model_validate(user), token=token, expires_at=expires_at)
@@ -169,7 +195,15 @@ def logout(
         session.revoked = True
         db.commit()
 
-    response.delete_cookie(COOKIE_NAME, path="/")
+    # Matching the attributes it was set with, or the browser keeps a cookie
+    # it considers a different one and the next request signs straight back in.
+    response.delete_cookie(
+        COOKIE_NAME,
+        path="/",
+        samesite="lax",
+        secure=arrived_securely(request),
+        httponly=True,
+    )
     return MessageResponse(message="Signed out")
 
 

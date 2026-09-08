@@ -7758,6 +7758,108 @@ def test_each_channel_takes_the_alerts_it_asked_for() -> None:
     db.close()
 
 
+def test_signing_in_over_plain_http_keeps_you_signed_in() -> None:
+    print("\n== The session cookie follows the connection, not the settings ==")
+    from fastapi.testclient import TestClient
+    from starlette.requests import Request as RawRequest
+
+    from app.api.auth import arrived_securely
+    from app.config import settings
+
+    def arriving(scheme: str, **headers) -> RawRequest:
+        """A request as the server sees it, without a whole app around it."""
+        return RawRequest(
+            {
+                "type": "http",
+                "method": "GET",
+                "path": "/",
+                "scheme": scheme,
+                "query_string": b"",
+                "server": ("192.168.1.50", 8080),
+                "headers": [
+                    (key.replace("_", "-").encode(), value.encode())
+                    for key, value in headers.items()
+                ],
+            }
+        )
+
+    # A cookie marked Secure is discarded by the browser when the page came
+    # over plain http. The flag used to be decided by BASE_URL, so an
+    # instance told its public address is https but reached over http on the
+    # local network signed people in and then threw the cookie away - every
+    # request after that arrived with no token, and the interface said the
+    # session had expired. On the machine running the server it worked, and
+    # only there: browsers count localhost as a secure context.
+    check("plain http gets a cookie the browser will keep",
+          arrived_securely(arriving("http")) is False)
+    check("https still gets a Secure one",
+          arrived_securely(arriving("https")) is True)
+
+    # A reverse proxy terminating TLS says so in a header, and that has to be
+    # honoured whether or not the server was started with proxy headers on.
+    check("a proxy's forwarded scheme wins",
+          arrived_securely(arriving("http", x_forwarded_proto="https")) is True)
+    check("and only the first hop of it counts",
+          arrived_securely(arriving("http", x_forwarded_proto="https, http")) is True)
+    check("a proxy speaking plain http likewise",
+          arrived_securely(arriving("https", x_forwarded_proto="http")) is False)
+
+    # The setting that used to decide this now has no say in it.
+    original = settings.base_url
+    try:
+        settings.base_url = "https://amisearch.example.com"
+        check(
+            "an https public URL does not mark an http connection secure",
+            arrived_securely(arriving("http")) is False,
+        )
+    finally:
+        settings.base_url = original
+
+    # And end to end: sign in over http and the cookie comes back usable.
+    from app.db import SessionLocal, init_db
+    from app.main import app as real_app
+    from app.models import AuthSession, User
+    from app.security import hash_password
+
+    init_db()
+    db = SessionLocal()
+    db.query(AuthSession).delete()
+    db.query(User).filter(User.username == "phone").delete()
+    db.commit()
+    db.add(User(username="phone", email="phone@example.com",
+                password_hash=hash_password("a-long-enough-password")))
+    db.commit()
+    db.close()
+
+    # Configured with an https public address, as an instance whose alerts
+    # carry deep links has to be, and reached over http from a phone on the
+    # local network. This is the combination that failed.
+    phone = TestClient(real_app, base_url="http://192.168.1.50:8080")
+    settings.base_url = "https://amisearch.example.com"
+    try:
+        signed_in = phone.post(
+            "/api/auth/login",
+            json={"identifier": "phone", "password": "a-long-enough-password"},
+        )
+        me = phone.get("/api/auth/me")
+    finally:
+        settings.base_url = original
+
+    check("signing in works", signed_in.status_code == 200, signed_in.status_code)
+    check("and the cookie is not marked Secure",
+          "secure" not in signed_in.headers.get("set-cookie", "").lower(),
+          signed_in.headers.get("set-cookie"))
+
+    check("so the next request is still signed in", me.status_code == 200, me.status_code)
+    check("as the right person", me.json().get("username") == "phone", me.json())
+
+    db = SessionLocal()
+    db.query(AuthSession).delete()
+    db.query(User).filter(User.username == "phone").delete()
+    db.commit()
+    db.close()
+
+
 def test_the_sampler_can_actually_spend_its_budget() -> None:
     print("\n== The shelf sampler is not starved by its own arithmetic ==")
     from app.config import settings
@@ -7943,6 +8045,7 @@ def main() -> int:
     test_a_wishlisted_figure_falling_sharply_is_reported()
     test_a_sold_out_figure_does_not_read_as_a_bargain()
     test_two_alerts_in_one_run_do_not_kill_the_run()
+    test_signing_in_over_plain_http_keeps_you_signed_in()
     test_each_channel_takes_the_alerts_it_asked_for()
     test_the_survival_curve_keeps_the_slow_copies_in()
     test_the_bargain_is_only_counted_where_there_was_a_choice()
