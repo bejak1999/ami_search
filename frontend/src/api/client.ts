@@ -58,7 +58,15 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
     ...init,
   })
 
-  if (response.status === 401) {
+  // Two entirely different failures answer with 401, and this used to give
+  // them the same sentence. Submitting credentials that are wrong is not a
+  // session ending - there was no session - so saying "your session expired"
+  // there sends someone hunting a cookie problem that is not happening,
+  // which is exactly what it did. The server already says which it is; the
+  // only thing needed is to stop overwriting it.
+  const submittingCredentials =
+    path.startsWith('/auth/login') || path.startsWith('/auth/register')
+  if (response.status === 401 && !submittingCredentials) {
     onUnauthorized?.()
     throw new ApiError(401, 'Your session expired. Please sign in again.')
   }

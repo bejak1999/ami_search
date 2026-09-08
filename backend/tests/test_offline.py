@@ -7845,6 +7845,20 @@ def test_signing_in_over_plain_http_keeps_you_signed_in() -> None:
     finally:
         settings.base_url = original
 
+    # Wrong credentials and a missing session are the only two things that
+    # answer 401 here, and the interface used to give them the same sentence.
+    # Somebody whose password was simply being typed wrong was told their
+    # session had expired, which sends them hunting a cookie problem that is
+    # not happening - and there is no way to tell the two apart from the
+    # message, which is what made this so hard to place.
+    wrong = phone.post(
+        "/api/auth/login",
+        json={"identifier": "phone", "password": "not-the-right-password"},
+    )
+    check("a wrong password is refused", wrong.status_code == 401, wrong.status_code)
+    check("and the server says why",
+          wrong.json().get("detail") == "Wrong username or password", wrong.json())
+
     check("signing in works", signed_in.status_code == 200, signed_in.status_code)
     check("and the cookie is not marked Secure",
           "secure" not in signed_in.headers.get("set-cookie", "").lower(),
