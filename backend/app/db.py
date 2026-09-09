@@ -95,6 +95,9 @@ def init_db() -> None:
     refiled = reclassify_gallery_photos()
     if refiled:
         log.info("Re-filed %s cached photo(s) as gallery shots", refiled)
+    dated = backfill_became_buyable()
+    if dated:
+        log.info("Dated when %s saved figure(s) last became buyable", dated)
     stranded = close_stranded_listings()
     if stranded:
         log.info(
@@ -278,6 +281,62 @@ def reclassify_gallery_photos() -> int:
             )
         except Exception:  # pragma: no cover - table may not exist yet
             return 0
+
+
+def backfill_became_buyable() -> int:
+    """Date when saved figures last became buyable, from the price history.
+
+    The column is written going forward, so without this a wishlist sorted by
+    "what turned up recently" would be empty on the day it arrives and fill
+    in only as things happen to restock. The price history already holds the
+    answer: points are written when something changes, so the most recent one
+    that says "in stock" after one that says "out of stock" is the moment.
+
+    Only figures somebody actually saved. Doing it for the whole catalogue
+    would read millions of rows at startup to date items nothing sorts by,
+    and a wishlist is the only place this is asked.
+    """
+    from . import models
+
+    filled = 0
+    with session_scope() as db:
+        try:
+            wanted = [
+                row
+                for row in db.query(models.Item)
+                .join(models.CollectionEntry, models.CollectionEntry.item_id == models.Item.id)
+                .filter(models.Item.became_buyable_at.is_(None))
+                .distinct()
+                .all()
+            ]
+        except Exception:  # pragma: no cover - the column may predate this
+            return 0
+
+        for item in wanted:
+            points = (
+                db.query(models.PricePoint.recorded_at, models.PricePoint.in_stock)
+                .filter(
+                    models.PricePoint.item_id == item.id,
+                    models.PricePoint.listing_id.is_(None),
+                )
+                .order_by(models.PricePoint.recorded_at.asc())
+                .all()
+            )
+            when = None
+            was_in_stock = None
+            for recorded_at, in_stock in points:
+                if in_stock and was_in_stock is False:
+                    when = recorded_at
+                was_in_stock = bool(in_stock)
+            # Never seen to change hands: if it is buyable now it has been for
+            # as long as we have known it, which is the honest answer and
+            # sorts it below anything that actually turned up recently.
+            if when is None and item.in_stock and not item.order_closed:
+                when = item.first_seen_at
+            if when is not None:
+                item.became_buyable_at = when
+                filled += 1
+    return filled
 
 
 def ease_quiet_slices() -> int:

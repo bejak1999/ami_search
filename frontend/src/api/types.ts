@@ -101,6 +101,8 @@ export interface Item {
   highest_price: number | null
   average_price: number | null
   first_seen_at: string | null
+  /** When this last became buyable — a restock, or a used copy appearing. */
+  became_buyable_at: string | null
   last_seen_at: string | null
   tracked: boolean
   watch_count: number
@@ -125,6 +127,7 @@ export interface Item {
     price: number | null
     currency: string
     in_stock: boolean
+    became_buyable_at?: string | null
   } | null
   tags: TagRef[]
 }
@@ -360,7 +363,7 @@ export interface DashboardStats {
   collection_value: number | null
   collection_currency: string
   next_check_at: string | null
-  cheapest_wishlist: Item[]
+  wishlist_in_stock: Item[]
   recent_alerts: Alert[]
   price_drops_7d: number
 }

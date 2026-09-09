@@ -263,6 +263,9 @@ class ItemOut(ItemBase):
     highest_price: float | None = None
     average_price: float | None = None
     first_seen_at: datetime | None = None
+    #: When this last became something you could buy - a restock, or a used
+    #: copy appearing for the first time. What "recently turned up" sorts by.
+    became_buyable_at: datetime | None = None
     last_seen_at: datetime | None = None
     tracked: bool = False
     watch_count: int = 0
@@ -711,7 +714,7 @@ class DashboardStats(BaseModel):
     collection_value: float | None = None
     collection_currency: str = "EUR"
     next_check_at: datetime | None = None
-    cheapest_wishlist: list[ItemOut] = []
+    wishlist_in_stock: list[ItemOut] = []
     recent_alerts: list[AlertOut] = []
     price_drops_7d: int = 0
 

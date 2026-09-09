@@ -33,11 +33,32 @@ _lock = threading.Lock()
 _cached: tuple[float, dict] | None = None
 
 
+def version_label() -> str:
+    """The version to show, which is the day the build was made.
+
+    A number somebody has to remember to raise is a number that stops being
+    raised, and this one read 1.0.0 from the first commit to the hundredth.
+    The build date cannot go stale by neglect and answers the question the
+    number was there for: how old is what I am running.
+
+    A build made outside the workflow has no date and says so instead.
+    """
+    stamp = (settings.build_time or "").strip()
+    if stamp:
+        try:
+            when = datetime.fromisoformat(stamp.replace("Z", "+00:00"))
+        except ValueError:
+            pass
+        else:
+            return when.strftime("%Y.%m.%d")
+    return settings.app_version
+
+
 def running() -> dict:
     """What this instance is, as far as it was told at build time."""
     commit = (settings.build_commit or "").strip()
     return {
-        "version": settings.app_version,
+        "version": version_label(),
         "commit": commit,
         "short_commit": commit[:7] if commit else "",
         "built_at": (settings.build_time or "").strip() or None,

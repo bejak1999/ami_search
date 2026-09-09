@@ -283,6 +283,14 @@ class Item(Base):
     provider: Mapped[str] = mapped_column(String(32), index=True, default="amiami")
     # Shop product code, for example FIGURE-153570-R
     code: Mapped[str] = mapped_column(String(64), index=True)
+    #: When this listing last became something you could actually buy.
+    #:
+    #: Not only a restock: a used listing appearing for the first time counts
+    #: too, because from the wishlist's point of view those are the same
+    #: event - the figure went from "cannot have it" to "can". Sorting by it
+    #: is what turns a long wishlist into a short answer to "what turned up".
+    became_buyable_at: Mapped[datetime | None] = mapped_column(UTCDateTime, index=True)
+
     #: The same figure sold new and pre-owned is two listings under two codes
     #: that differ only by an -R suffix. This is the shared half, so the two
     #: can be grouped without a join or a stored relationship.

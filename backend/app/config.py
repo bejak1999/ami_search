@@ -27,8 +27,9 @@ class Settings(BaseSettings):
     #: running instance can say what it is rather than reporting a version
     #: number that has read 1.0.0 since the first commit. Empty in a build
     #: made locally, which is the honest answer for one.
-    app_version: str = "1.0.0"
-    """Human-facing release number. The commit below is what identifies a build."""
+    app_version: str = "dev"
+    """What to call a build with no date of its own - one made locally. A
+    published image shows the day it was built instead; see updates.py."""
     build_commit: str = ""
     build_time: str = ""
     build_ref: str = ""

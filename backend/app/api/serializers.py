@@ -238,6 +238,7 @@ def item_out(
         average_price=item.average_price,
         first_seen_at=item.first_seen_at,
         last_seen_at=item.last_seen_at,
+        became_buyable_at=item.became_buyable_at,
     )
 
     payload.mfc_id = item.mfc_id
@@ -260,6 +261,10 @@ def item_out(
                 "price": other.current_price,
                 "currency": other.currency,
                 "in_stock": other.in_stock,
+                # A wishlist saved from the new listing turns up because the
+                # used one appeared, so the date that matters is often this
+                # one rather than the saved item's.
+                "became_buyable_at": other.became_buyable_at,
             }
 
     if with_context and user is not None:

@@ -2,7 +2,7 @@ import { useMemo, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { api } from '@/api/client'
-import type { CollectionStatus } from '@/api/types'
+import type { CollectionEntry, CollectionStatus } from '@/api/types'
 import { Icon } from '@/components/Icon'
 import { Badge, Card, EmptyState, Field, Modal, SegmentedControl, Skeleton, Spinner, Stat, Toggle } from '@/components/ui'
 import { ItemCard } from '@/components/ItemCard'
@@ -19,6 +19,54 @@ const STATUSES: { value: CollectionStatus; label: string }[] = [
 ]
 
 const PRIORITY_LABEL: Record<number, string> = { 1: 'Grail', 2: 'Normal', 3: 'Maybe' }
+
+type SortKey = 'turned_up' | 'priority' | 'price' | 'name' | 'added'
+
+const SORTS: { value: SortKey; label: string }[] = [
+  { value: 'turned_up', label: 'Just in' },
+  { value: 'priority', label: 'Priority' },
+  { value: 'price', label: 'Price' },
+  { value: 'name', label: 'Name' },
+  { value: 'added', label: 'Added' },
+]
+
+/** When a figure last became buyable, as a number, or nothing at all. */
+function turnedUp(entry: CollectionEntry): number | null {
+  const stamps = [entry.item.became_buyable_at, entry.item.counterpart?.became_buyable_at]
+    .filter(Boolean)
+    .map((value) => Date.parse(value as string))
+    .filter((value) => !Number.isNaN(value))
+  return stamps.length ? Math.max(...stamps) : null
+}
+
+function comparator(sort: SortKey) {
+  return (a: CollectionEntry, b: CollectionEntry): number => {
+    switch (sort) {
+      case 'turned_up': {
+        // Newest arrival first, and anything we have no date for last -
+        // an entry that has sat unavailable for months is not news, and
+        // pretending it arrived at the epoch would put it at the top.
+        const left = turnedUp(a)
+        const right = turnedUp(b)
+        if (left === null && right === null) return a.item.name.localeCompare(b.item.name)
+        if (left === null) return 1
+        if (right === null) return -1
+        return right - left
+      }
+      case 'price':
+        return (a.item.price ?? Infinity) - (b.item.price ?? Infinity)
+      case 'name':
+        return a.item.name.localeCompare(b.item.name)
+      case 'added':
+        return Date.parse(b.created_at) - Date.parse(a.created_at)
+      default:
+        return (
+          a.priority - b.priority ||
+          Date.parse(b.updated_at) - Date.parse(a.updated_at)
+        )
+    }
+  }
+}
 
 export function CollectionPage() {
   const navigate = useNavigate()
@@ -38,6 +86,25 @@ export function CollectionPage() {
     }
   })
   const [inStockOnly, setInStockOnly] = useState(false)
+  // Remembered per browser, like the list/grid choice: whichever way someone
+  // reads their wishlist, they read it that way every time.
+  const [sort, setSort] = useState<SortKey>(() => {
+    try {
+      const saved = localStorage.getItem('collection:sort')
+      return (SORTS.some((s) => s.value === saved) ? saved : 'priority') as SortKey
+    } catch {
+      return 'priority'
+    }
+  })
+
+  function chooseSort(next: SortKey) {
+    setSort(next)
+    try {
+      localStorage.setItem('collection:sort', next)
+    } catch {
+      // A private window refuses this. The choice still applies to this visit.
+    }
+  }
 
   /**
    * The last check is stored against each entry and comes back with it, so
@@ -83,9 +150,11 @@ export function CollectionPage() {
   // which is the one day it mattered.
   const shown = useMemo(() => {
     const all = entries.data ?? []
-    if (!inStockOnly) return all
-    return all.filter((entry) => entry.item.in_stock || entry.item.counterpart?.in_stock)
-  }, [entries.data, inStockOnly])
+    const kept = inStockOnly
+      ? all.filter((entry) => entry.item.in_stock || entry.item.counterpart?.in_stock)
+      : all
+    return [...kept].sort(comparator(sort))
+  }, [entries.data, inStockOnly, sort])
 
   // Counted from what is on screen, so the line agrees with what is under it.
   const moved = useMemo(() => {
@@ -187,6 +256,22 @@ export function CollectionPage() {
             onChange={setInStockOnly}
             label="In stock only"
           />
+          {/* A long wishlist is unreadable in any fixed order. "Just in"
+              leads with whatever last became buyable - a restock, or a used
+              copy appearing - which is the only thing on the list that has
+              changed since you last looked. */}
+          <select
+            value={sort}
+            onChange={(e) => chooseSort(e.target.value as SortKey)}
+            className="field w-auto py-1 text-xs"
+            title="How to order this list"
+          >
+            {SORTS.map((option) => (
+              <option key={option.value} value={option.value}>
+                Sort: {option.label}
+              </option>
+            ))}
+          </select>
           {/* Only alongside the in-stock filter, because it is only worth
               asking about something that can be bought — and it checks
               exactly what is on screen, so the wait is predictable. */}

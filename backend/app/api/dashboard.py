@@ -115,7 +115,7 @@ def dashboard(
         collection_value=round(owned_value, 2) if owned_value else None,
         collection_currency=display,
         next_check_at=next_check_at,
-        cheapest_wishlist=[
+        wishlist_in_stock=[
             item_out(db, item, user=user, profile=profile, with_context=True) for item in cheapest
         ],
         recent_alerts=[alert_out(db, a) for a in recent],

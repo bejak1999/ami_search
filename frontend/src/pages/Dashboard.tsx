@@ -177,7 +177,7 @@ export function DashboardPage() {
           <SectionTitle
             title="Wishlist, in stock now"
             icon="heart"
-            subtitle="Cheapest first"
+            subtitle="Most recently available first"
             action={
               <Link to="/collection" className="btn-quiet text-sm">
                 Collection
@@ -191,9 +191,9 @@ export function DashboardPage() {
                 <ItemCardSkeleton key={index} />
               ))}
             </div>
-          ) : data?.cheapest_wishlist.length ? (
+          ) : data?.wishlist_in_stock.length ? (
             <div className="grid-cards">
-              {data.cheapest_wishlist.map((item) => (
+              {data.wishlist_in_stock.map((item) => (
                 <ItemCard
                   key={item.id ?? item.code}
                   item={item}

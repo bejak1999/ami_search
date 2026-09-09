@@ -7973,6 +7973,152 @@ def test_an_instance_can_say_which_build_it_is() -> None:
         updates._cached = None
 
 
+def test_a_wishlist_leads_with_what_just_turned_up() -> None:
+    print("\n== When a figure last became buyable, and sorting by it ==")
+    from app.db import SessionLocal, backfill_became_buyable, init_db
+    from app.models import (
+        CollectionEntry, CollectionStatus, Item, PricePoint, User, UserRole,
+    )
+    from app.providers.base import NormalizedItem
+    from app.services import catalog
+
+    init_db()
+    db = SessionLocal()
+    for model in (CollectionEntry, PricePoint, Item):
+        db.query(model).delete()
+    db.query(User).filter(User.username == "justin").delete()
+    db.commit()
+
+    user = User(username="justin", email="j@example.com", password_hash="x",
+                role=UserRole.user)
+    db.add(user)
+    db.commit()
+
+    def listing(code, price, in_stock, closed=False, condition="new") -> NormalizedItem:
+        return NormalizedItem(
+            provider="amiami", code=code, name=f"Figure {code}",
+            url=f"https://www.amiami.com/eng/detail/?gcode={code}",
+            currency="JPY", price=price, condition=condition,
+            in_stock=in_stock, order_closed=closed,
+        )
+
+    # Sold out when it was saved, so it has never been buyable.
+    item, _ = catalog.upsert_item(db, listing("TU-1", 12_000, False, closed=True))
+    db.commit()
+    check("a figure nobody can buy has no date", item.became_buyable_at is None)
+
+    # It comes back. That is the moment.
+    catalog.upsert_item(db, listing("TU-1", 11_500, True))
+    db.commit()
+    db.expire_all()
+    item = db.query(Item).filter_by(code="TU-1").one()
+    first = item.became_buyable_at
+    check("becoming buyable is recorded", first is not None, first)
+
+    # A price change while it stays buyable is not a new arrival: sorting by
+    # this must not shuffle on every markdown.
+    catalog.upsert_item(db, listing("TU-1", 9_900, True))
+    db.commit()
+    db.expire_all()
+    check("staying buyable does not re-date it",
+          db.query(Item).filter_by(code="TU-1").one().became_buyable_at == first)
+
+    # A used copy appearing for the first time counts too - to a wishlist
+    # that is the same event, the figure went from "cannot have it" to "can".
+    used, _ = catalog.upsert_item(
+        db, listing("TU-1-R", 7_800, True, condition="preowned")
+    )
+    db.commit()
+    check("a first used listing is dated as well", used.became_buyable_at is not None)
+
+    # --- the strip on the dashboard -------------------------------------
+    now = datetime.now(timezone.utc)
+    for n, (code, price, ago) in enumerate(
+        [("W-1", 4_000, 30), ("W-2", 30_000, 1), ("W-3", 9_000, 10)]
+    ):
+        row, _ = catalog.upsert_item(db, listing(code, price, True))
+        row.became_buyable_at = now - timedelta(days=ago)
+        db.flush()
+        db.add(CollectionEntry(user_id=user.id, item_id=row.id,
+                               status=CollectionStatus.wishlist))
+    db.commit()
+
+    # Cheapest-first sounds useful and is not: the cheap end of a wishlist
+    # barely moves, so the same few figures sat there for weeks while the
+    # copy that appeared this morning was below the fold.
+    order = [i.code for i in catalog.wishlist_available(db, user.id, limit=10)]
+    check("the newest arrival leads", order[:3] == ["W-2", "W-3", "W-1"], order)
+
+    # A figure with no date at all goes last rather than to the top, which is
+    # where treating "unknown" as the epoch would have put it.
+    undated, _ = catalog.upsert_item(db, listing("W-4", 1_000, True))
+    undated.became_buyable_at = None
+    db.flush()
+    db.add(CollectionEntry(user_id=user.id, item_id=undated.id,
+                           status=CollectionStatus.wishlist))
+    db.commit()
+    order = [i.code for i in catalog.wishlist_available(db, user.id, limit=10)]
+    check("undated goes last despite being cheapest", order[-1] == "W-4", order)
+
+    # --- dating what was already there ----------------------------------
+    # The column is written going forward, so a wishlist sorted this way
+    # would be empty on the day it arrives. The price history knows.
+    saved = db.query(Item).filter_by(code="W-1").one()
+    saved.became_buyable_at = None
+    for days, in_stock in ((40, True), (30, False), (12, True), (2, True)):
+        db.add(PricePoint(item_id=saved.id, price=4_000, currency="JPY",
+                          in_stock=in_stock,
+                          recorded_at=now - timedelta(days=days)))
+    db.commit()
+
+    filled = backfill_became_buyable()
+    db.expire_all()
+    saved = db.query(Item).filter_by(code="W-1").one()
+    check("the history is read back", filled >= 1, filled)
+    dated = saved.became_buyable_at
+    if dated is not None and dated.tzinfo is None:
+        dated = dated.replace(tzinfo=timezone.utc)
+    check(
+        "and it finds the return, not the first sighting",
+        dated is not None and abs((dated - (now - timedelta(days=12))).total_seconds()) < 60,
+        dated,
+    )
+
+    for model in (CollectionEntry, PricePoint, Item):
+        db.query(model).delete()
+    db.query(User).filter(User.username == "justin").delete()
+    db.commit()
+    db.close()
+
+
+def test_the_version_is_the_day_it_was_built() -> None:
+    print("\n== The version number cannot go stale by neglect ==")
+    from app.config import settings
+    from app.services import updates
+
+    saved = (settings.build_time, settings.app_version)
+    try:
+        settings.build_time = "2026-09-09T21:14:07Z"
+        check("a published build is dated", updates.version_label() == "2026.09.09",
+              updates.version_label())
+
+        settings.build_time = "2026-09-09T21:14:07+00:00"
+        check("the offset form reads the same", updates.version_label() == "2026.09.09")
+
+        # A build made outside the workflow has no date, and inventing one
+        # would be the same lie as the 1.0.0 that never moved.
+        settings.build_time = ""
+        settings.app_version = "dev"
+        check("a local build says so", updates.version_label() == "dev",
+              updates.version_label())
+
+        settings.build_time = "not a date"
+        check("and nonsense does not crash it", updates.version_label() == "dev",
+              updates.version_label())
+    finally:
+        settings.build_time, settings.app_version = saved
+
+
 def test_the_sampler_can_actually_spend_its_budget() -> None:
     print("\n== The shelf sampler is not starved by its own arithmetic ==")
     from app.config import settings
@@ -8160,6 +8306,8 @@ def main() -> int:
     test_two_alerts_in_one_run_do_not_kill_the_run()
     test_signing_in_over_plain_http_keeps_you_signed_in()
     test_an_instance_can_say_which_build_it_is()
+    test_a_wishlist_leads_with_what_just_turned_up()
+    test_the_version_is_the_day_it_was_built()
     test_each_channel_takes_the_alerts_it_asked_for()
     test_the_survival_curve_keeps_the_slow_copies_in()
     test_the_bargain_is_only_counted_where_there_was_a_choice()

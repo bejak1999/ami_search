@@ -191,7 +191,19 @@ def wishlist_available(db: Session, user_id: int, limit: int = 6) -> list[Item]:
         if held is None or (item.current_price or 0) < (held.current_price or 0):
             best[key] = item
 
-    return sorted(best.values(), key=lambda i: i.current_price or 0)[:limit]
+    # Most recently become buyable first. Cheapest-first sounds useful and is
+    # not: the cheap end of a wishlist barely moves, so the same few figures
+    # sat there for weeks while the copy that appeared this morning - the only
+    # thing on the strip worth acting on - was somewhere below the fold.
+    def turned_up(item: Item) -> tuple:
+        when = item.became_buyable_at
+        if when is not None and when.tzinfo is None:
+            when = when.replace(tzinfo=timezone.utc)
+        # Undated last, and cheapest among those, so an instance with no
+        # history yet still shows something sensible.
+        return (when is None, -(when.timestamp() if when else 0), item.current_price or 0)
+
+    return sorted(best.values(), key=turned_up)[:limit]
 
 
 def get_item(db: Session, provider: str, code: str) -> Item | None:
@@ -215,6 +227,7 @@ def upsert_item(db: Session, normalized: NormalizedItem, commit: bool = True) ->
 
     previous_price = item.current_price
     previous_stock = item.in_stock
+    previous_buyable = bool(item.in_stock) and not item.order_closed
     previous_max = item.price_max
 
     item.name = normalized.name or item.name
@@ -304,6 +317,14 @@ def upsert_item(db: Session, normalized: NormalizedItem, commit: bool = True) ->
     if item.id is None:
         db.flush()
     image_cache.register(db, image_cache.urls_for_item(item), item_id=item.id)
+
+    # The moment a figure becomes buyable, whether that is a restock or a
+    # used copy appearing for the first time. To a wishlist those are one
+    # event: it went from "cannot have it" to "can", and that is the thing
+    # worth sorting by when the list is long.
+    now_buyable = bool(normalized.in_stock) and not normalized.order_closed
+    if now_buyable and not previous_buyable:
+        item.became_buyable_at = utcnow()
 
     price_moved = normalized.price is not None and normalized.price != previous_price
     stock_moved = normalized.in_stock != previous_stock

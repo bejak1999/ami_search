@@ -113,6 +113,13 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Stamp the build
+        id: stamp
+        # The moment the image is made, which is what the version shown in
+        # the panel is derived from. The repository's own updated_at is not
+        # that - it moves for a renamed description.
+        run: echo "at=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
+
       - name: Derive tags
         id: meta
         uses: docker/metadata-action@v5
@@ -136,7 +143,7 @@ jobs:
           # it is no longer the newest one.
           build-args: |
             BUILD_COMMIT=${{ github.sha }}
-            BUILD_TIME=${{ github.event.repository.updated_at }}
+            BUILD_TIME=${{ steps.stamp.outputs.at }}
             BUILD_REF=${{ github.ref_name }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}

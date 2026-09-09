@@ -44,8 +44,14 @@ from .search import provider_info
 
 router = APIRouter(tags=["system"])
 
-#: Read from settings so a release number can be raised without editing code,
-#: and so the value on screen and the value in the image are the same thing.
+#: What this build calls itself. The day it was made for a published image,
+#: "dev" for one built locally - see services.updates.version_label.
+def _version() -> str:
+    from .. services.updates import version_label
+
+    return version_label()
+
+
 VERSION = settings.app_version
 
 
@@ -89,7 +95,7 @@ def public_config(db: Session = Depends(get_db)) -> PublicConfig:
 def health() -> dict:
     from ..services import updates
 
-    return {"status": "ok", "version": VERSION, "build": updates.running()}
+    return {"status": "ok", "version": _version(), "build": updates.running()}
 
 
 @router.get("/status", response_model=SystemStatus)
@@ -104,7 +110,7 @@ def system_status(
     from ..services import updates
 
     return SystemStatus(
-        version=VERSION,
+        version=_version(),
         build=updates.running(),
         scheduler=engine.status(),
         providers=[provider_info(p) for p in all_providers()],
