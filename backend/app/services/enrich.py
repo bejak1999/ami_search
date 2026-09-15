@@ -173,6 +173,16 @@ def enrich_item(db: Session, item: Item, force: bool = False) -> bool:
             if found is not None:
                 apply_mfc_item(db, item, found, matched_by="jan", confidence=1.0)
                 log.info("Linked %s to MFC %s by barcode", item.code, found.id)
+                # Linked, but the entry's page is withheld from signed-out
+                # visitors, so no tags came with it. A bare tick would promise
+                # more than arrived.
+                _result(
+                    item,
+                    True,
+                    "Linked by barcode"
+                    + (" (restricted, no tags)" if item.mfc_restricted else ""),
+                    mfc_id=found.id,
+                )
                 return True
 
         # No barcode, or the barcode search was ambiguous. Fall back to titles.
@@ -187,20 +197,50 @@ def enrich_item(db: Session, item: Item, force: bool = False) -> bool:
             item.mfc_fetched_at = utcnow()
             db.commit()
             log.debug("No confident MFC match for %s (best %.2f)", item.code, best_score)
+            _result(
+                item,
+                False,
+                f"No confident match (best {best_score:.2f} of {MIN_TITLE_CONFIDENCE:.2f} needed)",
+                attempt=item.mfc_attempts,
+                of_attempts=MAX_ATTEMPTS,
+            )
             return False
 
         detail = client.get_item(best.id)
         apply_mfc_item(db, item, detail, matched_by="title", confidence=best_score)
         log.info("Linked %s to MFC %s by title (%.2f)", item.code, detail.id, best_score)
+        _result(
+            item,
+            True,
+            f"Linked by title ({best_score:.2f})"
+            + (" (restricted, no tags)" if item.mfc_restricted else ""),
+            mfc_id=detail.id,
+        )
         return True
 
     except MfcNotFound:
         item.mfc_fetched_at = utcnow()
         db.commit()
+        _result(
+            item,
+            False,
+            "MyFigureCollection has no entry for it",
+            attempt=item.mfc_attempts,
+            of_attempts=MAX_ATTEMPTS,
+        )
         return False
     except MfcError as exc:
         log.warning("MFC enrichment failed for %s: %s", item.code, exc)
         db.commit()
+        # Not the same as "no match": nothing was learned about this figure,
+        # and it will be tried again until its attempts run out.
+        _result(
+            item,
+            False,
+            f"MyFigureCollection could not be read: {exc}"[:120],
+            attempt=item.mfc_attempts,
+            of_attempts=MAX_ATTEMPTS,
+        )
         return False
 
 
@@ -263,6 +303,25 @@ def _say(item, stage: str) -> None:
     )
 
 
+def _result(item, ok: bool, what: str, **detail) -> None:
+    """Say how one figure turned out, for the debug view.
+
+    The request trail cannot answer this. Every lookup this job makes can
+    answer 200 and still find nothing, so a column of successful requests
+    sits under a run that linked not one figure.
+    """
+    from . import reqlog
+
+    reqlog.outcome(
+        "mfc",
+        ok,
+        what,
+        code=getattr(item, "code", None),
+        name=(getattr(item, "name", "") or "")[:80],
+        **detail,
+    )
+
+
 def run_batch(db: Session, limit: int = 10) -> dict:
     """One pass of the background enrichment job."""
     from . import reqlog
@@ -294,10 +353,22 @@ def tag_stats(db: Session) -> dict:
         ).scalar_one()
         or 0
     )
+    # Tried the allowed number of times and never matched. These leave the
+    # queue but stay in the catalogue, so without counting them the progress
+    # bar has a remainder it can never reach and nothing on screen says why.
+    unlinked = int(
+        db.execute(
+            select(func.count(Item.id)).where(
+                Item.mfc_id.is_(None), Item.mfc_attempts >= MAX_ATTEMPTS
+            )
+        ).scalar_one()
+        or 0
+    )
     return {
         "tags": total_tags,
         "linked_items": linked_items,
         "pending_items": pending,
+        "unlinked_items": unlinked,
         "client": client.status(),
     }
 

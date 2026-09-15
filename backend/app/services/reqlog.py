@@ -61,7 +61,14 @@ _lock = threading.Lock()
 #: The last few requests in full, per purpose, for the debug view. Short: this
 #: is for looking over a job's shoulder, not for keeping history.
 RECENT_PER_PURPOSE = 40
+
+#: The last few *results* per purpose, as opposed to the last few requests.
+#: A request trail says a page was fetched and answered 200; it cannot say
+#: whether the figure that page was about ended up linked to anything, which
+#: is the question somebody watching the linker actually has.
+OUTCOMES_PER_PURPOSE = 40
 _recent: dict[str, deque] = {}
+_outcomes: dict[str, deque] = {}
 
 #: What each job says it is doing at this moment. Set by the job itself,
 #: because only it knows - the request log can say a page was fetched but not
@@ -133,6 +140,22 @@ def record(
         )
 
 
+def outcome(purpose: str, ok: bool, what: str, tag: str = "", **detail) -> None:
+    """Record how one piece of work turned out, for the debug view.
+
+    Written by the job, because only the job knows what "worked" means for it.
+    Linking a figure to MyFigureCollection can answer 200 to every request it
+    makes and still find nothing, so the request trail shows a column of
+    successes for a run that linked nothing at all.
+    """
+    now = time.time()
+    with _lock:
+        trail = _outcomes.get(purpose)
+        if trail is None:
+            trail = _outcomes[purpose] = deque(maxlen=OUTCOMES_PER_PURPOSE)
+        trail.appendleft({"at": now, "ok": bool(ok), "what": what, "tag": tag, **detail})
+
+
 def doing(purpose: str, what: str, tag: str = "", **detail) -> None:
     """Say what this job is doing at the moment, for the debug view.
 
@@ -167,6 +190,11 @@ def debug(purpose: str, tag: str = "") -> dict:
             for entry in (_recent.get(purpose) or [])
             if not tag or entry.get("tag") == tag
         ]
+        results = [
+            entry
+            for entry in (_outcomes.get(purpose) or [])
+            if not tag or entry.get("tag") == tag
+        ]
     now = time.time()
     if current:
         current["for_seconds"] = round(now - current.get("since", now), 1)
@@ -178,6 +206,7 @@ def debug(purpose: str, tag: str = "") -> dict:
         "label": PURPOSE_LABELS.get(purpose, purpose),
         "doing": current or None,
         "recent": [dict(e, ago_seconds=round(now - e["at"], 1)) for e in trail],
+        "outcomes": [dict(e, ago_seconds=round(now - e["at"], 1)) for e in results],
     }
 
 

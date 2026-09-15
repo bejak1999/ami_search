@@ -30,16 +30,41 @@ import {
 } from './ui'
 import clsx from 'clsx'
 
-function Bar({ percent, tone = 'accent' }: { percent: number; tone?: 'accent' | 'positive' }) {
+function Bar({
+  percent,
+  tone = 'accent',
+  spent,
+  spentTitle,
+  title,
+}: {
+  percent: number
+  tone?: 'accent' | 'positive'
+  /** A second, finished-but-unsuccessful share, drawn after the first. Work
+   *  that will not be attempted again belongs in the bar: left out, it is an
+   *  remainder the bar can never reach and nothing on screen says why. */
+  spent?: number
+  spentTitle?: string
+  title?: string
+}) {
+  const done = Math.max(0, Math.min(100, percent))
+  const failed = Math.max(0, Math.min(100 - done, spent ?? 0))
   return (
-    <div className="h-2 w-full overflow-hidden rounded-full bg-raised">
+    <div className="flex h-2 w-full overflow-hidden rounded-full bg-raised">
       <div
         className={clsx(
-          'h-full rounded-full transition-[width] duration-500',
+          'h-full transition-[width] duration-500',
           tone === 'positive' ? 'bg-positive' : 'bg-accent-gradient',
         )}
-        style={{ width: `${Math.max(0, Math.min(100, percent))}%` }}
+        style={{ width: `${done}%` }}
+        title={title}
       />
+      {failed > 0 && (
+        <div
+          className="h-full bg-danger/70 transition-[width] duration-500"
+          style={{ width: `${failed}%` }}
+          title={spentTitle}
+        />
+      )}
     </div>
   )
 }
@@ -1334,6 +1359,11 @@ export function CatalogPanel() {
   const data = catalog.data?.detail
   const mfc = data?.mfc ?? {}
   const linkedPercent = data?.items_known ? (data.items_linked_to_mfc / data.items_known) * 100 : 0
+  // Tried as often as allowed and never matched. They leave the queue but
+  // stay in the catalogue, so the bar had a remainder it could never reach.
+  const unlinkedPercent = data?.items_known
+    ? ((mfc.unlinked_items ?? 0) / data.items_known) * 100
+    : 0
 
   return (
     <section className="space-y-4">
@@ -1412,11 +1442,20 @@ export function CatalogPanel() {
               {(data?.items_known ?? 0).toLocaleString('en-GB')}
             </span>
           </p>
-          <Bar percent={linkedPercent} />
+          <Bar
+            percent={linkedPercent}
+            title={`${(data?.items_linked_to_mfc ?? 0).toLocaleString('en-GB')} linked`}
+            spent={unlinkedPercent}
+            spentTitle={`${(mfc.unlinked_items ?? 0).toLocaleString('en-GB')} tried as often as allowed and never matched`}
+          />
 
           <dl className="mt-4 space-y-1.5 text-xs">
             {[
               ['Still queued', (mfc.pending_items ?? 0).toLocaleString('en-GB')],
+              // The red part of the bar, in figures. Nothing retries these,
+              // so the bar is full once the queue empties even though not
+              // everything found a match.
+              ['Could not be linked', (mfc.unlinked_items ?? 0).toLocaleString('en-GB')],
               ['Known tags', (mfc.tags ?? 0).toLocaleString('en-GB')],
               // Measured against permitted. The settings say what the job may
               // do; only the count of items actually looked up in the last day

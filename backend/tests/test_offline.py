@@ -8517,6 +8517,145 @@ def test_a_wishlist_can_be_read_as_used() -> None:
     db.close()
 
 
+def test_the_linker_says_what_came_of_each_figure() -> None:
+    print("\n== Linked, or not, and how many gave up ==")
+    from app.db import SessionLocal, init_db
+    from app.enrichment.mfc import MfcError, MfcItem, MfcListing, MfcNotFound
+    from app.models import Condition, Item, ItemTag, Tag
+    from app.services import enrich, reqlog
+
+    init_db()
+    db = SessionLocal()
+
+    def wipe() -> None:
+        db.query(ItemTag).delete()
+        db.query(Tag).delete()
+        db.query(Item).filter(Item.code.like("XREF-%")).delete(synchronize_session=False)
+        db.commit()
+
+    wipe()
+    reqlog._outcomes.pop("mfc", None)
+
+    def figure(code: str, name: str, jan: str | None = None) -> Item:
+        item = Item(provider="amiami", code=code, name=name, currency="JPY",
+                    condition=Condition.new, jan_code=jan, mfc_attempts=0)
+        db.add(item)
+        db.commit()
+        return item
+
+    class Shop:
+        """Stands in for MyFigureCollection, one answer per figure."""
+
+        def __init__(self) -> None:
+            self.answer = "none"
+
+        def find_by_jan(self, jan):
+            if self.answer == "barcode":
+                return MfcItem(id=4242, url="https://myfigurecollection.net/item/4242",
+                               title="Baltimore")
+            if self.answer == "restricted":
+                return MfcItem(id=99, url="https://myfigurecollection.net/item/99",
+                               title="Hidden", restricted=True)
+            return None
+
+        def search(self, name, root=None):
+            if self.answer == "title":
+                return [MfcListing(id=77, title=name, image_url=None, root=1, category=1)]
+            if self.answer == "weak":
+                return [MfcListing(id=78, title="Something else entirely",
+                                   image_url=None, root=1, category=1)]
+            if self.answer == "missing":
+                raise MfcNotFound("no such entry")
+            if self.answer == "broken":
+                raise MfcError("502 from myfigurecollection")
+            return []
+
+        def get_item(self, mfc_id):
+            return MfcItem(id=mfc_id, url=f"https://myfigurecollection.net/item/{mfc_id}",
+                           title="Baltimore")
+
+        def status(self):
+            return {"signed_in": False}
+
+    shop = Shop()
+    original = enrich.client
+    enrich.client = shop
+    try:
+        def results() -> list[dict]:
+            return reqlog.debug("mfc")["outcomes"]
+
+        shop.answer = "barcode"
+        enrich.enrich_item(db, figure("XREF-1", "Baltimore", jan="45000001"))
+        top = results()[0]
+        check("a barcode match is reported as linked", top["ok"] is True, top)
+        check("and says how it was found", "barcode" in top["what"], top["what"])
+        check("with the figure named", top["name"] == "Baltimore", top)
+
+        shop.answer = "title"
+        enrich.enrich_item(db, figure("XREF-2", "Nendoroid Frieren"))
+        top = results()[0]
+        check("a title match is linked too", top["ok"] is True, top)
+        check("and carries the score it needed", "title (" in top["what"], top["what"])
+
+        # A tick on a figure whose page is withheld would promise tags that
+        # never arrived.
+        shop.answer = "restricted"
+        enrich.enrich_item(db, figure("XREF-3", "Hidden one", jan="45000003"))
+        top = results()[0]
+        check("a withheld entry still counts as linked", top["ok"] is True, top)
+        check("but says no tags came with it", "restricted" in top["what"], top["what"])
+
+        shop.answer = "weak"
+        enrich.enrich_item(db, figure("XREF-4", "Rem Wedding Ver"))
+        top = results()[0]
+        check("too weak a match is not a link", top["ok"] is False, top)
+        check("and says how close it got", "best" in top["what"], top["what"])
+
+        shop.answer = "missing"
+        enrich.enrich_item(db, figure("XREF-5", "Unknown figure"))
+        top = results()[0]
+        check("no entry at all is reported", top["ok"] is False, top)
+        check("in its own words", "no entry" in top["what"], top["what"])
+
+        # A refused request is not the same as a figure with no entry: nothing
+        # was learned, and it will be tried again.
+        shop.answer = "broken"
+        enrich.enrich_item(db, figure("XREF-6", "Broken lookup"))
+        top = results()[0]
+        check("a failure at the far end is marked failed", top["ok"] is False, top)
+        check("and named as a read failure", "could not be read" in top["what"], top["what"])
+
+        check("every figure left a result", len(results()) == 6, len(results()))
+        check("newest first", results()[0]["name"] == "Broken lookup", results()[0])
+
+        # The trail is short on purpose, and must not grow without end.
+        for n in range(enrich.MAX_ATTEMPTS * 20):
+            reqlog.outcome("mfc", True, f"filler {n}")
+        check("the trail keeps only the last few",
+              len(reqlog.debug("mfc")["outcomes"]) == reqlog.OUTCOMES_PER_PURPOSE,
+              len(reqlog.debug("mfc")["outcomes"]))
+        check("and another job's trail is untouched",
+              reqlog.debug("catalogue")["outcomes"] == [])
+
+        # --- what the bar needs ------------------------------------------
+        given_up = figure("XREF-7", "Gave up")
+        given_up.mfc_attempts = enrich.MAX_ATTEMPTS
+        db.commit()
+        stats = enrich.tag_stats(db)
+        check("a figure that ran out of attempts is counted as unlinked",
+              stats["unlinked_items"] >= 1, stats)
+        queued = {i.code for i in enrich.pending_items(db, limit=50)}
+        check("and is no longer in the queue", "XREF-7" not in queued, queued)
+        check("so the two numbers do not double-count",
+              "XREF-4" in queued, queued)
+    finally:
+        enrich.client = original
+        reqlog._outcomes.pop("mfc", None)
+
+    wipe()
+    db.close()
+
+
 def test_the_sampler_can_actually_spend_its_budget() -> None:
     print("\n== The shelf sampler is not starved by its own arithmetic ==")
     from app.config import settings
@@ -8708,6 +8847,7 @@ def main() -> int:
     test_the_version_is_the_day_it_was_built()
     test_each_copy_says_what_the_shop_says_about_it()
     test_a_wishlist_can_be_read_as_used()
+    test_the_linker_says_what_came_of_each_figure()
     test_each_channel_takes_the_alerts_it_asked_for()
     test_the_survival_curve_keeps_the_slow_copies_in()
     test_the_bargain_is_only_counted_where_there_was_a_choice()

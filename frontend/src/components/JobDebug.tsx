@@ -49,6 +49,14 @@ export function JobDebug({
           ms: number | null
           ago_seconds: number
         }[]
+        outcomes?: {
+          at: number
+          ok: boolean
+          what: string
+          name?: string
+          code?: string
+          ago_seconds: number
+        }[]
         budget?: {
           total_per_minute: number
           running: string[]
@@ -127,6 +135,47 @@ export function JobDebug({
                     {share.running ? ' · running' : ' · if it starts'}
                   </span>
                 ))}
+              </div>
+            </div>
+          )}
+
+          {/* What came of the work, which the request trail cannot say: every
+              lookup can answer 200 and still find nothing, so a column of
+              successful requests can sit under a run that linked nothing. */}
+          {d?.outcomes && d.outcomes.length > 0 && (
+            <div className="border-t border-line pt-2">
+              <p className="mb-1 text-[11px] font-medium text-muted">
+                Last {d.outcomes.length} result{d.outcomes.length === 1 ? '' : 's'}
+              </p>
+              <div className="max-h-64 overflow-auto">
+                <table className="w-full text-[10px]">
+                  <tbody>
+                    {d.outcomes.map((entry, index) => (
+                      <tr key={`${entry.at}-${index}`} className="border-t border-line/50 align-top">
+                        <td className="py-0.5 pr-2 tabular-nums text-faint">
+                          {ago(entry.ago_seconds)}
+                        </td>
+                        <td
+                          className={clsx(
+                            'py-0.5 pr-2 font-bold',
+                            entry.ok ? 'text-positive' : 'text-danger',
+                          )}
+                          title={entry.ok ? 'Linked' : 'Not linked'}
+                        >
+                          {entry.ok ? '\u2713' : '\u2717'}
+                        </td>
+                        <td className="py-0.5 text-muted">
+                          <span className="block max-w-[28rem] truncate" title={entry.name}>
+                            {entry.name || entry.code || '\u2014'}
+                          </span>
+                          <span className="block max-w-[28rem] truncate text-faint" title={entry.what}>
+                            {entry.what}
+                          </span>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
               </div>
             </div>
           )}
