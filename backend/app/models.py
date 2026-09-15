@@ -290,6 +290,11 @@ class Item(Base):
     #: event - the figure went from "cannot have it" to "can". Sorting by it
     #: is what turns a long wishlist into a short answer to "what turned up".
     became_buyable_at: Mapped[datetime | None] = mapped_column(UTCDateTime, index=True)
+    #: When we last asked the shop whether this figure has a listing under
+    #: its other condition and it had none. A figure saved from a sold-out new
+    #: listing often has a used one nobody has crawled yet, and without it the
+    #: wishlist cannot show that copy or count it as buyable.
+    counterpart_checked_at: Mapped[datetime | None] = mapped_column(UTCDateTime)
 
     #: The same figure sold new and pre-owned is two listings under two codes
     #: that differ only by an -R suffix. This is the shared half, so the two
@@ -512,6 +517,11 @@ class Listing(Base):
     #: is what it describes: one copy of a figure can be marked down for
     #: discolouration while the next is untouched.
     condition_note: Mapped[str | None] = mapped_column(Text)
+    #: When the shop was asked about this copy by its own code. It returns a
+    #: copy's note only then - under the product code it describes one copy
+    #: of its choosing and lists the rest with no remarks at all - so this is
+    #: what separates "has nothing to say" from "was never asked".
+    note_checked_at: Mapped[datetime | None] = mapped_column(UTCDateTime)
 
     appeared_after: Mapped[datetime | None] = mapped_column(UTCDateTime)
     first_seen_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utcnow)

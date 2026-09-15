@@ -17,6 +17,8 @@ The order is the order things matter in:
     watch       an alert is the point of the application
     manual      somebody is sitting there waiting for it
     catalogue   the sweeps that keep the catalogue honest
+    wishlist    completing the figures someone saved or watches: the used
+                listing of a figure saved as new, and each copy's note
     shelf       following individual copies, which can wait
 
 "manual" is anything a person set off by clicking: opening an item and
@@ -49,6 +51,10 @@ WEIGHTS: dict[str, int] = {
     "watch": 5,
     "manual": 5,
     "catalogue": 3,
+    # Below a watch, because an alert must not wait on groundwork; level with
+    # the sampler, because it is groundwork too - just for figures somebody
+    # has actually asked about.
+    "wishlist": 2,
     "shelf": 2,
 }
 

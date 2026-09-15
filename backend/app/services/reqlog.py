@@ -47,6 +47,7 @@ PURPOSE_LABELS = {
     "catalogue": "Catalogue sweep",
     "shelf": "Shelf-life sampler",
     "watch": "Watch polling",
+    "wishlist": "Wishlist details",
     "mfc": "MyFigureCollection linking",
     "images": "Photo downloads",
     "manual": "Opened by hand",

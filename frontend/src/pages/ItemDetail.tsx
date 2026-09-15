@@ -59,6 +59,13 @@ export function ItemDetailPage() {
     queryKey: ['item', id, 'history', range],
     queryFn: () => api.items.history(id, Number(range)),
     enabled: Number.isFinite(id),
+    // The shop gives a copy's note only when that copy is asked for by code,
+    // so the server asks after the page has loaded. Look again while it is
+    // still asking - and not for ever, in case the shop is refusing.
+    refetchInterval: (query) =>
+      (query.state.data?.item.notes_pending ?? 0) > 0 && query.state.dataUpdateCount < 40
+        ? 4000
+        : false,
   })
   // Sale marks for the chart. Same query key as the shelf-life panel below,
   // so both read one cached response rather than fetching twice.

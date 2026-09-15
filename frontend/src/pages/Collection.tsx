@@ -2,12 +2,19 @@ import { useMemo, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { api } from '@/api/client'
-import type { CollectionEntry, CollectionStatus } from '@/api/types'
+import type {
+  CollectionEntry,
+  CollectionStatus,
+  Item,
+  ShownReason,
+  WishlistCondition,
+} from '@/api/types'
 import { Icon } from '@/components/Icon'
 import { Badge, Card, EmptyState, Field, Modal, SegmentedControl, Skeleton, Spinner, Stat, Toggle } from '@/components/ui'
 import { ItemCard } from '@/components/ItemCard'
 import { PriceChangeTag, priceChangeClass } from '@/components/PriceChange'
 import { money, relativeTime, tidyName } from '@/lib/format'
+import { useAuth } from '@/lib/auth'
 import { useToast } from '@/lib/toast'
 import clsx from 'clsx'
 
@@ -30,9 +37,27 @@ const SORTS: { value: SortKey; label: string }[] = [
   { value: 'added', label: 'Added' },
 ]
 
+/**
+ * The listing a row stands for. A wishlist row can show the figure's other
+ * listing - the used copy of a figure saved as new - and everything on the
+ * row then follows it: photo, price, stock, link and the price sort.
+ */
+function shownOf(entry: CollectionEntry): Item {
+  return entry.shown_item ?? entry.item
+}
+
+/** Said on the row when it is not showing the condition that was asked for. */
+const REASON_LABEL: Record<ShownReason, string> = {
+  no_preowned_listing: 'No used listing',
+  no_new_listing: 'No new listing',
+  preowned_sold_out: 'Used sold out \u00b7 new in stock',
+  new_sold_out: 'New sold out \u00b7 used in stock',
+}
+
 /** When a figure last became buyable, as a number, or nothing at all. */
 function turnedUp(entry: CollectionEntry): number | null {
-  const stamps = [entry.item.became_buyable_at, entry.item.counterpart?.became_buyable_at]
+  const item = shownOf(entry)
+  const stamps = [item.became_buyable_at, item.counterpart?.became_buyable_at]
     .filter(Boolean)
     .map((value) => Date.parse(value as string))
     .filter((value) => !Number.isNaN(value))
@@ -54,7 +79,7 @@ function comparator(sort: SortKey) {
         return right - left
       }
       case 'price':
-        return (a.item.price ?? Infinity) - (b.item.price ?? Infinity)
+        return (shownOf(a).price ?? Infinity) - (shownOf(b).price ?? Infinity)
       case 'name':
         return a.item.name.localeCompare(b.item.name)
       case 'added':
@@ -86,6 +111,30 @@ export function CollectionPage() {
     }
   })
   const [inStockOnly, setInStockOnly] = useState(false)
+  // Kept on the account rather than in this browser, because the dashboard
+  // reads it too and a phone and a desktop should agree about which listing
+  // of a figure they are showing.
+  const { user, patchUser } = useAuth()
+  const condition: WishlistCondition =
+    user?.prefs?.wishlist_condition === 'preowned' ? 'preowned' : 'new'
+  const saveCondition = useMutation({
+    mutationFn: (next: WishlistCondition) =>
+      api.auth.updateMe({ prefs: { wishlist_condition: next } }),
+    onMutate: (next) => {
+      const previous = user?.prefs ?? {}
+      patchUser({ prefs: { ...previous, wishlist_condition: next } })
+      return { previous }
+    },
+    onSuccess: (updated) => patchUser({ prefs: updated.prefs }),
+    onError: (error, _next, context) => {
+      if (context) patchUser({ prefs: context.previous })
+      toast.error('Could not switch the wishlist', (error as Error).message)
+    },
+    onSettled: () => {
+      void queryClient.invalidateQueries({ queryKey: ['collection'] })
+      void queryClient.invalidateQueries({ queryKey: ['dashboard'] })
+    },
+  })
   // Remembered per browser, like the list/grid choice: whichever way someone
   // reads their wishlist, they read it that way every time.
   const [sort, setSort] = useState<SortKey>(() => {
@@ -151,7 +200,10 @@ export function CollectionPage() {
   const shown = useMemo(() => {
     const all = entries.data ?? []
     const kept = inStockOnly
-      ? all.filter((entry) => entry.item.in_stock || entry.item.counterpart?.in_stock)
+      ? all.filter((entry) => {
+          const item = shownOf(entry)
+          return item.in_stock || item.counterpart?.in_stock
+        })
       : all
     return [...kept].sort(comparator(sort))
   }, [entries.data, inStockOnly, sort])
@@ -250,7 +302,20 @@ export function CollectionPage() {
 
       <div className="flex flex-wrap items-center justify-between gap-3">
         <SegmentedControl value={status} onChange={setStatus} options={STATUSES} />
-        <div className="flex items-center gap-2">
+        <div className="flex flex-wrap items-center gap-2">
+          {/* Which listing of each figure the wishlist shows. Most of a
+              wishlist was saved from new listings that sold out long ago;
+              reading it as used shows the copies that can be had. */}
+          {status === 'wishlist' && (
+            <SegmentedControl
+              value={condition}
+              onChange={(next) => saveCondition.mutate(next as WishlistCondition)}
+              options={[
+                { value: 'new', label: 'New' },
+                { value: 'preowned', label: 'Pre-owned' },
+              ]}
+            />
+          )}
           <Toggle
             checked={inStockOnly}
             onChange={setInStockOnly}
@@ -289,6 +354,7 @@ export function CollectionPage() {
                         [
                           e.item.id,
                           e.item.counterpart?.in_stock ? e.item.counterpart.id : null,
+                          shownOf(e).id,
                         ].filter((id): id is number => Boolean(id)),
                       ),
                     ),
@@ -337,15 +403,18 @@ export function CollectionPage() {
           {shown.map((entry) => (
             <ItemCard
               key={entry.id}
-              item={entry.item}
+              item={shownOf(entry)}
               priceChange={entry.price_change}
-              onOpen={() => entry.item.id && navigate(`/item/${entry.item.id}`)}
+              hint={entry.shown_reason ? REASON_LABEL[entry.shown_reason] : undefined}
+              onOpen={(target) => target.id && navigate(`/item/${target.id}`)}
             />
           ))}
         </div>
       ) : shown.length ? (
         <div className="space-y-2">
-          {shown.map((entry) => (
+          {shown.map((entry) => {
+            const listed = shownOf(entry)
+            return (
             <Card
               key={entry.id}
               hover
@@ -353,12 +422,12 @@ export function CollectionPage() {
             >
               <div className="flex items-start gap-3 sm:contents">
               <button
-                onClick={() => entry.item.id && navigate(`/item/${entry.item.id}`)}
+                onClick={() => listed.id && navigate(`/item/${listed.id}`)}
                 className="h-20 w-20 shrink-0 overflow-hidden rounded-lg bg-raised"
               >
-                {entry.item.image_url ? (
+                {listed.image_url ? (
                   <img
-                    src={entry.item.image_url}
+                    src={listed.image_url}
                     alt=""
                     loading="lazy"
                     className="h-full w-full object-cover"
@@ -386,28 +455,34 @@ export function CollectionPage() {
                     {entry.status}
                   </Badge>
                   {entry.priority === 1 && <Badge tone="warning">Grail</Badge>}
-                  {entry.item.in_stock && <Badge tone="positive">In stock now</Badge>}
+                  {listed.condition === 'preowned' && <Badge tone="accent">Pre-owned</Badge>}
+                  {listed.in_stock && <Badge tone="positive">In stock now</Badge>}
+                  {entry.shown_reason && (
+                    <Badge tone={entry.shown_reason.endsWith('_sold_out') ? 'warning' : 'neutral'}>
+                      {REASON_LABEL[entry.shown_reason]}
+                    </Badge>
+                  )}
                   {/* The figure is buyable, just not under the listing this
                       entry was saved from. Said plainly, with a way to get
                       there, because otherwise the row looks unavailable while
                       the thing you wanted is on sale. */}
-                  {!entry.item.in_stock && entry.item.counterpart?.in_stock && (
+                  {!listed.in_stock && listed.counterpart?.in_stock && (
                     <button
                       onClick={() =>
-                        entry.item.counterpart &&
-                        navigate(`/item/${entry.item.counterpart.id}`)
+                        listed.counterpart &&
+                        navigate(`/item/${listed.counterpart.id}`)
                       }
-                      title={`Not available as ${entry.item.condition}, but the ${entry.item.counterpart.condition} listing is in stock`}
+                      title={`Not available as ${listed.condition}, but the ${listed.counterpart.condition} listing is in stock`}
                     >
                       <Badge tone="positive">
-                        {entry.item.counterpart.condition === 'preowned'
+                        {listed.counterpart.condition === 'preowned'
                           ? 'Used copy in stock'
                           : 'New listing in stock'}
-                        {entry.item.counterpart.price !== null && (
+                        {listed.counterpart.price !== null && (
                           <span className="ml-1 tabular-nums">
                             {money(
-                              entry.item.counterpart.price,
-                              entry.item.counterpart.currency,
+                              listed.counterpart.price,
+                              listed.counterpart.currency,
                             )}
                           </span>
                         )}
@@ -418,10 +493,10 @@ export function CollectionPage() {
                 </div>
 
                 <button
-                  onClick={() => entry.item.id && navigate(`/item/${entry.item.id}`)}
+                  onClick={() => listed.id && navigate(`/item/${listed.id}`)}
                   className="mt-1 block w-full truncate text-left text-sm font-medium hover:text-accent"
                 >
-                  {tidyName(entry.item.name)}
+                  {tidyName(listed.name)}
                 </button>
 
                 <p className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-muted">
@@ -431,14 +506,14 @@ export function CollectionPage() {
                       priceChangeClass(entry.price_change) ?? 'text-ink',
                     )}
                   >
-                    {money(entry.item.price, entry.item.currency)}
+                    {money(listed.price, listed.currency)}
                   </span>
                   {/* Beside the price, because that is where the eye already
                       is when the question is "has this got any cheaper". */}
                   <PriceChangeTag change={entry.price_change} />
-                  {entry.item.landed && (
+                  {listed.landed && (
                     <span className="tabular-nums">
-                      {money(entry.item.landed.total, entry.item.landed.currency)} landed
+                      {money(listed.landed.total, listed.landed.currency)} landed
                     </span>
                   )}
                   {entry.paid_price && (
@@ -499,7 +574,8 @@ export function CollectionPage() {
                 </button>
               </div>
             </Card>
-          ))}
+            )
+          })}
         </div>
       ) : (
         <EmptyState

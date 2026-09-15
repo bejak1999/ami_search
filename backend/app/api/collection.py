@@ -5,7 +5,7 @@ import csv
 import io
 import json
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, Response, status
 from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -22,7 +22,7 @@ from ..models import (
 )
 from ..providers import ItemNotFound, ProviderError, detect_provider_from_url, get_provider
 from ..schemas import CollectionCreate, CollectionOut, CollectionUpdate, MessageResponse
-from ..services import catalog, fx, landed_cost, pricecheck
+from ..services import catalog, details, fx, landed_cost, pricecheck
 from .serializers import item_out
 
 router = APIRouter(prefix="/collection", tags=["collection"])
@@ -64,6 +64,27 @@ def _serialize(
     profile: CostProfile,
     change: dict | None = None,
 ) -> CollectionOut:
+    # A wishlist row can show the figure's other listing. Someone reading
+    # their wishlist as used wants the used copies; most of it was saved from
+    # new listings long sold out, so the saved listing alone would show them
+    # a wall of "sold out" beside copies they could buy today.
+    shown_item = None
+    shown_reason = None
+    if entry.status == CollectionStatus.wishlist:
+        chosen, shown_reason = catalog.listing_to_show(
+            entry.item,
+            catalog.counterpart_of(db, entry.item),
+            catalog.preferred_condition(user),
+        )
+        if chosen is not entry.item:
+            shown_item = item_out(
+                db,
+                chosen,
+                user=user,
+                profile=profile,
+                with_context=True,
+                with_counterpart=True,
+            )
     return CollectionOut(
         **{name: getattr(entry, name) for name in _ENTRY_FIELDS},
         # With the counterpart, because a wishlist entry is about the figure
@@ -80,6 +101,8 @@ def _serialize(
             with_counterpart=True,
         ),
         price_change=change,
+        shown_item=shown_item,
+        shown_reason=shown_reason,
     )
 
 
@@ -148,6 +171,7 @@ def list_entries(
 @router.post("", response_model=CollectionOut, status_code=status.HTTP_201_CREATED)
 def add_entry(
     payload: CollectionCreate,
+    background: BackgroundTasks,
     db: Session = Depends(get_db),
     user: User = Depends(current_user),
     profile: CostProfile = Depends(user_cost_profile),
@@ -175,6 +199,11 @@ def add_entry(
         entry.purchased_at = utcnow()
     db.commit()
     db.refresh(entry)
+    # The other listing of a figure saved just now is looked for straight
+    # away rather than on the next background round, so the row can show the
+    # used copy by the time anyone looks for it.
+    if entry.status == CollectionStatus.wishlist and details.needs_counterpart_lookup(db, item):
+        background.add_task(details.look_for_counterpart_now, item.id)
     return _serialize(db, entry, user, profile)
 
 

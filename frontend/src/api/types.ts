@@ -119,6 +119,8 @@ export interface Item {
   dwell_basis: DwellBasis | null
   dwell_samples: number
   listing_count: number
+  /** Copies on sale whose note has not been asked for yet (item page only). */
+  notes_pending?: number
   /** The same figure listed under the other condition, when known. */
   counterpart: {
     id: number
@@ -302,7 +304,19 @@ export interface CollectionEntry {
   updated_at: string
   item: Item
   price_change: PriceChange | null
+  /** The listing this wishlist row shows, when it is not the saved one. */
+  shown_item?: Item | null
+  /** Why the row is not showing the condition asked for, when it is not. */
+  shown_reason?: ShownReason | null
 }
+
+export type WishlistCondition = 'new' | 'preowned'
+
+export type ShownReason =
+  | 'no_new_listing'
+  | 'no_preowned_listing'
+  | 'new_sold_out'
+  | 'preowned_sold_out'
 
 export type ShippingZone = 'zone1' | 'zone2' | 'zone3' | 'zone4' | 'zone5'
 

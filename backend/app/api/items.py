@@ -1,7 +1,7 @@
 """Stored item detail, price history and manual refresh."""
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, status
 from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 
@@ -16,7 +16,7 @@ from ..schemas import (
     PricePointOut,
     ShelfLifeOut,
 )
-from ..services import catalog, landed_cost, shelflife
+from ..services import catalog, details, landed_cost, shelflife
 from .serializers import item_out, register_images
 
 router = APIRouter(prefix="/items", tags=["items"])
@@ -65,26 +65,47 @@ def list_items(
     return [item_out(db, item, user=user, profile=profile, with_context=True) for item in rows]
 
 
+def _with_notes_pending(
+    db: Session, item: Item, payload: ItemOut, background: BackgroundTasks
+) -> ItemOut:
+    """Say how many copies still have no answer, and go and get them.
+
+    The shop returns a copy's note only when asked about that copy by code, so
+    a product page arrives knowing the note of one copy at most. The rest are
+    asked for once each, after the response, and the page looks again while
+    this number is above nought.
+    """
+    pending = details.pending_count(db, item.id)
+    payload.notes_pending = pending
+    if pending:
+        background.add_task(details.fill_item_notes_now, item.id)
+    return payload
+
+
 @router.get("/{item_id}", response_model=ItemOut)
 def get_item(
     item_id: int,
+    background: BackgroundTasks,
     db: Session = Depends(get_db),
     user: User = Depends(current_user),
     profile: CostProfile = Depends(user_cost_profile),
 ) -> ItemOut:
-    return item_out(
+    item = _get_or_404(db, item_id)
+    payload = item_out(
         db,
-        _get_or_404(db, item_id),
+        item,
         user=user,
         profile=profile,
         with_context=True,
         with_counterpart=True,
     )
+    return _with_notes_pending(db, item, payload, background)
 
 
 @router.get("/{item_id}/history", response_model=ItemHistoryOut)
 def get_history(
     item_id: int,
+    background: BackgroundTasks,
     days: int = Query(default=365, ge=1, le=3650),
     db: Session = Depends(get_db),
     user: User = Depends(current_user),
@@ -100,8 +121,13 @@ def get_history(
     register_images(db, [item])
     points = catalog.history(db, item_id, days=days)
     return ItemHistoryOut(
-        item=item_out(
-            db, item, user=user, profile=profile, with_context=True, with_counterpart=True
+        item=_with_notes_pending(
+            db,
+            item,
+            item_out(
+                db, item, user=user, profile=profile, with_context=True, with_counterpart=True
+            ),
+            background,
         ),
         points=[PricePointOut.model_validate(p) for p in points],
         stats=catalog.price_stats(db, item_id),
@@ -197,6 +223,7 @@ def fetch_counterpart(
 @router.post("/{item_id}/refresh", response_model=ItemOut)
 def refresh_item(
     item_id: int,
+    background: BackgroundTasks,
     db: Session = Depends(get_db),
     user: User = Depends(current_user),
     profile: CostProfile = Depends(user_cost_profile),
@@ -216,4 +243,9 @@ def refresh_item(
     # The reload is the moment the gallery changes, so it is the moment worth
     # recording it.
     register_images(db, [updated])
-    return item_out(db, updated, user=user, profile=profile, with_context=True)
+    return _with_notes_pending(
+        db,
+        updated,
+        item_out(db, updated, user=user, profile=profile, with_context=True),
+        background,
+    )

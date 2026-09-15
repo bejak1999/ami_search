@@ -84,6 +84,51 @@ def counterpart_of(db: Session, item: Item) -> Item | None:
     ).scalar_one_or_none()
 
 
+#: The two conditions a wishlist can be read in.
+WISHLIST_CONDITIONS = ("new", "preowned")
+
+
+def _condition_of(item: Item) -> str:
+    return getattr(item.condition, "value", item.condition) or "new"
+
+
+def is_buyable(item: Item | None) -> bool:
+    return item is not None and bool(item.in_stock) and not item.order_closed
+
+
+def preferred_condition(user) -> str:
+    """Which condition this person reads their wishlist in. New unless told."""
+    value = (getattr(user, "prefs", None) or {}).get("wishlist_condition")
+    return value if value in WISHLIST_CONDITIONS else "new"
+
+
+def listing_to_show(
+    saved: Item, other: Item | None, prefer: str
+) -> tuple[Item, str | None]:
+    """Which of a figure's two listings a wishlist row shows, and why.
+
+    The listing in the preferred condition, when there is one - unless it
+    cannot be bought and the other one can. Most of a wishlist was saved from
+    new listings that sold out long ago; reading it as used is how someone
+    asks to see the copies they could actually have. But a row showing a sold
+    out used listing while the new one is on the shelf would hide the one
+    thing on it worth knowing, so buyable beats preferred, and says so.
+
+    The reason is None when the row shows what was asked for, otherwise
+    ``no_<prefer>_listing`` or ``<prefer>_sold_out``.
+    """
+    if prefer not in WISHLIST_CONDITIONS:
+        prefer = "new"
+    listings = [listing for listing in (saved, other) if listing is not None]
+    preferred = next((x for x in listings if _condition_of(x) == prefer), None)
+    if preferred is None:
+        return saved, f"no_{prefer}_listing"
+    fallback = next((x for x in listings if x is not preferred), None)
+    if is_buyable(preferred) or not is_buyable(fallback):
+        return preferred, None
+    return fallback, f"{prefer}_sold_out"
+
+
 def last_known_price(db: Session, item: Item) -> float | None:
     """The least either listing of this figure was last seen costing.
 
@@ -130,7 +175,9 @@ def cheapest_buyable(db: Session, item: Item) -> tuple[float | None, Item | None
     return best, where
 
 
-def wishlist_available(db: Session, user_id: int, limit: int = 6) -> list[Item]:
+def wishlist_available(
+    db: Session, user_id: int, limit: int = 6, prefer: str = "new"
+) -> list[Item]:
     """Wishlisted figures that can actually be bought right now.
 
     A wishlist entry is about the figure rather than the listing it was saved
@@ -139,7 +186,9 @@ def wishlist_available(db: Session, user_id: int, limit: int = 6) -> list[Item]:
     only listing that existed at the time should not mean never being told the
     figure came back cheaper second-hand.
 
-    Where both conditions are on sale the cheaper one is shown, once.
+    Where both conditions are on sale the one in the condition you prefer is
+    shown, once - the same choice the wishlist page makes, so a figure does
+    not appear as new on one screen and as used on the other.
     """
     from ..models import CollectionEntry, CollectionStatus
 
@@ -181,14 +230,18 @@ def wishlist_available(db: Session, user_id: int, limit: int = 6) -> list[Item]:
             .all()
         )
 
-    # One row per figure: the new and used listings are the same thing to
-    # someone deciding whether to buy, so show whichever costs less.
+    # One row per figure. Everything here is buyable, so the preferred
+    # condition wins when both are, and the price only breaks a tie between
+    # two listings of the same condition.
+    def rank(item: Item) -> tuple:
+        return (_condition_of(item) != prefer, item.current_price or 0)
+
     best: dict[tuple[str, str], Item] = {}
     for item in candidates:
         base = counterpart_code(item.code) if item.code.endswith("-R") else item.code
         key = (item.provider, base)
         held = best.get(key)
-        if held is None or (item.current_price or 0) < (held.current_price or 0):
+        if held is None or rank(item) < rank(held):
             best[key] = item
 
     # Most recently become buyable first. Cheapest-first sounds useful and is
@@ -372,6 +425,7 @@ def upsert_item(db: Session, normalized: NormalizedItem, commit: bool = True) ->
             normalized.variants,
             observed_at=item.last_detail_fetch_at,
             sold_out=nothing_buyable,
+            asked_code=normalized.condition_note_code,
         )
     elif nothing_buyable and (item.listing_count or 0) > 0:
         # A list row carries no copies, so it cannot say which of them went.

@@ -292,6 +292,9 @@ class ItemOut(ItemBase):
     dwell_basis: str | None = None
     dwell_samples: int = 0
     listing_count: int = 0
+    #: Copies on sale whose note has not been asked for yet. Filled in on
+    #: the item page only, where it tells the page to look again shortly.
+    notes_pending: int = 0
 
 
 class PricePointOut(ORMModel):
@@ -696,6 +699,14 @@ class CollectionOut(ORMModel):
     updated_at: datetime
     item: ItemOut
     price_change: PriceChangeOut | None = None
+    #: The listing a wishlist row shows, when that is not the one it was
+    #: saved from - the used copy of a figure saved as new, or the other way
+    #: round. Absent when the saved listing is the one to show.
+    shown_item: ItemOut | None = None
+    #: Why the row is not showing the condition that was asked for, when it
+    #: is not: "no_preowned_listing", "preowned_sold_out", and the same
+    #: for "new".
+    shown_reason: str | None = None
 
 
 # ---------------------------------------------------------------------------

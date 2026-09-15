@@ -1020,13 +1020,17 @@ def test_wishlist_covers_both_conditions() -> None:
     check("saving the new listing surfaces the used one", len(available) == 1, available)
     check("and it is the one you can actually buy", available[0].code == "WISH-1-R")
 
-    # Both on sale: one row, the cheaper of the pair.
+    # Both on sale: one row, in the condition the wishlist is read in - the
+    # same listing the wishlist page shows, so the two screens agree.
     new.in_stock = True
     new.order_closed = False
     db.commit()
     available = catalog.wishlist_available(db, user.id)
     check("with both on sale the figure appears once", len(available) == 1, available)
-    check("as the cheaper listing", available[0].code == "WISH-1-R")
+    check("as the new listing by default", available[0].code == "WISH-1")
+    available = catalog.wishlist_available(db, user.id, prefer="preowned")
+    check("and as the used one when read as used",
+          len(available) == 1 and available[0].code == "WISH-1-R", available)
 
     # Nothing buyable means nothing to show, rather than a stale row.
     new.in_stock = False
@@ -8119,6 +8123,400 @@ def test_the_version_is_the_day_it_was_built() -> None:
         settings.build_time, settings.app_version = saved
 
 
+def test_each_copy_says_what_the_shop_says_about_it() -> None:
+    print("\n== A copy's note comes from asking about that copy ==")
+    from app.api.serializers import item_out
+    from app.db import SessionLocal, backfill_note_checked, init_db
+    from app.models import (
+        CollectionEntry, CollectionStatus, Item, Listing, PricePoint, User, UserRole,
+        Watch, WatchKind,
+    )
+    from app.providers import ItemNotFound, ProviderError
+    from app.providers.base import NormalizedItem
+    from app.services import catalog, details
+
+    init_db()
+    db = SessionLocal()
+
+    def wipe() -> None:
+        db.query(Watch).filter(Watch.item_code.like("FIGURE-777%")).delete(
+            synchronize_session=False)
+        for model in (CollectionEntry, PricePoint, Listing, Item):
+            db.query(model).delete()
+        db.query(User).filter(User.username == "copynotes").delete()
+        db.commit()
+
+    wipe()
+    user = User(username="copynotes", email="n@example.com", password_hash="x",
+                role=UserRole.user)
+    db.add(user)
+    db.commit()
+
+    # Measured against the shop: asked about the product it describes R569,
+    # and each of the others only when asked for by its own code.
+    GCODE = "FIGURE-149670-R"
+    NOTES = {
+        "FIGURE-149670-R569": "Tip of the flag is detached.",
+        "FIGURE-149670-R599": "Skin area on both legs and the stomach is discolored",
+        "FIGURE-149670-R606": "[Missing] Acrylic stand. Everything else is B",
+    }
+    copies = {
+        "FIGURE-149670-R599": 13160,
+        "FIGURE-149670-R569": 16790,
+        "FIGURE-149670-R606": 16790,
+    }
+
+    def product(described: str) -> NormalizedItem:
+        variants = [
+            {"code": code, "price": price, "condition": "Item:B Box:B",
+             "item_grade": "B", "box_grade": "B",
+             "note": NOTES.get(code) if code == described else None}
+            for code, price in copies.items()
+        ]
+        return NormalizedItem(
+            provider="amiami", code=GCODE, name="Baltimore",
+            url="https://www.amiami.com/eng/detail/?gcode=" + GCODE,
+            currency="JPY", price=min(copies.values()), condition="preowned",
+            in_stock=True, detail_loaded=True, variants=variants,
+            condition_note=NOTES.get(described), condition_note_code=described,
+        )
+
+    item, _ = catalog.upsert_item(db, product("FIGURE-149670-R569"))
+    db.commit()
+
+    def row(code: str) -> Listing:
+        db.expire_all()
+        return db.query(Listing).filter_by(code=code).one()
+
+    check("the copy the shop described is marked as asked",
+          row("FIGURE-149670-R569").note_checked_at is not None)
+    check("and keeps its note",
+          row("FIGURE-149670-R569").condition_note == NOTES["FIGURE-149670-R569"])
+    check("the copies it only listed are not",
+          row("FIGURE-149670-R599").note_checked_at is None
+          and row("FIGURE-149670-R606").note_checked_at is None)
+    pending = {c.code for c in details.pending_copies(db, [item.id], 10)}
+    check("so those two are what is left to ask",
+          pending == {"FIGURE-149670-R599", "FIGURE-149670-R606"}, pending)
+
+    asked: list[str] = []
+    refuse = {"codes": {"FIGURE-149670-R606"}}
+
+    class Shop:
+        def get_item(self, code):
+            asked.append(code)
+            if code in refuse["codes"]:
+                raise ProviderError("refused")
+            if code not in copies:
+                raise ItemNotFound("gone")
+            return product(code)
+
+    shop = Shop()
+    for listing in details.pending_copies(db, [item.id], 10):
+        try:
+            details.ask_about_copy(db, shop, listing)
+        except ProviderError:
+            db.rollback()
+            continue
+        db.commit()
+
+    check("asking for a copy by code finds its note",
+          row("FIGURE-149670-R599").condition_note == NOTES["FIGURE-149670-R599"])
+    check("a refused request is not an answer",
+          row("FIGURE-149670-R606").note_checked_at is None)
+    check("and the copy already described was not asked again",
+          "FIGURE-149670-R569" not in asked, asked)
+
+    refuse["codes"] = set()
+    for listing in details.pending_copies(db, [item.id], 10):
+        details.ask_about_copy(db, shop, listing)
+        db.commit()
+    check("the refused one is found on the next try",
+          row("FIGURE-149670-R606").condition_note == NOTES["FIGURE-149670-R606"])
+    check("and nothing is left to ask",
+          details.pending_copies(db, [item.id], 10) == [])
+
+    # The next product fetch describes R569 again and lists the others bare.
+    # That used to take R599's and R606's notes off the page.
+    catalog.upsert_item(db, product("FIGURE-149670-R569"))
+    db.commit()
+    db.expire_all()
+    item = db.get(Item, item.id)
+    check("a later product fetch does not erase what was learned",
+          row("FIGURE-149670-R599").condition_note == NOTES["FIGURE-149670-R599"])
+    shown = {v.code: v.note for v in item_out(db, item).variants}
+    check("and every copy shows its own note", shown == NOTES, shown)
+    check("without writing into the stored copy list",
+          not any(v.get("note") for v in item.variants
+                  if v["code"] != "FIGURE-149670-R569"))
+
+    # A copy the shop has nothing to say about is still an answer.
+    copies["FIGURE-149670-R610"] = 20430
+    catalog.upsert_item(db, product("FIGURE-149670-R569"))
+    db.commit()
+    silent = row("FIGURE-149670-R610")
+    check("a quiet copy is asked once",
+          details.ask_about_copy(db, shop, silent) == "silent")
+    db.commit()
+    check("and not again", details.pending_copies(db, [item.id], 10) == [])
+
+    # A copy that sold between the product fetch and the question.
+    copies["FIGURE-149670-R611"] = 21000
+    catalog.upsert_item(db, product("FIGURE-149670-R569"))
+    db.commit()
+    del copies["FIGURE-149670-R611"]
+    check("a copy sold in the meantime is not retried for ever",
+          details.ask_about_copy(db, shop, row("FIGURE-149670-R611")) == "gone")
+    db.commit()
+
+    # --- asked from the page, after the response -------------------------
+    original = details.get_provider
+    details.get_provider = lambda _pid: shop
+    details._not_before.clear()
+    try:
+        row("FIGURE-149670-R610").note_checked_at = None
+        db.commit()
+        details.fill_item_notes_now(item.id)
+        check("opening the page fills in what is missing",
+              row("FIGURE-149670-R610").note_checked_at is not None)
+
+        refuse["codes"] = {"FIGURE-149670-R610"}
+        row("FIGURE-149670-R610").note_checked_at = None
+        db.commit()
+        details.fill_item_notes_now(item.id)
+        before = len(asked)
+        details.fill_item_notes_now(item.id)
+        check("after a failure the page does not keep hammering the shop",
+              len(asked) == before, (before, len(asked)))
+        check("and the copy is still waiting for an answer",
+              row("FIGURE-149670-R610").note_checked_at is None)
+    finally:
+        details.get_provider = original
+        details._not_before.clear()
+        refuse["codes"] = set()
+
+    # --- dating what was asked before this existed -----------------------
+    known = row("FIGURE-149670-R599")
+    known.note_checked_at = None
+    db.commit()
+    marked = backfill_note_checked()
+    check("a copy already holding a note counts as asked", marked >= 1, marked)
+    check("so it costs no request on upgrade",
+          row("FIGURE-149670-R599").note_checked_at is not None)
+    check("but a copy without one still has to be asked",
+          row("FIGURE-149670-R610").note_checked_at is None)
+
+    # --- which figures -------------------------------------------------
+    new_listing, _ = catalog.upsert_item(db, NormalizedItem(
+        provider="amiami", code="FIGURE-149670", name="Baltimore",
+        url="https://www.amiami.com/eng/detail/?gcode=FIGURE-149670",
+        currency="JPY", price=30000, condition="new", in_stock=False,
+        order_closed=True, detail_loaded=True,
+        variants=[{"code": "FIGURE-149670", "price": 30000, "condition": "",
+                   "item_grade": None, "box_grade": None, "note": None}],
+    ))
+    db.commit()
+    check("a new listing is never asked about by code",
+          details.pending_copies(db, [new_listing.id], 10) == [])
+
+    db.add(CollectionEntry(user_id=user.id, item_id=new_listing.id,
+                           status=CollectionStatus.wishlist))
+    watched, _ = catalog.upsert_item(db, NormalizedItem(
+        provider="amiami", code="FIGURE-777-R", name="Watched", url="u",
+        currency="JPY", price=5000, condition="preowned", in_stock=True,
+    ))
+    db.add(Watch(user_id=user.id, kind=WatchKind.item, item_code="FIGURE-777-R12",
+                 label="one copy"))
+    db.commit()
+    saved = details.saved_item_ids(db)
+    check("a figure saved as new brings its used listing's copies in",
+          item.id in saved, saved)
+    check("and an item watch on one copy brings in its product",
+          watched.id in saved, saved)
+
+    wipe()
+    db.close()
+
+
+def test_a_wishlist_can_be_read_as_used() -> None:
+    print("\n== Reading a wishlist as new or as used ==")
+    from app.api import collection as collection_api
+    from app.db import SessionLocal, init_db
+    from app.models import (
+        CollectionEntry, CollectionStatus, Condition, CostProfile, Item, Listing,
+        PricePoint, User, UserRole,
+    )
+    from app.providers import ItemNotFound
+    from app.providers.base import NormalizedItem
+    from app.services import catalog, details, landed_cost
+
+    # --- the rule --------------------------------------------------------
+    def bare(code, condition, buyable):
+        return Item(provider="amiami", code=code, name=code,
+                    condition=Condition(condition), in_stock=buyable,
+                    order_closed=not buyable)
+
+    new_out, used_in = bare("A", "new", False), bare("A-R", "preowned", True)
+    check("used, and the used copy can be bought: the used copy",
+          catalog.listing_to_show(new_out, used_in, "preowned") == (used_in, None))
+    new_in, used_out = bare("B", "new", True), bare("B-R", "preowned", False)
+    check("used, but only the new one can be bought: the new one, saying why",
+          catalog.listing_to_show(new_in, used_out, "preowned")
+          == (new_in, "preowned_sold_out"))
+    check("used, and there is no used listing: the saved one, saying so",
+          catalog.listing_to_show(new_out, None, "preowned")
+          == (new_out, "no_preowned_listing"))
+    both_out = bare("C-R", "preowned", False)
+    check("neither can be bought: the one asked for",
+          catalog.listing_to_show(new_out, both_out, "preowned") == (both_out, None))
+    check("new, sold out, used on the shelf: the used one, saying why",
+          catalog.listing_to_show(new_out, used_in, "new") == (used_in, "new_sold_out"))
+    check("new, saved as used with no new listing: says so",
+          catalog.listing_to_show(used_in, None, "new") == (used_in, "no_new_listing"))
+    check("nonsense in the preference reads as new",
+          catalog.listing_to_show(new_in, used_in, "banana") == (new_in, None))
+
+    class Prefs:
+        def __init__(self, prefs):
+            self.prefs = prefs
+
+    check("new unless told", catalog.preferred_condition(Prefs({})) == "new")
+    check("told", catalog.preferred_condition(
+        Prefs({"wishlist_condition": "preowned"})) == "preowned")
+    check("told nonsense", catalog.preferred_condition(
+        Prefs({"wishlist_condition": "x"})) == "new")
+
+    # --- the wishlist ----------------------------------------------------
+    init_db()
+    db = SessionLocal()
+
+    def wipe() -> None:
+        for model in (CollectionEntry, PricePoint, Listing, Item):
+            db.query(model).delete()
+        ids = [u.id for u in db.query(User).filter(User.username == "readasused")]
+        if ids:
+            db.query(CostProfile).filter(CostProfile.user_id.in_(ids)).delete(
+                synchronize_session=False)
+        db.query(User).filter(User.username == "readasused").delete()
+        db.commit()
+
+    wipe()
+    user = User(username="readasused", email="u@example.com", password_hash="x",
+                role=UserRole.user, prefs={})
+    db.add(user)
+    db.commit()
+    profile = landed_cost.default_profile(user.id)
+    db.add(profile)
+    db.commit()
+
+    def listing(code, condition, buyable, price=10000):
+        stored, _ = catalog.upsert_item(db, NormalizedItem(
+            provider="amiami", code=code, name=code,
+            url="https://www.amiami.com/eng/detail/?gcode=" + code,
+            currency="JPY", price=price, condition=condition,
+            in_stock=buyable, order_closed=not buyable,
+        ))
+        db.commit()
+        return stored
+
+    def save(stored, status=CollectionStatus.wishlist):
+        db.add(CollectionEntry(user_id=user.id, item_id=stored.id, status=status))
+        db.commit()
+
+    save(listing("N-1", "new", False))
+    listing("N-1-R", "preowned", True)
+    save(listing("N-2", "new", True))
+    listing("N-2-R", "preowned", False)
+    save(listing("N-3", "new", False))
+    save(listing("N-5", "new", False), CollectionStatus.owned)
+    listing("N-5-R", "preowned", True)
+
+    def rows(prefer: str) -> dict:
+        user.prefs = {"wishlist_condition": prefer}
+        db.commit()
+        return {
+            e.item.code: ((e.shown_item.code if e.shown_item else None), e.shown_reason)
+            for e in collection_api.list_entries(
+                status_filter=None, tag=None, db=db, user=user, profile=profile)
+        }
+
+    used = rows("preowned")
+    check("read as used, a sold-out new entry shows its used copy",
+          used["N-1"] == ("N-1-R", None), used)
+    check("unless the used one is gone and the new one is not",
+          used["N-2"] == (None, "preowned_sold_out"), used)
+    check("and one with no used listing says so",
+          used["N-3"] == (None, "no_preowned_listing"), used)
+    check("what you own is not rewritten", used["N-5"] == (None, None), used)
+
+    new = rows("new")
+    check("read as new, a sold-out new entry still shows what can be bought",
+          new["N-1"] == ("N-1-R", "new_sold_out"), new)
+    check("and a buyable new one is simply itself", new["N-2"] == (None, None), new)
+
+    # The dashboard makes the same choice when both can be bought.
+    save(listing("N-4", "new", True, price=9000))
+    listing("N-4-R", "preowned", True, price=12000)
+
+    def strip(prefer: str) -> set:
+        return {i.code for i in catalog.wishlist_available(db, user.id, 10, prefer=prefer)}
+
+    check("the dashboard shows the used one when reading as used",
+          "N-4-R" in strip("preowned") and "N-4" not in strip("preowned"),
+          strip("preowned"))
+    check("and the new one when reading as new, though it is dearer to lose",
+          "N-4" in strip("new") and "N-4-R" not in strip("new"), strip("new"))
+
+    # --- finding a used listing nobody crawled ---------------------------
+    missing = {i.code for i in details.missing_counterparts(db, 10)}
+    check("a wishlist entry with no known other listing is found",
+          missing == {"N-3"}, missing)
+
+    shop = {"has": False}
+
+    class Shop:
+        calls = 0
+
+        def get_item(self, code):
+            Shop.calls += 1
+            if not shop["has"]:
+                raise ItemNotFound("no " + code)
+            return NormalizedItem(
+                provider="amiami", code=code, name=code, url="u", currency="JPY",
+                price=7000, condition="preowned", in_stock=True,
+            )
+
+    n3 = db.query(Item).filter_by(code="N-3").one()
+    check("no answer yet means ask", details.needs_counterpart_lookup(db, n3))
+    check("the shop saying there is none is kept",
+          details.look_for_counterpart(db, Shop(), n3) is None)
+    db.commit()
+    check("so it is not asked again straight away",
+          details.missing_counterparts(db, 10) == [])
+    later = datetime.now(timezone.utc) + timedelta(days=8)
+    check("but it is a week later",
+          [i.code for i in details.missing_counterparts(db, 10, now=later)] == ["N-3"])
+
+    # A used copy appears, and the next background run finds it.
+    shop["has"] = True
+    n3.counterpart_checked_at = None
+    db.commit()
+    original = details.get_provider
+    details.get_provider = lambda _pid: Shop()
+    try:
+        outcome = details.run_once(db)
+    finally:
+        details.get_provider = original
+    check("the background run looks for it", outcome["counterparts_found"] == 1, outcome)
+    check("and stops when there is nothing left",
+          outcome["stopped_because"] == "nothing left to ask", outcome)
+    used = rows("preowned")
+    check("and the row now shows the used copy", used["N-3"] == ("N-3-R", None), used)
+
+    wipe()
+    db.close()
+
+
 def test_the_sampler_can_actually_spend_its_budget() -> None:
     print("\n== The shelf sampler is not starved by its own arithmetic ==")
     from app.config import settings
@@ -8308,6 +8706,8 @@ def main() -> int:
     test_an_instance_can_say_which_build_it_is()
     test_a_wishlist_leads_with_what_just_turned_up()
     test_the_version_is_the_day_it_was_built()
+    test_each_copy_says_what_the_shop_says_about_it()
+    test_a_wishlist_can_be_read_as_used()
     test_each_channel_takes_the_alerts_it_asked_for()
     test_the_survival_curve_keeps_the_slow_copies_in()
     test_the_bargain_is_only_counted_where_there_was_a_choice()

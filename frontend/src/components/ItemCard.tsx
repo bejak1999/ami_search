@@ -79,6 +79,8 @@ export interface ItemCardProps {
   compact?: boolean
   /** What the last price check found, when one has been run for this figure. */
   priceChange?: PriceChange | null
+  /** A short line under the name, for when the card shows a figure's other listing. */
+  hint?: string
 }
 
 export function ItemCard({
@@ -88,6 +90,7 @@ export function ItemCard({
   onWishlist,
   compact,
   priceChange,
+  hint,
 }: ItemCardProps) {
   const [imageFailed, setImageFailed] = useState(false)
   const { cardShape } = useTheme()
@@ -213,6 +216,8 @@ export function ItemCard({
         >
           {tidyName(item.name)}
         </h3>
+
+        {hint && <p className="-mt-1 text-[11px] font-medium text-muted">{hint}</p>}
 
         {!compact && (item.maker || item.series) && (
           <p className="-mt-1 truncate text-[11px] text-faint">{item.series || item.maker}</p>

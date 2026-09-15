@@ -358,6 +358,7 @@ def reconcile(
     observed_at: datetime | None = None,
     commit: bool = False,
     sold_out: bool = False,
+    asked_code: str | None = None,
 ) -> ReconcileResult:
     """Match one detail fetch's copies against what we already knew.
 
@@ -370,6 +371,10 @@ def reconcile(
     A copy that comes back after vanishing - a cancelled order, a re-grade -
     starts a fresh spell on the same row rather than being counted as a brand
     new copy with zero days behind it.
+
+    ``asked_code`` is the copy the shop actually described in this response.
+    Its note, or the absence of one, is an answer; every other copy came back
+    without remarks and has still not been asked.
     """
     observed_at = _as_aware(observed_at) or utcnow()
     result = ReconcileResult()
@@ -422,6 +427,7 @@ def reconcile(
                 item_grade=variant.get("item_grade"),
                 box_grade=variant.get("box_grade"),
                 condition_note=variant.get("note"),
+                note_checked_at=observed_at if code == asked_code else None,
                 appeared_after=item.prev_detail_fetch_at,
                 first_seen_at=observed_at,
                 last_seen_at=observed_at,
@@ -467,6 +473,8 @@ def reconcile(
         # is written when there is one and never cleared by its absence.
         if variant.get("note"):
             listing.condition_note = variant["note"]
+        if code == asked_code:
+            listing.note_checked_at = observed_at
         if price is not None and price != listing.last_price:
             listing.last_price = price
             db.add(

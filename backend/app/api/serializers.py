@@ -10,6 +10,7 @@ from ..models import (
     CollectionEntry,
     CostProfile,
     Item,
+    Listing,
     User,
     Watch,
     WatchSeenItem,
@@ -149,6 +150,34 @@ def item_from_normalized(
 from ..services.catalog import counterpart_code  # noqa: E402
 
 
+def _variants_with_notes(db: Session, item) -> list[dict]:
+    """The graded copies, each with whatever the shop has said about it.
+
+    The copy list is rewritten on every product fetch, and the shop fills in
+    the note of only the one copy that response describes. Read from there
+    alone, a note found yesterday vanished today because the shop happened to
+    describe a different copy. Each copy's note is kept on its own row, so it
+    is read back from there.
+    """
+    variants = [dict(v) for v in (item.variants or []) if isinstance(v, dict)]
+    missing = [v["code"] for v in variants if v.get("code") and not v.get("note")]
+    if not missing:
+        return variants
+    notes = dict(
+        db.execute(
+            select(Listing.code, Listing.condition_note).where(
+                Listing.provider == item.provider,
+                Listing.code.in_(missing),
+                Listing.condition_note.is_not(None),
+            )
+        ).all()
+    )
+    for variant in variants:
+        if not variant.get("note") and notes.get(variant.get("code")):
+            variant["note"] = notes[variant["code"]]
+    return variants
+
+
 def _shop_notes_of(item) -> list[dict]:
     """Split a stored note back into its tagged statements.
 
@@ -198,7 +227,7 @@ def item_out(
         currency=item.currency,
         price=item.current_price,
         price_max=item.price_max,
-        variants=item.variants or [],
+        variants=_variants_with_notes(db, item),
         dwell_days=item.dwell_days,
         dwell_basis=item.dwell_basis,
         dwell_samples=item.dwell_samples or 0,

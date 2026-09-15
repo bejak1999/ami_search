@@ -94,7 +94,12 @@ def dashboard(
     # Saved figures that are buyable in either condition. Matching only the
     # listing that was saved meant a figure you wishlisted as new never showed
     # up here when it came back second-hand, which is most of the time.
-    cheapest = catalog.wishlist_available(db, user.id, limit=6)
+    #
+    # In the condition the wishlist page is set to, so the two screens agree
+    # about which listing of a figure they are talking about.
+    cheapest = catalog.wishlist_available(
+        db, user.id, limit=6, prefer=catalog.preferred_condition(user)
+    )
     register_images(db, cheapest)
 
     recent = db.execute(

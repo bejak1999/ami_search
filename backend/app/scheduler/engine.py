@@ -26,6 +26,7 @@ from ..services import (
     catalog,
     crawler,
     dealradar,
+    details,
     digest,
     enrich,
     fx,
@@ -64,6 +65,7 @@ class PollingEngine:
         self.shelf_checked_total = 0
         self.shelf_vanished_total = 0
         self.last_shelfwatch: dict | None = None
+        self.last_details: dict | None = None
         #: Set on shutdown so long-running work can bail at a safe boundary.
         self.stopping = False
 
@@ -130,6 +132,19 @@ class PollingEngine:
                 coalesce=True,
                 next_run_time=datetime.now(timezone.utc) + timedelta(minutes=4),
             )
+
+        # Complete the figures somebody saved: the used listing of a figure
+        # saved as new, and the note on each copy, which the shop only gives
+        # when that copy is asked for by its own code.
+        self.scheduler.add_job(
+            self.run_details,
+            "interval",
+            minutes=10,
+            id="wishlist_details",
+            max_instances=1,
+            coalesce=True,
+            next_run_time=datetime.now(timezone.utc) + timedelta(minutes=6),
+        )
 
         # MyFigureCollection is scraped slowly and steadily in the background,
         # so the tag index fills in without ever bursting on that site.
@@ -312,6 +327,14 @@ class PollingEngine:
             self.last_shelfwatch = outcome.as_dict()
         except Exception:  # noqa: BLE001
             log.exception("Shelf-life sampling failed")
+
+    def run_details(self) -> None:
+        try:
+            with session_scope() as db:
+                with reqlog.purpose("wishlist"), budget.claim("wishlist"):
+                    self.last_details = details.run_once(db)
+        except Exception:  # noqa: BLE001
+            log.exception("Filling in wishlist details failed")
 
     def run_enrichment(self) -> None:
         try:

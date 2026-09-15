@@ -98,6 +98,9 @@ def init_db() -> None:
     dated = backfill_became_buyable()
     if dated:
         log.info("Dated when %s saved figure(s) last became buyable", dated)
+    asked = backfill_note_checked()
+    if asked:
+        log.info("Marked %s copy(ies) with a note as already asked about", asked)
     stranded = close_stranded_listings()
     if stranded:
         log.info(
@@ -281,6 +284,35 @@ def reclassify_gallery_photos() -> int:
             )
         except Exception:  # pragma: no cover - table may not exist yet
             return 0
+
+
+def backfill_note_checked() -> int:
+    """Count a copy that already carries a note as asked about.
+
+    The shop only returns a copy's note when that copy is what it describes,
+    so any copy holding one was asked at some point. Without this every one of
+    them would be asked again the day the per-copy check arrives, spending the
+    allowance on answers already in the database. Copies with no note are left
+    alone: for those the silence is exactly what has to be found out.
+    """
+    from . import models
+
+    with session_scope() as db:
+        try:
+            rows = (
+                db.query(models.Listing)
+                .filter(
+                    models.Listing.note_checked_at.is_(None),
+                    models.Listing.condition_note.is_not(None),
+                    models.Listing.condition_note != "",
+                )
+                .all()
+            )
+        except Exception:  # pragma: no cover - the column may predate this
+            return 0
+        for row in rows:
+            row.note_checked_at = row.last_seen_at or row.first_seen_at
+        return len(rows)
 
 
 def backfill_became_buyable() -> int:
